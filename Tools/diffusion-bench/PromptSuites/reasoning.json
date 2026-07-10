@@ -1,0 +1,21 @@
+{
+  "name": "reasoning",
+  "prompts": [
+    {
+      "id": "reason-trains",
+      "user": "Two trains are 240 km apart and drive toward each other, one at 70 km/h and one at 50 km/h. After how many hours do they meet? Show your reasoning briefly."
+    },
+    {
+      "id": "reason-ages",
+      "user": "Anna is twice as old as Ben was when Anna was as old as Ben is now. Anna is 24 and Ben is 18. Check whether this statement is consistent and explain."
+    },
+    {
+      "id": "reason-logic",
+      "user": "All roses are flowers. Some flowers fade quickly. Does it follow that some roses fade quickly? Answer yes or no and justify in two sentences."
+    },
+    {
+      "id": "reason-units",
+      "user": "A recipe needs 3/4 cup of milk. I only have a 1/3-cup measure. How many times must I fill it, and how much do I overshoot or undershoot?"
+    }
+  ]
+}

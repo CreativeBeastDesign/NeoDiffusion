@@ -1,0 +1,651 @@
+// !$*UTF8*$!
+{
+	archiveVersion = 1;
+	classes = {
+	};
+	objectVersion = 77;
+	objects = {
+
+/* Begin PBXBuildFile section */
+		CCF270FC2EA91BA700E2550A /* DiffusionGeneration in Frameworks */ = {isa = PBXBuildFile; productRef = CCF270FB2EA91BA700E2550A /* DiffusionGeneration */; };
+		CC53CEBB2EA51B740018DD50 /* MLX in Frameworks */ = {isa = PBXBuildFile; productRef = CC53CEBA2EA51B740018DD50 /* MLX */; };
+		CC53CEBD2EA51B740018DD50 /* MLXNN in Frameworks */ = {isa = PBXBuildFile; productRef = CC53CEBC2EA51B740018DD50 /* MLXNN */; };
+		CC53CEBF2EA51B740018DD50 /* MLXRandom in Frameworks */ = {isa = PBXBuildFile; productRef = CC53CEBE2EA51B740018DD50 /* MLXRandom */; };
+		CCF270FA2EA91BA700E2550A /* DiffusionCore in Frameworks */ = {isa = PBXBuildFile; productRef = CCF270F92EA91BA700E2550A /* DiffusionCore */; };
+		CCF271072EABCBD200E2550A /* Tokenizers in Frameworks */ = {isa = PBXBuildFile; productRef = CCF271062EABCBD200E2550A /* Tokenizers */; };
+/* End PBXBuildFile section */
+
+/* Begin PBXContainerItemProxy section */
+		CC53CE9B2EA51A7B0018DD50 /* PBXContainerItemProxy */ = {
+			isa = PBXContainerItemProxy;
+			containerPortal = CC53CE842EA51A790018DD50 /* Project object */;
+			proxyType = 1;
+			remoteGlobalIDString = CC53CE8B2EA51A790018DD50;
+			remoteInfo = Diffusion;
+		};
+		CC53CEA52EA51A7B0018DD50 /* PBXContainerItemProxy */ = {
+			isa = PBXContainerItemProxy;
+			containerPortal = CC53CE842EA51A790018DD50 /* Project object */;
+			proxyType = 1;
+			remoteGlobalIDString = CC53CE8B2EA51A790018DD50;
+			remoteInfo = Diffusion;
+		};
+/* End PBXContainerItemProxy section */
+
+/* Begin PBXFileReference section */
+		CC53CE8C2EA51A790018DD50 /* Diffusion.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = Diffusion.app; sourceTree = BUILT_PRODUCTS_DIR; };
+		CC53CE9A2EA51A7B0018DD50 /* DiffusionTests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = DiffusionTests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
+		CC53CEA42EA51A7B0018DD50 /* DiffusionUITests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = DiffusionUITests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
+/* End PBXFileReference section */
+
+/* Begin PBXFileSystemSynchronizedBuildFileExceptionSet section */
+		CC53CEE42EA557710018DD50 /* Exceptions for "Packages" folder in "Diffusion" target */ = {
+			isa = PBXFileSystemSynchronizedBuildFileExceptionSet;
+			membershipExceptions = (
+				ModelAdapters,
+			);
+			target = CC53CE8B2EA51A790018DD50 /* Diffusion */;
+		};
+/* End PBXFileSystemSynchronizedBuildFileExceptionSet section */
+
+/* Begin PBXFileSystemSynchronizedRootGroup section */
+		CC53CE8E2EA51A790018DD50 /* Diffusion */ = {
+			isa = PBXFileSystemSynchronizedRootGroup;
+			path = App/Diffusion;
+			sourceTree = "<group>";
+		};
+		CC53CE9D2EA51A7B0018DD50 /* DiffusionTests */ = {
+			isa = PBXFileSystemSynchronizedRootGroup;
+			path = App/DiffusionTests;
+			sourceTree = "<group>";
+		};
+		CC53CEA72EA51A7B0018DD50 /* DiffusionUITests */ = {
+			isa = PBXFileSystemSynchronizedRootGroup;
+			path = App/DiffusionUITests;
+			sourceTree = "<group>";
+		};
+		CC53CED92EA554F90018DD50 /* Packages */ = {
+			isa = PBXFileSystemSynchronizedRootGroup;
+			exceptions = (
+				CC53CEE42EA557710018DD50 /* Exceptions for "Packages" folder in "Diffusion" target */,
+			);
+			path = Packages;
+			sourceTree = "<group>";
+		};
+/* End PBXFileSystemSynchronizedRootGroup section */
+
+/* Begin PBXFrameworksBuildPhase section */
+		CC53CE892EA51A790018DD50 /* Frameworks */ = {
+			isa = PBXFrameworksBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				CCF270FC2EA91BA700E2550A /* DiffusionGeneration in Frameworks */,
+				CC53CEBD2EA51B740018DD50 /* MLXNN in Frameworks */,
+				CCF270FA2EA91BA700E2550A /* DiffusionCore in Frameworks */,
+				CC53CEBF2EA51B740018DD50 /* MLXRandom in Frameworks */,
+				CC53CEBB2EA51B740018DD50 /* MLX in Frameworks */,
+				CCF271072EABCBD200E2550A /* Tokenizers in Frameworks */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		CC53CE972EA51A7B0018DD50 /* Frameworks */ = {
+			isa = PBXFrameworksBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		CC53CEA12EA51A7B0018DD50 /* Frameworks */ = {
+			isa = PBXFrameworksBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+/* End PBXFrameworksBuildPhase section */
+
+/* Begin PBXGroup section */
+		CC53CE832EA51A790018DD50 = {
+			isa = PBXGroup;
+			children = (
+				CC53CED92EA554F90018DD50 /* Packages */,
+				CC53CE8E2EA51A790018DD50 /* Diffusion */,
+				CC53CE9D2EA51A7B0018DD50 /* DiffusionTests */,
+				CC53CEA72EA51A7B0018DD50 /* DiffusionUITests */,
+				CC53CE8D2EA51A790018DD50 /* Products */,
+			);
+			sourceTree = "<group>";
+		};
+		CC53CE8D2EA51A790018DD50 /* Products */ = {
+			isa = PBXGroup;
+			children = (
+				CC53CE8C2EA51A790018DD50 /* Diffusion.app */,
+				CC53CE9A2EA51A7B0018DD50 /* DiffusionTests.xctest */,
+				CC53CEA42EA51A7B0018DD50 /* DiffusionUITests.xctest */,
+			);
+			name = Products;
+			sourceTree = "<group>";
+		};
+/* End PBXGroup section */
+
+/* Begin PBXNativeTarget section */
+		CC53CE8B2EA51A790018DD50 /* Diffusion */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = CC53CEAE2EA51A7B0018DD50 /* Build configuration list for PBXNativeTarget "Diffusion" */;
+			buildPhases = (
+				CC53CE882EA51A790018DD50 /* Sources */,
+				CC53CE892EA51A790018DD50 /* Frameworks */,
+				CC53CE8A2EA51A790018DD50 /* Resources */,
+			);
+			buildRules = (
+			);
+			dependencies = (
+			);
+			fileSystemSynchronizedGroups = (
+				CC53CE8E2EA51A790018DD50 /* Diffusion */,
+				CC53CED92EA554F90018DD50 /* Packages */,
+			);
+			name = Diffusion;
+			packageProductDependencies = (
+				CCF270FB2EA91BA700E2550A /* DiffusionGeneration */,
+				CC53CEBA2EA51B740018DD50 /* MLX */,
+				CC53CEBC2EA51B740018DD50 /* MLXNN */,
+				CC53CEBE2EA51B740018DD50 /* MLXRandom */,
+				CCF270F92EA91BA700E2550A /* DiffusionCore */,
+				CCF271062EABCBD200E2550A /* Tokenizers */,
+			);
+			productName = Diffusion;
+			productReference = CC53CE8C2EA51A790018DD50 /* Diffusion.app */;
+			productType = "com.apple.product-type.application";
+		};
+		CC53CE992EA51A7B0018DD50 /* DiffusionTests */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = CC53CEB12EA51A7B0018DD50 /* Build configuration list for PBXNativeTarget "DiffusionTests" */;
+			buildPhases = (
+				CC53CE962EA51A7B0018DD50 /* Sources */,
+				CC53CE972EA51A7B0018DD50 /* Frameworks */,
+				CC53CE982EA51A7B0018DD50 /* Resources */,
+			);
+			buildRules = (
+			);
+			dependencies = (
+				CC53CE9C2EA51A7B0018DD50 /* PBXTargetDependency */,
+			);
+			fileSystemSynchronizedGroups = (
+				CC53CE9D2EA51A7B0018DD50 /* DiffusionTests */,
+			);
+			name = DiffusionTests;
+			packageProductDependencies = (
+			);
+			productName = DiffusionTests;
+			productReference = CC53CE9A2EA51A7B0018DD50 /* DiffusionTests.xctest */;
+			productType = "com.apple.product-type.bundle.unit-test";
+		};
+		CC53CEA32EA51A7B0018DD50 /* DiffusionUITests */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = CC53CEB42EA51A7B0018DD50 /* Build configuration list for PBXNativeTarget "DiffusionUITests" */;
+			buildPhases = (
+				CC53CEA02EA51A7B0018DD50 /* Sources */,
+				CC53CEA12EA51A7B0018DD50 /* Frameworks */,
+				CC53CEA22EA51A7B0018DD50 /* Resources */,
+			);
+			buildRules = (
+			);
+			dependencies = (
+				CC53CEA62EA51A7B0018DD50 /* PBXTargetDependency */,
+			);
+			fileSystemSynchronizedGroups = (
+				CC53CEA72EA51A7B0018DD50 /* DiffusionUITests */,
+			);
+			name = DiffusionUITests;
+			packageProductDependencies = (
+			);
+			productName = DiffusionUITests;
+			productReference = CC53CEA42EA51A7B0018DD50 /* DiffusionUITests.xctest */;
+			productType = "com.apple.product-type.bundle.ui-testing";
+		};
+/* End PBXNativeTarget section */
+
+/* Begin PBXProject section */
+		CC53CE842EA51A790018DD50 /* Project object */ = {
+			isa = PBXProject;
+			attributes = {
+				BuildIndependentTargetsInParallel = 1;
+				LastSwiftUpdateCheck = 1640;
+				LastUpgradeCheck = 1640;
+				TargetAttributes = {
+					CC53CE8B2EA51A790018DD50 = {
+						CreatedOnToolsVersion = 16.4;
+					};
+					CC53CE992EA51A7B0018DD50 = {
+						CreatedOnToolsVersion = 16.4;
+						TestTargetID = CC53CE8B2EA51A790018DD50;
+					};
+					CC53CEA32EA51A7B0018DD50 = {
+						CreatedOnToolsVersion = 16.4;
+						TestTargetID = CC53CE8B2EA51A790018DD50;
+					};
+				};
+			};
+			buildConfigurationList = CC53CE872EA51A790018DD50 /* Build configuration list for PBXProject "Diffusion" */;
+			developmentRegion = en;
+			hasScannedForEncodings = 0;
+			knownRegions = (
+				en,
+				Base,
+			);
+			mainGroup = CC53CE832EA51A790018DD50;
+			minimizedProjectReferenceProxies = 1;
+			packageReferences = (
+				CC53CEB92EA51B740018DD50 /* XCRemoteSwiftPackageReference "mlx-swift" */,
+				CCF270F72EA9162900E2550A /* XCLocalSwiftPackageReference "." */,
+				CCF271052EABCBD200E2550A /* XCRemoteSwiftPackageReference "swift-transformers" */,
+			);
+			preferredProjectObjectVersion = 77;
+			productRefGroup = CC53CE8D2EA51A790018DD50 /* Products */;
+			projectDirPath = "";
+			projectRoot = "";
+			targets = (
+				CC53CE8B2EA51A790018DD50 /* Diffusion */,
+				CC53CE992EA51A7B0018DD50 /* DiffusionTests */,
+				CC53CEA32EA51A7B0018DD50 /* DiffusionUITests */,
+			);
+		};
+/* End PBXProject section */
+
+/* Begin PBXResourcesBuildPhase section */
+		CC53CE8A2EA51A790018DD50 /* Resources */ = {
+			isa = PBXResourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		CC53CE982EA51A7B0018DD50 /* Resources */ = {
+			isa = PBXResourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		CC53CEA22EA51A7B0018DD50 /* Resources */ = {
+			isa = PBXResourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+/* End PBXResourcesBuildPhase section */
+
+/* Begin PBXSourcesBuildPhase section */
+		CC53CE882EA51A790018DD50 /* Sources */ = {
+			isa = PBXSourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		CC53CE962EA51A7B0018DD50 /* Sources */ = {
+			isa = PBXSourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		CC53CEA02EA51A7B0018DD50 /* Sources */ = {
+			isa = PBXSourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+/* End PBXSourcesBuildPhase section */
+
+/* Begin PBXTargetDependency section */
+		CC53CE9C2EA51A7B0018DD50 /* PBXTargetDependency */ = {
+			isa = PBXTargetDependency;
+			target = CC53CE8B2EA51A790018DD50 /* Diffusion */;
+			targetProxy = CC53CE9B2EA51A7B0018DD50 /* PBXContainerItemProxy */;
+		};
+		CC53CEA62EA51A7B0018DD50 /* PBXTargetDependency */ = {
+			isa = PBXTargetDependency;
+			target = CC53CE8B2EA51A790018DD50 /* Diffusion */;
+			targetProxy = CC53CEA52EA51A7B0018DD50 /* PBXContainerItemProxy */;
+		};
+/* End PBXTargetDependency section */
+
+/* Begin XCBuildConfiguration section */
+		CC53CEAC2EA51A7B0018DD50 /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ALWAYS_SEARCH_USER_PATHS = NO;
+				ASSETCATALOG_COMPILER_GENERATE_SWIFT_ASSET_SYMBOL_EXTENSIONS = YES;
+				CLANG_ANALYZER_NONNULL = YES;
+				CLANG_ANALYZER_NUMBER_OBJECT_CONVERSION = YES_AGGRESSIVE;
+				CLANG_CXX_LANGUAGE_STANDARD = "gnu++20";
+				CLANG_ENABLE_MODULES = YES;
+				CLANG_ENABLE_OBJC_ARC = YES;
+				CLANG_ENABLE_OBJC_WEAK = YES;
+				CLANG_WARN_BLOCK_CAPTURE_AUTORELEASING = YES;
+				CLANG_WARN_BOOL_CONVERSION = YES;
+				CLANG_WARN_COMMA = YES;
+				CLANG_WARN_CONSTANT_CONVERSION = YES;
+				CLANG_WARN_DEPRECATED_OBJC_IMPLEMENTATIONS = YES;
+				CLANG_WARN_DIRECT_OBJC_ISA_USAGE = YES_ERROR;
+				CLANG_WARN_DOCUMENTATION_COMMENTS = YES;
+				CLANG_WARN_EMPTY_BODY = YES;
+				CLANG_WARN_ENUM_CONVERSION = YES;
+				CLANG_WARN_INFINITE_RECURSION = YES;
+				CLANG_WARN_INT_CONVERSION = YES;
+				CLANG_WARN_NON_LITERAL_NULL_CONVERSION = YES;
+				CLANG_WARN_OBJC_IMPLICIT_RETAIN_SELF = YES;
+				CLANG_WARN_OBJC_LITERAL_CONVERSION = YES;
+				CLANG_WARN_OBJC_ROOT_CLASS = YES_ERROR;
+				CLANG_WARN_QUOTED_INCLUDE_IN_FRAMEWORK_HEADER = YES;
+				CLANG_WARN_RANGE_LOOP_ANALYSIS = YES;
+				CLANG_WARN_STRICT_PROTOTYPES = YES;
+				CLANG_WARN_SUSPICIOUS_MOVE = YES;
+				CLANG_WARN_UNGUARDED_AVAILABILITY = YES_AGGRESSIVE;
+				CLANG_WARN_UNREACHABLE_CODE = YES;
+				CLANG_WARN__DUPLICATE_METHOD_MATCH = YES;
+				COPY_PHASE_STRIP = NO;
+				DEBUG_INFORMATION_FORMAT = dwarf;
+				ENABLE_STRICT_OBJC_MSGSEND = YES;
+				ENABLE_TESTABILITY = YES;
+				ENABLE_USER_SCRIPT_SANDBOXING = YES;
+				GCC_C_LANGUAGE_STANDARD = gnu17;
+				GCC_DYNAMIC_NO_PIC = NO;
+				GCC_NO_COMMON_BLOCKS = YES;
+				GCC_OPTIMIZATION_LEVEL = 0;
+				GCC_PREPROCESSOR_DEFINITIONS = (
+					"DEBUG=1",
+					"$(inherited)",
+				);
+				GCC_WARN_64_TO_32_BIT_CONVERSION = YES;
+				GCC_WARN_ABOUT_RETURN_TYPE = YES_ERROR;
+				GCC_WARN_UNDECLARED_SELECTOR = YES;
+				GCC_WARN_UNINITIALIZED_AUTOS = YES_AGGRESSIVE;
+				GCC_WARN_UNUSED_FUNCTION = YES;
+				GCC_WARN_UNUSED_VARIABLE = YES;
+				LOCALIZATION_PREFERS_STRING_CATALOGS = YES;
+				MACOSX_DEPLOYMENT_TARGET = 15.5;
+				MTL_ENABLE_DEBUG_INFO = INCLUDE_SOURCE;
+				MTL_FAST_MATH = YES;
+				ONLY_ACTIVE_ARCH = YES;
+				SDKROOT = macosx;
+				SWIFT_ACTIVE_COMPILATION_CONDITIONS = "DEBUG $(inherited)";
+				SWIFT_OPTIMIZATION_LEVEL = "-Onone";
+			};
+			name = Debug;
+		};
+		CC53CEAD2EA51A7B0018DD50 /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ALWAYS_SEARCH_USER_PATHS = NO;
+				ASSETCATALOG_COMPILER_GENERATE_SWIFT_ASSET_SYMBOL_EXTENSIONS = YES;
+				CLANG_ANALYZER_NONNULL = YES;
+				CLANG_ANALYZER_NUMBER_OBJECT_CONVERSION = YES_AGGRESSIVE;
+				CLANG_CXX_LANGUAGE_STANDARD = "gnu++20";
+				CLANG_ENABLE_MODULES = YES;
+				CLANG_ENABLE_OBJC_ARC = YES;
+				CLANG_ENABLE_OBJC_WEAK = YES;
+				CLANG_WARN_BLOCK_CAPTURE_AUTORELEASING = YES;
+				CLANG_WARN_BOOL_CONVERSION = YES;
+				CLANG_WARN_COMMA = YES;
+				CLANG_WARN_CONSTANT_CONVERSION = YES;
+				CLANG_WARN_DEPRECATED_OBJC_IMPLEMENTATIONS = YES;
+				CLANG_WARN_DIRECT_OBJC_ISA_USAGE = YES_ERROR;
+				CLANG_WARN_DOCUMENTATION_COMMENTS = YES;
+				CLANG_WARN_EMPTY_BODY = YES;
+				CLANG_WARN_ENUM_CONVERSION = YES;
+				CLANG_WARN_INFINITE_RECURSION = YES;
+				CLANG_WARN_INT_CONVERSION = YES;
+				CLANG_WARN_NON_LITERAL_NULL_CONVERSION = YES;
+				CLANG_WARN_OBJC_IMPLICIT_RETAIN_SELF = YES;
+				CLANG_WARN_OBJC_LITERAL_CONVERSION = YES;
+				CLANG_WARN_OBJC_ROOT_CLASS = YES_ERROR;
+				CLANG_WARN_QUOTED_INCLUDE_IN_FRAMEWORK_HEADER = YES;
+				CLANG_WARN_RANGE_LOOP_ANALYSIS = YES;
+				CLANG_WARN_STRICT_PROTOTYPES = YES;
+				CLANG_WARN_SUSPICIOUS_MOVE = YES;
+				CLANG_WARN_UNGUARDED_AVAILABILITY = YES_AGGRESSIVE;
+				CLANG_WARN_UNREACHABLE_CODE = YES;
+				CLANG_WARN__DUPLICATE_METHOD_MATCH = YES;
+				COPY_PHASE_STRIP = NO;
+				DEBUG_INFORMATION_FORMAT = "dwarf-with-dsym";
+				ENABLE_NS_ASSERTIONS = NO;
+				ENABLE_STRICT_OBJC_MSGSEND = YES;
+				ENABLE_USER_SCRIPT_SANDBOXING = YES;
+				GCC_C_LANGUAGE_STANDARD = gnu17;
+				GCC_NO_COMMON_BLOCKS = YES;
+				GCC_WARN_64_TO_32_BIT_CONVERSION = YES;
+				GCC_WARN_ABOUT_RETURN_TYPE = YES_ERROR;
+				GCC_WARN_UNDECLARED_SELECTOR = YES;
+				GCC_WARN_UNINITIALIZED_AUTOS = YES_AGGRESSIVE;
+				GCC_WARN_UNUSED_FUNCTION = YES;
+				GCC_WARN_UNUSED_VARIABLE = YES;
+				LOCALIZATION_PREFERS_STRING_CATALOGS = YES;
+				MACOSX_DEPLOYMENT_TARGET = 15.5;
+				MTL_ENABLE_DEBUG_INFO = NO;
+				MTL_FAST_MATH = YES;
+				SDKROOT = macosx;
+				SWIFT_COMPILATION_MODE = wholemodule;
+			};
+			name = Release;
+		};
+		CC53CEAF2EA51A7B0018DD50 /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
+				ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME = AccentColor;
+				CODE_SIGN_ENTITLEMENTS = App/Diffusion/Diffusion.entitlements;
+				CODE_SIGN_STYLE = Automatic;
+				COMBINE_HIDPI_IMAGES = YES;
+				CURRENT_PROJECT_VERSION = 1;
+				ENABLE_PREVIEWS = YES;
+				GENERATE_INFOPLIST_FILE = YES;
+				INFOPLIST_KEY_NSHumanReadableCopyright = "";
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/../Frameworks",
+				);
+				MARKETING_VERSION = 1.0;
+				PRODUCT_BUNDLE_IDENTIFIER = Comp.Diffusion;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				REGISTER_APP_GROUPS = YES;
+				SWIFT_EMIT_LOC_STRINGS = YES;
+				SWIFT_VERSION = 5.0;
+			};
+			name = Debug;
+		};
+		CC53CEB02EA51A7B0018DD50 /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
+				ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME = AccentColor;
+				CODE_SIGN_ENTITLEMENTS = App/Diffusion/Diffusion.entitlements;
+				CODE_SIGN_STYLE = Automatic;
+				COMBINE_HIDPI_IMAGES = YES;
+				CURRENT_PROJECT_VERSION = 1;
+				ENABLE_PREVIEWS = YES;
+				GENERATE_INFOPLIST_FILE = YES;
+				INFOPLIST_KEY_NSHumanReadableCopyright = "";
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/../Frameworks",
+				);
+				MARKETING_VERSION = 1.0;
+				PRODUCT_BUNDLE_IDENTIFIER = Comp.Diffusion;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				REGISTER_APP_GROUPS = YES;
+				SWIFT_EMIT_LOC_STRINGS = YES;
+				SWIFT_VERSION = 5.0;
+			};
+			name = Release;
+		};
+		CC53CEB22EA51A7B0018DD50 /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				BUNDLE_LOADER = "$(TEST_HOST)";
+				CODE_SIGN_STYLE = Automatic;
+				CURRENT_PROJECT_VERSION = 1;
+				GENERATE_INFOPLIST_FILE = YES;
+				MACOSX_DEPLOYMENT_TARGET = 15.5;
+				MARKETING_VERSION = 1.0;
+				PRODUCT_BUNDLE_IDENTIFIER = Comp.DiffusionTests;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SWIFT_EMIT_LOC_STRINGS = NO;
+				SWIFT_VERSION = 5.0;
+				TEST_HOST = "$(BUILT_PRODUCTS_DIR)/Diffusion.app/$(BUNDLE_EXECUTABLE_FOLDER_PATH)/Diffusion";
+			};
+			name = Debug;
+		};
+		CC53CEB32EA51A7B0018DD50 /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				BUNDLE_LOADER = "$(TEST_HOST)";
+				CODE_SIGN_STYLE = Automatic;
+				CURRENT_PROJECT_VERSION = 1;
+				GENERATE_INFOPLIST_FILE = YES;
+				MACOSX_DEPLOYMENT_TARGET = 15.5;
+				MARKETING_VERSION = 1.0;
+				PRODUCT_BUNDLE_IDENTIFIER = Comp.DiffusionTests;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SWIFT_EMIT_LOC_STRINGS = NO;
+				SWIFT_VERSION = 5.0;
+				TEST_HOST = "$(BUILT_PRODUCTS_DIR)/Diffusion.app/$(BUNDLE_EXECUTABLE_FOLDER_PATH)/Diffusion";
+			};
+			name = Release;
+		};
+		CC53CEB52EA51A7B0018DD50 /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				CODE_SIGN_STYLE = Automatic;
+				CURRENT_PROJECT_VERSION = 1;
+				GENERATE_INFOPLIST_FILE = YES;
+				MARKETING_VERSION = 1.0;
+				PRODUCT_BUNDLE_IDENTIFIER = Comp.DiffusionUITests;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SWIFT_EMIT_LOC_STRINGS = NO;
+				SWIFT_VERSION = 5.0;
+				TEST_TARGET_NAME = Diffusion;
+			};
+			name = Debug;
+		};
+		CC53CEB62EA51A7B0018DD50 /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				CODE_SIGN_STYLE = Automatic;
+				CURRENT_PROJECT_VERSION = 1;
+				GENERATE_INFOPLIST_FILE = YES;
+				MARKETING_VERSION = 1.0;
+				PRODUCT_BUNDLE_IDENTIFIER = Comp.DiffusionUITests;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SWIFT_EMIT_LOC_STRINGS = NO;
+				SWIFT_VERSION = 5.0;
+				TEST_TARGET_NAME = Diffusion;
+			};
+			name = Release;
+		};
+/* End XCBuildConfiguration section */
+
+/* Begin XCConfigurationList section */
+		CC53CE872EA51A790018DD50 /* Build configuration list for PBXProject "Diffusion" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				CC53CEAC2EA51A7B0018DD50 /* Debug */,
+				CC53CEAD2EA51A7B0018DD50 /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Release;
+		};
+		CC53CEAE2EA51A7B0018DD50 /* Build configuration list for PBXNativeTarget "Diffusion" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				CC53CEAF2EA51A7B0018DD50 /* Debug */,
+				CC53CEB02EA51A7B0018DD50 /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Release;
+		};
+		CC53CEB12EA51A7B0018DD50 /* Build configuration list for PBXNativeTarget "DiffusionTests" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				CC53CEB22EA51A7B0018DD50 /* Debug */,
+				CC53CEB32EA51A7B0018DD50 /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Release;
+		};
+		CC53CEB42EA51A7B0018DD50 /* Build configuration list for PBXNativeTarget "DiffusionUITests" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				CC53CEB52EA51A7B0018DD50 /* Debug */,
+				CC53CEB62EA51A7B0018DD50 /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Release;
+		};
+/* End XCConfigurationList section */
+
+/* Begin XCLocalSwiftPackageReference section */
+		CCF270F72EA9162900E2550A /* XCLocalSwiftPackageReference "." */ = {
+			isa = XCLocalSwiftPackageReference;
+			relativePath = .;
+		};
+/* End XCLocalSwiftPackageReference section */
+
+/* Begin XCRemoteSwiftPackageReference section */
+		CC53CEB92EA51B740018DD50 /* XCRemoteSwiftPackageReference "mlx-swift" */ = {
+			isa = XCRemoteSwiftPackageReference;
+			repositoryURL = "https://github.com/ml-explore/mlx-swift.git";
+			requirement = {
+				kind = upToNextMajorVersion;
+				minimumVersion = 0.29.1;
+			};
+		};
+		CCF271052EABCBD200E2550A /* XCRemoteSwiftPackageReference "swift-transformers" */ = {
+			isa = XCRemoteSwiftPackageReference;
+			repositoryURL = "https://github.com/huggingface/swift-transformers";
+			requirement = {
+				kind = upToNextMajorVersion;
+				minimumVersion = 1.1.1;
+			};
+		};
+/* End XCRemoteSwiftPackageReference section */
+
+/* Begin XCSwiftPackageProductDependency section */
+		CC53CEBA2EA51B740018DD50 /* MLX */ = {
+			isa = XCSwiftPackageProductDependency;
+			package = CC53CEB92EA51B740018DD50 /* XCRemoteSwiftPackageReference "mlx-swift" */;
+			productName = MLX;
+		};
+		CC53CEBC2EA51B740018DD50 /* MLXNN */ = {
+			isa = XCSwiftPackageProductDependency;
+			package = CC53CEB92EA51B740018DD50 /* XCRemoteSwiftPackageReference "mlx-swift" */;
+			productName = MLXNN;
+		};
+		CC53CEBE2EA51B740018DD50 /* MLXRandom */ = {
+			isa = XCSwiftPackageProductDependency;
+			package = CC53CEB92EA51B740018DD50 /* XCRemoteSwiftPackageReference "mlx-swift" */;
+			productName = MLXRandom;
+		};
+		CCF270F92EA91BA700E2550A /* DiffusionCore */ = {
+			isa = XCSwiftPackageProductDependency;
+			package = CCF270F72EA9162900E2550A /* XCLocalSwiftPackageReference "." */;
+			productName = DiffusionCore;
+		};
+		CCF270FB2EA91BA700E2550A /* DiffusionGeneration */ = {
+			isa = XCSwiftPackageProductDependency;
+			package = CCF270F72EA9162900E2550A /* XCLocalSwiftPackageReference "." */;
+			productName = DiffusionGeneration;
+		};
+		CCF271062EABCBD200E2550A /* Tokenizers */ = {
+			isa = XCSwiftPackageProductDependency;
+			package = CCF271052EABCBD200E2550A /* XCRemoteSwiftPackageReference "swift-transformers" */;
+			productName = Tokenizers;
+		};
+/* End XCSwiftPackageProductDependency section */
+	};
+	rootObject = CC53CE842EA51A790018DD50 /* Project object */;
+}

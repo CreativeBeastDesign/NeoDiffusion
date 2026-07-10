@@ -1,0 +1,40 @@
+{
+  "add_qkv_bias": false,
+  "architectures": [
+    "SumiForMaskGeneration"
+  ],
+  "attention_bias": false,
+  "attention_dropout": 0.0,
+  "auto_map": {
+    "AutoConfig": "configuration_sumi.SumiConfig",
+    "AutoModel": "modeling_sumi.SumiModel",
+    "AutoModelForMaskGeneration": "modeling_sumi.SumiForMaskGeneration"
+  },
+  "bos_token_id": 100256,
+  "dtype": "bfloat16",
+  "eos_token_id": 100257,
+  "head_dim": 128,
+  "hidden_act": "silu",
+  "hidden_size": 4096,
+  "initializer_range": 0.02,
+  "intermediate_size": 12288,
+  "max_position_embeddings": 4864,
+  "mlp_bias": false,
+  "model_type": "sumi",
+  "num_attention_heads": 32,
+  "num_hidden_layers": 36,
+  "num_key_value_heads": 8,
+  "pad_token_id": 100277,
+  "pretraining_tp": 1,
+  "rms_norm_eps": 1e-05,
+  "rope_parameters": {
+    "rope_theta": 500000.0,
+    "rope_type": "default"
+  },
+  "tie_word_embeddings": false,
+  "transformers_version": "5.8.1",
+  "uniform_diffusion_beta_is": 1.0,
+  "uniform_diffusion_z_loss_strength": 1e-05,
+  "use_cache": true,
+  "vocab_size": 100278
+}

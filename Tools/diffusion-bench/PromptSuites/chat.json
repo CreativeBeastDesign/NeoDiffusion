@@ -1,0 +1,21 @@
+{
+  "name": "chat",
+  "prompts": [
+    {
+      "id": "chat-capital",
+      "user": "What is the capital of Japan, and what is the city best known for? Answer in two or three sentences."
+    },
+    {
+      "id": "chat-email",
+      "user": "Write a short, friendly email to a colleague asking to move tomorrow's 10am meeting to the afternoon."
+    },
+    {
+      "id": "chat-explain",
+      "user": "Explain to a curious 10-year-old why the sky is blue."
+    },
+    {
+      "id": "chat-recipe",
+      "user": "Give me a simple recipe for pancakes for two people, with metric measurements."
+    }
+  ]
+}

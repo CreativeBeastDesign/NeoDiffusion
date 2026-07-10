@@ -1,0 +1,21 @@
+{
+  "name": "code",
+  "prompts": [
+    {
+      "id": "code-fizzbuzz",
+      "user": "Write a Python function fizzbuzz(n) that returns a list of the classic FizzBuzz strings for 1..n."
+    },
+    {
+      "id": "code-swift-struct",
+      "user": "Define a Swift struct Point with x and y Doubles and a method distance(to:) returning the Euclidean distance."
+    },
+    {
+      "id": "code-sql",
+      "user": "Given a table orders(id, customer_id, total, created_at), write a SQL query for the top 5 customers by total spend in 2025."
+    },
+    {
+      "id": "code-regex",
+      "user": "Write a regular expression that matches ISO-8601 dates (YYYY-MM-DD) and explain each part briefly."
+    }
+  ]
+}
