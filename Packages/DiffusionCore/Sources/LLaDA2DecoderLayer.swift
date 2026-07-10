@@ -63,4 +63,26 @@ public final class LLaDA2DecoderLayer: Module {
         hidden = hidden + ffnOutput
         return hidden
     }
+
+    /// Cache-aware layer forward (WP-1a): attention runs against committed and active caches,
+    /// selectively recomputing or reusing the active KV depending on drift.
+    public func callAsFunction(
+        _ x: MLXArray, cos: MLXArray, sin: MLXArray,
+        cache: LayerKVCache, activeCache: LayerActiveCache,
+        prefixLen: Int, recomputeActive: Bool
+    ) -> MLXArray {
+        var hidden = x + attention(
+            inputLayernorm(x), cos: cos, sin: sin,
+            cache: cache, activeCache: activeCache,
+            prefixLen: prefixLen, recomputeActive: recomputeActive)
+        let ffnInput = postAttentionLayernorm(hidden)
+        let ffnOutput: MLXArray
+        switch mlp {
+        case let dense as LLaDA2MLP: ffnOutput = dense(ffnInput)
+        case let moe as LLaDA2SparseMoEBlock: ffnOutput = moe(ffnInput)
+        default: fatalError("unsupported mlp module type \(type(of: mlp))")
+        }
+        hidden = hidden + ffnOutput
+        return hidden
+    }
 }

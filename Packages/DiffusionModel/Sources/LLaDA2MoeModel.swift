@@ -50,6 +50,18 @@ public class LLaDA2MoeModel: Module {
         return lmHead(hidden).asType(.float32)
     }
 
+    /// Elastic-Cache aware model forward pass (WP-1a).
+    public func callAsFunction(
+        _ activeIds: MLXArray, positionIds: MLXArray,
+        caches: [LayerKVCache], activeCache: ActiveBlockCache,
+        prefixLen: Int, recomputeActiveFlags: [Bool]
+    ) -> MLXArray {
+        let hidden = model(activeIds, positionIds: positionIds, caches: caches,
+                           activeCache: activeCache, prefixLen: prefixLen,
+                           recomputeActiveFlags: recomputeActiveFlags)
+        return lmHead(hidden).asType(.float32)
+    }
+
     /// Number of decoder layers (for sizing a per-layer cache array).
     public var layerCount: Int { model.layers.count }
 
@@ -139,6 +151,26 @@ public class LLaDA2MoeInnerModel: Module {
         let (cos, sin) = rotaryEmbedding.cosSin(positionIds: positionIds)
         for (layer, cache) in zip(layers, caches) {
             hidden = layer(hidden, cos: cos, sin: sin, cache: cache)
+        }
+        return norm(hidden)
+    }
+
+    /// Elastic-Cache aware inner forward pass (WP-1a).
+    public func callAsFunction(
+        _ activeIds: MLXArray, positionIds: MLXArray,
+        caches: [LayerKVCache], activeCache: ActiveBlockCache,
+        prefixLen: Int, recomputeActiveFlags: [Bool]
+    ) -> MLXArray {
+        precondition(caches.count == layers.count, "one cache per layer required")
+        precondition(activeCache.layers.count == layers.count, "one active cache per layer required")
+        precondition(recomputeActiveFlags.count == layers.count, "recompute flags must match layer count")
+        
+        var hidden = wordEmbeddings(activeIds)
+        let (cos, sin) = rotaryEmbedding.cosSin(positionIds: positionIds)
+        for i in 0 ..< layers.count {
+            hidden = layers[i](hidden, cos: cos, sin: sin,
+                               cache: caches[i], activeCache: activeCache.layers[i],
+                               prefixLen: prefixLen, recomputeActive: recomputeActiveFlags[i])
         }
         return norm(hidden)
     }
