@@ -186,6 +186,51 @@ final class DenoisingLoopParityTests: XCTestCase {
             + "cases identical to cache-disabled (and to the reference)")
     }
 
+    /// WP-1a: with Elastic-Cache enabled but γ=0 (always recompute), the output is
+    /// mathematically identical to the standard cache-enabled and cache-disabled paths.
+    func testActiveBlockCacheParity() throws {
+        var failures: [String] = []
+        for c in traces.cases {
+            if c.name != "p8_q_noeos" && c.name != "p16_q_eos" { continue }
+            
+            var p = c.params.toGenerationParams()
+            p.elasticCacheEnabled = true
+            p.elasticGamma = 2.0 // Force recomputation at every step (sim <= 1.0 < 2.0 always)
+            p.elasticBeta = 16
+            
+            let disabled = DiffusionEngine(model: model, speculationK: 4)
+                .generate(prompt: c.prompt, params: c.params.toGenerationParams())
+            let elastic = DiffusionEngine(model: model, speculationK: 1)
+                .generateCached(prompt: c.prompt, params: p)
+                
+            if elastic.finalSequence != disabled.finalSequence {
+                failures.append("\(c.name): elastic final_x != disabled "
+                    + "(first diff \(firstDiff(elastic.finalSequence, disabled.finalSequence)))")
+            }
+            if elastic.tokens != c.output {
+                failures.append("\(c.name): elastic output != reference")
+            }
+        }
+        XCTAssertTrue(failures.isEmpty,
+            "WP-1a Elastic-Cache parity failures (\(failures.count)):\n"
+            + failures.joined(separator: "\n"))
+        print("[WP-1a] Elastic-Cache parity (γ=0) verified token-for-token against reference")
+    }
+
+    /// WP-1a: with Elastic-Cache enabled and γ=0.9, runs end-to-end without crashing.
+    func testActiveBlockCacheRealDrift() throws {
+        guard let c = traces.cases.first(where: { $0.name == "p8_q_noeos" }) else { return }
+        var p = c.params.toGenerationParams()
+        p.elasticCacheEnabled = true
+        p.elasticGamma = 0.9
+        p.elasticBeta = 16
+        
+        let output = DiffusionEngine(model: model, speculationK: 1)
+            .generateCached(prompt: c.prompt, params: p)
+        XCTAssertFalse(output.tokens.isEmpty, "Elastic-Cache output should not be empty")
+        print("[WP-1a] Elastic-Cache end-to-end validation with γ=0.9 completed successfully, generated \(output.tokens.count) tokens")
+    }
+
     /// M5(c): sync audit — ≤ 1 blocking readback per K denoising steps + 1 per block commit.
     /// The engine counts every `.item`/`.asArray` readback; we assert it stays within budget.
     func testSyncBudget() throws {

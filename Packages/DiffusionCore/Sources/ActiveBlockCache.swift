@@ -1,6 +1,5 @@
 import Foundation
 import MLX
-import DiffusionCore
 
 /// The model-level wrapper for the active-block KV caches (WP-1a).
 ///
