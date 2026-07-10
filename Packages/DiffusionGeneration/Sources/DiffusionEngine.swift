@@ -197,19 +197,22 @@ public final class DiffusionEngine {
 
             var recomputeFlags = Array(repeating: true, count: model.layerCount)
             if params.elasticCacheEnabled && stepIndex > 0 {
-                var boundaryLayer = model.layerCount
+                var simsList: [MLXArray] = []
                 for l in 0 ..< model.layerCount {
-                    if let simArray = activeCache.layers[l].lastDriftSimilarity {
-                        let sim = simArray.item(Float.self)
-                        if sim < params.elasticGamma {
-                            boundaryLayer = l
-                            break
-                        }
+                    if let sim = activeCache.layers[l].lastDriftSimilarity {
+                        simsList.append(sim.reshaped([1]))
                     } else {
-                        boundaryLayer = l
-                        break
+                        simsList.append(MLXArray(Float(-1.0)).reshaped([1]))
                     }
                 }
+                
+                let sims = concatenated(simsList, axis: 0)
+                let stale = sims .< MLXArray(params.elasticGamma)
+                let indices = MLXArray(0 ..< Int32(model.layerCount))
+                let staleIndices = which(stale, indices, MLXArray(Int32(model.layerCount)))
+                let boundaryLayerTensor = staleIndices.min()
+                
+                let boundaryLayer = Int(boundaryLayerTensor.item(Int32.self))
                 for l in 0 ..< model.layerCount {
                     recomputeFlags[l] = (l >= boundaryLayer)
                 }
