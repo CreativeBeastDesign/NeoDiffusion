@@ -36,6 +36,13 @@ public struct GenerationParams: Sendable, Equatable {
     /// trimmed at the first `eosId` in the generated region (inclusive).
     public var eosId: Int
 
+    /// Whether Elastic-Cache is enabled (WP-1a).
+    public var elasticCacheEnabled: Bool
+    /// Drift threshold γ for Elastic-Cache.
+    public var elasticGamma: Float
+    /// Sliding window size β for Elastic-Cache active prediction.
+    public var elasticBeta: Int
+
     public init(
         threshold: Float,
         editingThreshold: Float,
@@ -46,7 +53,10 @@ public struct GenerationParams: Sendable, Equatable {
         blockLength: Int = 32,
         genLength: Int = 2048,
         maskId: Int = 156895,
-        eosId: Int = 156892
+        eosId: Int = 156892,
+        elasticCacheEnabled: Bool = false,
+        elasticGamma: Float = 0.9,
+        elasticBeta: Int = 16
     ) {
         self.threshold = threshold
         self.editingThreshold = editingThreshold
@@ -58,6 +68,9 @@ public struct GenerationParams: Sendable, Equatable {
         self.genLength = genLength
         self.maskId = maskId
         self.eosId = eosId
+        self.elasticCacheEnabled = elasticCacheEnabled
+        self.elasticGamma = elasticGamma
+        self.elasticBeta = elasticBeta
     }
 
     /// The two served modes from the LLaDA2.1-mini model card (phase-2 §1, gotcha 10).
@@ -86,7 +99,10 @@ public struct GenerationParams: Sendable, Equatable {
         maxPostSteps: Int = 16,
         numToTransfer: Int = 1,
         eosEarlyStop: Bool = false,
-        temperature: Float = 0.0
+        temperature: Float = 0.0,
+        elasticCacheEnabled: Bool = false,
+        elasticGamma: Float = 0.9,
+        elasticBeta: Int = 16
     ) -> GenerationParams {
         let (mask, edit) = mode.thresholds
         return GenerationParams(
@@ -99,6 +115,9 @@ public struct GenerationParams: Sendable, Equatable {
             blockLength: blockLength,
             genLength: genLength,
             maskId: maskId,
-            eosId: eosId)
+            eosId: eosId,
+            elasticCacheEnabled: elasticCacheEnabled,
+            elasticGamma: elasticGamma,
+            elasticBeta: elasticBeta)
     }
 }
