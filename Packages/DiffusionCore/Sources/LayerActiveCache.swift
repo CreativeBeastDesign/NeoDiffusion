@@ -18,6 +18,9 @@ public final class LayerActiveCache {
     /// Index of the most-attended token from previous step
     public var previousMostAttendedIndex: Int?
 
+    /// Computed attention similarity drift from the previous step (σ_t^ℓ)
+    public var lastDriftSimilarity: Float = 1.0
+
     public init() {}
 
     public func clear() {
@@ -25,5 +28,6 @@ public final class LayerActiveCache {
         self.values = nil
         self.previousAttentionVector = nil
         self.previousMostAttendedIndex = nil
+        self.lastDriftSimilarity = 1.0
     }
 }
