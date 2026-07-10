@@ -259,7 +259,6 @@ public final class DiffusionEngine {
         let B = params.blockLength
         let promptLength = prompt.count
         let numBlocks = (promptLength + params.genLength + B - 1) / B
-        let totalLength = numBlocks * B
         let prefillBlocks = promptLength / B
         let maskId = Int32(params.maskId)
 
