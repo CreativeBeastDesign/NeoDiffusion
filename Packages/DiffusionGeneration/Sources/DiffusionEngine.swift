@@ -200,10 +200,18 @@ public final class DiffusionEngine {
             let W = windowIds.dim(windowIds.ndim - 1)
             let activeIds = windowIds[0..., (W - activeLen)...]
             let positionIds = MLXArray(Int32(W - activeLen) ..< Int32(W)).expandedDimensions(axis: 0)
+
+            // Elastic off (the served default): plain cached forward. The elastic overload
+            // materializes full attention weights per layer for the drift test — that
+            // instrumentation must never run on the serving path.
+            guard params.elasticCacheEnabled else {
+                return model(activeIds, positionIds: positionIds, caches: cache.layers)
+            }
+
             let prefixLen = W - activeLen
 
             var recomputeFlags = Array(repeating: true, count: model.layerCount)
-            if params.elasticCacheEnabled && stepIndex > 0 {
+            if stepIndex > 0 {
                 if let staticBoundary = params.elasticStaticBoundary {
                     for l in 0 ..< model.layerCount {
                         recomputeFlags[l] = (l >= staticBoundary)
@@ -228,7 +236,7 @@ public final class DiffusionEngine {
                                activeCache: activeCache, prefixLen: prefixLen,
                                recomputeActiveFlags: recomputeFlags)
 
-            if params.elasticCacheEnabled && params.elasticStaticBoundary == nil {
+            if params.elasticStaticBoundary == nil {
                 var similarities: [MLXArray] = []
                 for layer in activeCache.layers {
                     if let sim = layer.lastDriftSimilarity {
