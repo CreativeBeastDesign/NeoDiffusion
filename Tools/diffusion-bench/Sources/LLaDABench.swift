@@ -165,6 +165,9 @@ struct LLaDARunResult: Codable {
     let peakMemoryGB: Double
     let speculationK: Int
     let eosEarlyStop: Bool
+    let elasticCacheEnabled: Bool
+    let elasticGamma: Float
+    let elasticBeta: Int
     // Warmup / process / environment classification (m6-logbook Findings 1/2/7):
     // the process's first generation carries ~19 s one-off cost; cross-process
     // comparisons carry thermal drift; env fields + validity label per the frozen rule.
@@ -192,6 +195,10 @@ func runLLaDABench() async throws {
     let eosEarlyStop = !hasFlag("--no-early-stop")
     let instrument = !hasFlag("--no-instrument")
     let maskDiagnostic = hasFlag("--mask-diagnostic")
+    
+    let elasticCache = hasFlag("--elastic-cache")
+    let elasticGamma = Float(argValue("--elastic-gamma") ?? "0.9") ?? 0.9
+    let elasticBeta = Int(argValue("--elastic-beta") ?? "16") ?? 16
 
     // Prompt suites: fixed cases checked into Tools/diffusion-bench/PromptSuites (M6).
     // --prompt TEXT replaces them with a single ad-hoc case.
@@ -263,7 +270,8 @@ func runLLaDABench() async throws {
     func params(for mode: GenerationParams.Mode) -> GenerationParams {
         GenerationParams.mode(
             mode, blockLength: blockLength, genLength: genLength,
-            maskId: tokenizer.maskId, eosId: tokenizer.eosId, eosEarlyStop: eosEarlyStop)
+            maskId: tokenizer.maskId, eosId: tokenizer.eosId, eosEarlyStop: eosEarlyStop,
+            elasticCacheEnabled: elasticCache, elasticGamma: elasticGamma, elasticBeta: elasticBeta)
     }
 
     func generate(_ arm: LLaDAArm, promptIds: [Int])
@@ -353,6 +361,9 @@ func runLLaDABench() async throws {
             peakMemoryGB: peakGB,
             speculationK: speculationK,
             eosEarlyStop: eosEarlyStop,
+            elasticCacheEnabled: arm.cached && elasticCache,
+            elasticGamma: elasticGamma,
+            elasticBeta: elasticBeta,
             warmupIncluded: warmup,
             processId: Int(ProcessInfo.processInfo.processIdentifier),
             host: sysctlString("hw.model"),
