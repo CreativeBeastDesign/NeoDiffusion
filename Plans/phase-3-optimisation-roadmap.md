@@ -36,6 +36,13 @@ Implements the wiki proposal [[elastic-cache-metal-kernel]] unchanged, against t
 Source ceiling: 45.1× on long sequences (v1/v2 discrepancy unresolved — see proposal caveats); expect far less at our short-context chat workload where prefix recompute is already eliminated by ExactPrefixCache. Acceptance per the proposal's own criteria; γ, ℓ★, β re-tuned on M2 Ultra.
 **Note on scope** (**inferred**): our engine already has ExactPrefixCache, which the CUDA baselines lacked — Elastic-Cache's headline numbers partly include savings we already banked in Phase 2. The honest measurement is marginal gain over M6, not reproduction of 45×.
 
+#### Future Experiment Directions (Added 2026-07-10)
+Following the initial M1 benchmarking sweeps, the next experiment session should evaluate:
+* **Finer-Grained Static Sweeps:** Sweep `elasticStaticBoundary` ($S$) between $1$ and $6$ layers to find the exact threshold where dynamic steps churn is avoided while maximizing active KV compute savings.
+* **Hybrid Dynamic/Static Speculation:** Evaluate light similarity metrics (e.g. projecting only query-key dot products of a subset of heads) to reduce graph-level similarity compute without inducing latency.
+* **Adaptive Block Scaling:** Test dynamic block sizing $B$ where the block size is shrunk as the block nears convergence, compounding the gains of Static Depth Pruning.
+
+
 ### WP-1b — Training-free MultiBD (lever: more tokens/forward)
 
 Raise `N_buf` 1→2 in the Block-Buffer loop; add τ_add (activation) and τ_semi (semi-completion fallback) to DecodingPolicy; per-slot ActiveBlockCache instances.
