@@ -37,6 +37,11 @@ public final class DiffusionEngine {
     /// block, so leave `false` (the default) when only tokens or the sync audit matter.
     public let instrument: Bool
 
+    public final class BoundaryHolder {
+        public var value: Int = 0
+        public init() {}
+    }
+
     public init(model: LLaDA2MoeModel, speculationK: Int = 4, instrument: Bool = false) {
         precondition(speculationK >= 1, "speculationK must be >= 1")
         self.model = model
@@ -187,14 +192,11 @@ public final class DiffusionEngine {
 
         var stepIndex = 0
 
-        class BoundaryHolder {
-            var value: Int = 0
-        }
         let boundaryHolder = BoundaryHolder()
 
         // Active-only forward: slice the active block out of the window; positions are absolute
         // from the committed length (== window length − active length).
-        let forward: Forward = { [model, cache, activeCache, boundaryHolder] windowIds, activeLen in
+        let forward: Forward = { [self, model, cache, activeCache, boundaryHolder] windowIds, activeLen in
             let W = windowIds.dim(windowIds.ndim - 1)
             let activeIds = windowIds[0..., (W - activeLen)...]
             let positionIds = MLXArray(Int32(W - activeLen) ..< Int32(W)).expandedDimensions(axis: 0)
@@ -206,9 +208,9 @@ public final class DiffusionEngine {
                     for l in 0 ..< model.layerCount {
                         recomputeFlags[l] = (l >= staticBoundary)
                     }
-                } else if speculationK == 1 {
+                } else if self.speculationK == 1 {
                     // Option 1: Live readback at each step
-                    let boundary = readBoundary(activeCache: activeCache, layerCount: model.layerCount, gamma: params.elasticGamma)
+                    let boundary = self.readBoundary(activeCache: activeCache, layerCount: model.layerCount, gamma: params.elasticGamma)
                     boundaryHolder.value = boundary
                     for l in 0 ..< model.layerCount {
                         recomputeFlags[l] = (l >= boundary)
