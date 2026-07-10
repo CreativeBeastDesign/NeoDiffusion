@@ -205,15 +205,15 @@ public final class LLaDA2Attention: Module {
                 let normA = sqrt((vector * vector).sum())
                 let normB = sqrt((prevVector * prevVector).sum())
                 let sim = dot / (normA * normB + MLXArray(Float(1e-8)))
-                activeCache.lastDriftSimilarity = sim.item(Float.self)
+                activeCache.lastDriftSimilarity = sim
             } else {
-                activeCache.lastDriftSimilarity = 1.0
+                activeCache.lastDriftSimilarity = MLXArray(Float(1.0))
             }
             
             activeCache.previousAttentionVector = vector
             activeCache.previousMostAttendedIndex = mostAttendedIndex
         } else {
-            activeCache.lastDriftSimilarity = 1.0
+            activeCache.lastDriftSimilarity = MLXArray(Float(1.0))
             activeCache.previousAttentionVector = nil
             activeCache.previousMostAttendedIndex = nil
         }

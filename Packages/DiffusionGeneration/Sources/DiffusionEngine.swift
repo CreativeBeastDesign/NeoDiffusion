@@ -154,6 +154,7 @@ public final class DiffusionEngine {
     ) -> Output {
         let B = params.blockLength
         let cache = ExactPrefixCache(layerCount: model.layerCount)
+        let activeCache = ActiveBlockCache(layerCount: model.layerCount)
         let stats = RunStats()
 
         // Capture forward over a full block of `ids` at absolute `startPos`, then commit its K/V.
@@ -184,18 +185,59 @@ public final class DiffusionEngine {
         }
         stats.prefillSeconds = Date().timeIntervalSince(prefillStart)
 
+        var stepIndex = 0
+
         // Active-only forward: slice the active block out of the window; positions are absolute
         // from the committed length (== window length − active length).
-        let forward: Forward = { [model] windowIds, activeLen in
+        let forward: Forward = { [model, cache, activeCache] windowIds, activeLen in
             let W = windowIds.dim(windowIds.ndim - 1)
             let activeIds = windowIds[0..., (W - activeLen)...]
             let positionIds = MLXArray(Int32(W - activeLen) ..< Int32(W)).expandedDimensions(axis: 0)
-            return model(activeIds, positionIds: positionIds, caches: cache.layers)
+            let prefixLen = W - activeLen
+
+            var recomputeFlags = Array(repeating: true, count: model.layerCount)
+            if params.elasticCacheEnabled && stepIndex > 0 {
+                var boundaryLayer = model.layerCount
+                for l in 0 ..< model.layerCount {
+                    if let simArray = activeCache.layers[l].lastDriftSimilarity {
+                        let sim = simArray.item(Float.self)
+                        if sim < params.elasticGamma {
+                            boundaryLayer = l
+                            break
+                        }
+                    } else {
+                        boundaryLayer = l
+                        break
+                    }
+                }
+                for l in 0 ..< model.layerCount {
+                    recomputeFlags[l] = (l >= boundaryLayer)
+                }
+            }
+
+            let logits = model(activeIds, positionIds: positionIds, caches: cache.layers,
+                               activeCache: activeCache, prefixLen: prefixLen,
+                               recomputeActiveFlags: recomputeFlags)
+
+            if params.elasticCacheEnabled {
+                var similarities: [MLXArray] = []
+                for layer in activeCache.layers {
+                    if let sim = layer.lastDriftSimilarity {
+                        similarities.append(sim)
+                    }
+                }
+                eval(similarities)
+            }
+
+            stepIndex += 1
+            return logits
         }
 
         // On settle, run the capture forward over the committed tokens and commit clean K/V.
         let onSettled: (Int, MLXArray) -> Void = { blockIndex, committedActive in
             captureAndCommit(committedActive, startPos: blockIndex * B)
+            activeCache.clear()
+            stepIndex = 0
         }
 
         return run(prompt: prompt, params: params, forward: forward,
@@ -367,6 +409,7 @@ public final class DiffusionEngine {
         var syncPoints = 0
         var forwardsEvaluated = 0
         var trajectory = BlockTrajectory()
+        let effectiveSpecK = params.elasticCacheEnabled ? 1 : speculationK
 
         // Append the already-evaluated per-step stats of the `count` logical steps.
         func recordStats(_ stats: [MLXArray], count: Int) {
@@ -387,7 +430,7 @@ public final class DiffusionEngine {
             var breakFlags: [MLXArray] = []  // scalar Bool per step
             var posts: [MLXArray] = []       // post_steps after each step (M6 diagnostic)
             var stats: [MLXArray] = []       // [3] per step (M8 E1 trajectory diagnostic)
-            for _ in 0 ..< speculationK {
+            for _ in 0 ..< effectiveSpecK {
                 let s = step(
                     prefix: prefix, prefixLen: prefixLen, active: specActive, postSteps: specPost,
                     promptMask: promptMask, params: params, forward: forward)
@@ -406,7 +449,7 @@ public final class DiffusionEngine {
             eval(snapshots + nextActives + posts + stats)
             let flagVals = flags.asArray(Bool.self)
             syncPoints += 1
-            forwardsEvaluated += speculationK
+            forwardsEvaluated += effectiveSpecK
 
             if let firstBreak = flagVals.firstIndex(of: true) {
                 stepsTaken += firstBreak + 1
@@ -419,8 +462,8 @@ public final class DiffusionEngine {
             }
 
             // No break within this batch — advance by K steps and continue.
-            stepsTaken += speculationK
-            recordStats(stats, count: speculationK)
+            stepsTaken += effectiveSpecK
+            recordStats(stats, count: effectiveSpecK)
             active = specActive
             postSteps = specPost
         }
