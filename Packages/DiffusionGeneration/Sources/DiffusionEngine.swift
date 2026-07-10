@@ -187,9 +187,14 @@ public final class DiffusionEngine {
 
         var stepIndex = 0
 
+        class BoundaryHolder {
+            var value: Int = 0
+        }
+        let boundaryHolder = BoundaryHolder()
+
         // Active-only forward: slice the active block out of the window; positions are absolute
         // from the committed length (== window length − active length).
-        let forward: Forward = { [model, cache, activeCache] windowIds, activeLen in
+        let forward: Forward = { [model, cache, activeCache, boundaryHolder] windowIds, activeLen in
             let W = windowIds.dim(windowIds.ndim - 1)
             let activeIds = windowIds[0..., (W - activeLen)...]
             let positionIds = MLXArray(Int32(W - activeLen) ..< Int32(W)).expandedDimensions(axis: 0)
@@ -197,24 +202,23 @@ public final class DiffusionEngine {
 
             var recomputeFlags = Array(repeating: true, count: model.layerCount)
             if params.elasticCacheEnabled && stepIndex > 0 {
-                var simsList: [MLXArray] = []
-                for l in 0 ..< model.layerCount {
-                    if let sim = activeCache.layers[l].lastDriftSimilarity {
-                        simsList.append(sim.reshaped([1]))
-                    } else {
-                        simsList.append(MLXArray(Float(-1.0)).reshaped([1]))
+                if let staticBoundary = params.elasticStaticBoundary {
+                    for l in 0 ..< model.layerCount {
+                        recomputeFlags[l] = (l >= staticBoundary)
                     }
-                }
-                
-                let sims = concatenated(simsList, axis: 0)
-                let stale = sims .< MLXArray(params.elasticGamma)
-                let indices = MLXArray(0 ..< Int32(model.layerCount))
-                let staleIndices = which(stale, indices, MLXArray(Int32(model.layerCount)))
-                let boundaryLayerTensor = staleIndices.min()
-                
-                let boundaryLayer = Int(boundaryLayerTensor.item(Int32.self))
-                for l in 0 ..< model.layerCount {
-                    recomputeFlags[l] = (l >= boundaryLayer)
+                } else if speculationK == 1 {
+                    // Option 1: Live readback at each step
+                    let boundary = readBoundary(activeCache: activeCache, layerCount: model.layerCount, gamma: params.elasticGamma)
+                    boundaryHolder.value = boundary
+                    for l in 0 ..< model.layerCount {
+                        recomputeFlags[l] = (l >= boundary)
+                    }
+                } else {
+                    // Proposal B: Use the delayed boundary from the previous batch
+                    let boundary = boundaryHolder.value
+                    for l in 0 ..< model.layerCount {
+                        recomputeFlags[l] = (l >= boundary)
+                    }
                 }
             }
 
@@ -222,7 +226,7 @@ public final class DiffusionEngine {
                                activeCache: activeCache, prefixLen: prefixLen,
                                recomputeActiveFlags: recomputeFlags)
 
-            if params.elasticCacheEnabled {
+            if params.elasticCacheEnabled && params.elasticStaticBoundary == nil {
                 var similarities: [MLXArray] = []
                 for layer in activeCache.layers {
                     if let sim = layer.lastDriftSimilarity {
@@ -241,10 +245,28 @@ public final class DiffusionEngine {
             captureAndCommit(committedActive, startPos: blockIndex * B)
             activeCache.clear()
             stepIndex = 0
+            boundaryHolder.value = 0
         }
 
-        return run(prompt: prompt, params: params, forward: forward,
-                   streamBlock: streamBlock, onBlockSettled: onSettled, stats: stats)
+        return run(prompt: prompt, params: params, activeCache: activeCache, boundaryHolder: boundaryHolder,
+                   forward: forward, streamBlock: streamBlock, onBlockSettled: onSettled, stats: stats)
+    }
+
+    private func readBoundary(activeCache: ActiveBlockCache, layerCount: Int, gamma: Float) -> Int {
+        var simsList: [MLXArray] = []
+        for l in 0 ..< layerCount {
+            if let sim = activeCache.layers[l].lastDriftSimilarity {
+                simsList.append(sim.reshaped([1]))
+            } else {
+                simsList.append(MLXArray(Float(-1.0)).reshaped([1]))
+            }
+        }
+        let sims = concatenated(simsList, axis: 0)
+        let stale = sims .< MLXArray(gamma)
+        let indices = MLXArray(0 ..< Int32(layerCount))
+        let staleIndices = which(stale, indices, MLXArray(Int32(layerCount)))
+        let boundaryLayerTensor = staleIndices.min()
+        return Int(boundaryLayerTensor.item(Int32.self))
     }
 
     // MARK: - Shared loop
@@ -254,6 +276,8 @@ public final class DiffusionEngine {
     func run(
         prompt: [Int],
         params: GenerationParams,
+        activeCache: ActiveBlockCache? = nil,
+        boundaryHolder: BoundaryHolder? = nil,
         forward: Forward,
         streamBlock: (([Int]) -> Void)?,
         onBlockSettled: ((_ blockIndex: Int, _ committedActive: MLXArray) -> Void)? = nil,
@@ -309,6 +333,8 @@ public final class DiffusionEngine {
                 initialActive: activeInit,
                 promptMask: promptMask,
                 params: params,
+                activeCache: activeCache,
+                boundaryHolder: boundaryHolder,
                 forward: forward)
             syncPoints += syncs
             denoiseForwards += forwards
@@ -397,6 +423,8 @@ public final class DiffusionEngine {
         initialActive: MLXArray,
         promptMask: MLXArray,
         params: GenerationParams,
+        activeCache: ActiveBlockCache? = nil,
+        boundaryHolder: BoundaryHolder? = nil,
         forward: Forward
     ) -> (committed: MLXArray, steps: Int, syncPoints: Int, postSteps: Int, forwards: Int,
           trajectory: BlockTrajectory) {
@@ -411,7 +439,7 @@ public final class DiffusionEngine {
         var syncPoints = 0
         var forwardsEvaluated = 0
         var trajectory = BlockTrajectory()
-        let effectiveSpecK = params.elasticCacheEnabled ? 1 : speculationK
+        let effectiveSpecK = speculationK
 
         // Append the already-evaluated per-step stats of the `count` logical steps.
         func recordStats(_ stats: [MLXArray], count: Int) {
@@ -449,6 +477,13 @@ public final class DiffusionEngine {
             let flags = concatenated(breakFlags, axis: 0)  // [K] Bool
             eval(flags)
             eval(snapshots + nextActives + posts + stats)
+            
+            // Proposal B: update boundary at the end of batch if K > 1
+            if let activeCache = activeCache, let boundaryHolder = boundaryHolder,
+               params.elasticCacheEnabled && params.elasticStaticBoundary == nil && effectiveSpecK > 1 {
+                boundaryHolder.value = readBoundary(activeCache: activeCache, layerCount: model.layerCount, gamma: params.elasticGamma)
+            }
+
             let flagVals = flags.asArray(Bool.self)
             syncPoints += 1
             forwardsEvaluated += effectiveSpecK

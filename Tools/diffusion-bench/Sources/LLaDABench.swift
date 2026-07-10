@@ -168,6 +168,7 @@ struct LLaDARunResult: Codable {
     let elasticCacheEnabled: Bool
     let elasticGamma: Float
     let elasticBeta: Int
+    let elasticStaticBoundary: Int?
     // Warmup / process / environment classification (m6-logbook Findings 1/2/7):
     // the process's first generation carries ~19 s one-off cost; cross-process
     // comparisons carry thermal drift; env fields + validity label per the frozen rule.
@@ -199,6 +200,7 @@ func runLLaDABench() async throws {
     let elasticCache = hasFlag("--elastic-cache")
     let elasticGamma = Float(argValue("--elastic-gamma") ?? "0.9") ?? 0.9
     let elasticBeta = Int(argValue("--elastic-beta") ?? "16") ?? 16
+    let elasticStaticBoundary = argValue("--elastic-static-boundary").flatMap { Int($0) }
 
     // Prompt suites: fixed cases checked into Tools/diffusion-bench/PromptSuites (M6).
     // --prompt TEXT replaces them with a single ad-hoc case.
@@ -271,7 +273,8 @@ func runLLaDABench() async throws {
         GenerationParams.mode(
             mode, blockLength: blockLength, genLength: genLength,
             maskId: tokenizer.maskId, eosId: tokenizer.eosId, eosEarlyStop: eosEarlyStop,
-            elasticCacheEnabled: elasticCache, elasticGamma: elasticGamma, elasticBeta: elasticBeta)
+            elasticCacheEnabled: elasticCache, elasticGamma: elasticGamma, elasticBeta: elasticBeta,
+            elasticStaticBoundary: elasticStaticBoundary)
     }
 
     func generate(_ arm: LLaDAArm, promptIds: [Int])
@@ -364,6 +367,7 @@ func runLLaDABench() async throws {
             elasticCacheEnabled: arm.cached && elasticCache,
             elasticGamma: elasticGamma,
             elasticBeta: elasticBeta,
+            elasticStaticBoundary: elasticStaticBoundary,
             warmupIncluded: warmup,
             processId: Int(ProcessInfo.processInfo.processIdentifier),
             host: sysctlString("hw.model"),

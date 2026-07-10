@@ -42,6 +42,8 @@ public struct GenerationParams: Sendable, Equatable {
     public var elasticGamma: Float
     /// Sliding window size β for Elastic-Cache active prediction.
     public var elasticBeta: Int
+    /// Optional static layer boundary for Proposal A (Static Depth Pruning).
+    public var elasticStaticBoundary: Int?
 
     public init(
         threshold: Float,
@@ -56,7 +58,8 @@ public struct GenerationParams: Sendable, Equatable {
         eosId: Int = 156892,
         elasticCacheEnabled: Bool = false,
         elasticGamma: Float = 0.9,
-        elasticBeta: Int = 16
+        elasticBeta: Int = 16,
+        elasticStaticBoundary: Int? = nil
     ) {
         self.threshold = threshold
         self.editingThreshold = editingThreshold
@@ -71,6 +74,7 @@ public struct GenerationParams: Sendable, Equatable {
         self.elasticCacheEnabled = elasticCacheEnabled
         self.elasticGamma = elasticGamma
         self.elasticBeta = elasticBeta
+        self.elasticStaticBoundary = elasticStaticBoundary
     }
 
     /// The two served modes from the LLaDA2.1-mini model card (phase-2 §1, gotcha 10).
@@ -102,7 +106,8 @@ public struct GenerationParams: Sendable, Equatable {
         temperature: Float = 0.0,
         elasticCacheEnabled: Bool = false,
         elasticGamma: Float = 0.9,
-        elasticBeta: Int = 16
+        elasticBeta: Int = 16,
+        elasticStaticBoundary: Int? = nil
     ) -> GenerationParams {
         let (mask, edit) = mode.thresholds
         return GenerationParams(
@@ -118,6 +123,7 @@ public struct GenerationParams: Sendable, Equatable {
             eosId: eosId,
             elasticCacheEnabled: elasticCacheEnabled,
             elasticGamma: elasticGamma,
-            elasticBeta: elasticBeta)
+            elasticBeta: elasticBeta,
+            elasticStaticBoundary: elasticStaticBoundary)
     }
 }
