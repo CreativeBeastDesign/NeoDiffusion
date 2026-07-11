@@ -115,6 +115,12 @@ public final class DiffusionEngine {
         /// remaining and zero Γ acceptances — i.e. steps where the τ_semi gate (or the
         /// threshold) starved it. The τ_semi diagnostic.
         public let trailingStarvedStepsPerBlock: [Int]
+        /// `denoiseSeconds` split by phase width — the WP-1b step-latency-multiplier inputs:
+        /// single-active per-step latency = single/(logicalStepsTotal − dualActiveSteps),
+        /// dual = dual/dualActiveSteps. Host-scoped (wall-clock); real per batch because every
+        /// speculative batch ends in a blocking readback.
+        public let singleActiveDenoiseSeconds: Double
+        public let dualActiveDenoiseSeconds: Double
         /// Effective parameters as the engine actually ran them (provenance rule: benches must
         /// record these echoes, never the CLI inputs — elastic-cache logbook F7).
         public let effectiveNBuf: Int
@@ -421,8 +427,12 @@ public final class DiffusionEngine {
 
         activateSlot()
 
+        var singleActiveDenoiseSeconds = 0.0
+        var dualActiveDenoiseSeconds = 0.0
+
         while !slots.isEmpty {
             let hasNextBlock = nextBlockIndex < numBlocks
+            let phaseWidth = slots.count
             let denoiseStart = Date()
             let phase = denoisePhase(
                 prefix: prefixArray, slots: &slots, hasNextBlock: hasNextBlock,
@@ -431,7 +441,10 @@ public final class DiffusionEngine {
                 globalStep: &logicalStepsTotal, dualActiveSteps: &dualActiveSteps)
             syncPoints += phase.syncPoints
             denoiseForwards += phase.forwards
-            denoiseSeconds += Date().timeIntervalSince(denoiseStart)
+            let phaseSeconds = Date().timeIntervalSince(denoiseStart)
+            denoiseSeconds += phaseSeconds
+            if phaseWidth == 2 { dualActiveDenoiseSeconds += phaseSeconds }
+            else { singleActiveDenoiseSeconds += phaseSeconds }
 
             switch phase.event {
             case .activation:
@@ -520,6 +533,8 @@ public final class DiffusionEngine {
                 dualActiveSteps: dualActiveSteps,
                 activationSteps: activationSteps,
                 trailingStarvedStepsPerBlock: trailingStarvedPerBlock,
+                singleActiveDenoiseSeconds: singleActiveDenoiseSeconds,
+                dualActiveDenoiseSeconds: dualActiveDenoiseSeconds,
                 effectiveNBuf: params.nBuf,
                 effectiveTauAdd: params.tauAdd,
                 effectiveTauSemi: params.tauSemi,
