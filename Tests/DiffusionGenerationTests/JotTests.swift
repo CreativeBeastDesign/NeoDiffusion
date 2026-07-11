@@ -80,7 +80,7 @@ final class JotTests: XCTestCase {
             jotThreshold: 0.9
         )
         
-        let prompt = Array(repeating: 1, count: B)
+        let prompt = [1]
         let engine = DiffusionEngine(model: model, speculationK: 1)
         let output = engine.run(prompt: prompt, params: p, forward: forward, streamBlock: nil)
         
@@ -98,8 +98,8 @@ final class JotTests: XCTestCase {
             }
         }
         XCTAssertTrue(foundFrozen, "Expected JOT to freeze stable tokens and pass the frozen mask to forward")
-        XCTAssertEqual(Array(output.tokens[0..<14]), Array(repeating: 7, count: 14))
-        XCTAssertEqual(output.tokens[14], 7)
+        XCTAssertEqual(output.tokens[0], 1)
+        XCTAssertEqual(Array(output.tokens[1..<15]), Array(repeating: 7, count: 14))
         XCTAssertEqual(output.tokens[15], 7)
     }
 
@@ -146,13 +146,16 @@ final class JotTests: XCTestCase {
             jotThreshold: 0.9
         )
         
-        let prompt = Array(repeating: 1, count: B)
+        let prompt = [1]
         let engine = DiffusionEngine(model: model, speculationK: 1)
         let output = engine.run(prompt: prompt, params: p, forward: forward, streamBlock: nil)
         
         // Verify output tokens at position 5 is 8 (the edit resolved correctly after unfreezing)
         XCTAssertEqual(output.tokens[5], 8, "Edit collision failed to resolve")
-        XCTAssertEqual(Array(output.tokens[0..<5]), Array(repeating: 7, count: 5))
+        XCTAssertEqual(output.tokens[0], 1)
+        XCTAssertEqual(Array(output.tokens[1..<5]), Array(repeating: 7, count: 4))
         XCTAssertEqual(Array(output.tokens[6..<14]), Array(repeating: 7, count: 8))
+        XCTAssertEqual(output.tokens[14], 7)
+        XCTAssertEqual(output.tokens[15], 7)
     }
 }
