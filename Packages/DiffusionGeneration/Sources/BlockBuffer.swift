@@ -31,11 +31,11 @@ public struct BlockSlot: Sendable, Equatable {
 
 /// Fixed-size block buffer with a per-slot state machine (phase-1 §5).
 ///
-/// **`nBuf` is hardwired to 1 for all of Phase 2**, which reduces the loop to the reference
-/// SingleBD algorithm exactly — every M5 parity gate runs at `nBuf == 1`. The structure exists
-/// now so that Phase 3's training-free MultiBD (`nBuf == 2`, τ_add/τ_semi activation) is a
-/// config change rather than a loop rewrite. Front-block in-order commit (a slot only reaches
-/// `inCache` after all lower-indexed blocks have) keeps §7 streaming semantics intact.
+/// Phase 2 ran with `nBuf == 1` (SingleBD — every M5 parity gate holds there). WP-1b
+/// (training-free MultiBD, arXiv:2606.29215 Algorithm 5) raises the cap to 2: up to two
+/// blocks are refined concurrently, activation gated by τ_add/τ_semi in the engine.
+/// Front-block in-order commit (a slot only reaches `inCache` after all lower-indexed
+/// blocks have) keeps §7 streaming semantics intact at any `nBuf`.
 public struct BlockBuffer {
     public let nBuf: Int
     public private(set) var slots: [BlockSlot]
@@ -44,8 +44,8 @@ public struct BlockBuffer {
 
     public init(nBuf: Int = 1) {
         precondition(nBuf >= 1, "nBuf must be >= 1")
-        precondition(nBuf == 1, "Phase 2 hardwires nBuf == 1 (phase-1 §5 amendment); "
-            + "nBuf == 2 (MultiBD) is Phase 3")
+        precondition(nBuf <= 2, "WP-1b implements nBuf <= 2; larger buffers are untested "
+            + "(the paper uses up to 4 — extend deliberately, with parity gates)")
         self.nBuf = nBuf
         self.slots = Array(repeating: .empty, count: nBuf)
         self.lastCommittedBlock = nil
@@ -54,8 +54,14 @@ public struct BlockBuffer {
     /// Number of slots currently in the `active` state.
     public var activeCount: Int { slots.lazy.filter { $0.state == .active }.count }
 
-    /// The index into `slots` of the (single, for nBuf=1) active slot, if any.
+    /// The index into `slots` of the single active slot, if any (nBuf=1 convenience).
     public var activeSlotIndex: Int? { slots.firstIndex { $0.state == .active } }
+
+    /// Indices of all `active` slots, ordered by ascending block index (front first).
+    public var activeSlotIndices: [Int] {
+        slots.indices.filter { slots[$0].state == .active }
+            .sorted { (slots[$0].blockIndex ?? .max) < (slots[$1].blockIndex ?? .max) }
+    }
 
     /// Allocate a `dummy` slot to a new block and mark it `active`. Enforces the `nBuf` cap.
     /// Returns the slot index.
@@ -69,9 +75,25 @@ public struct BlockBuffer {
     }
 
     /// `active → toCache`: the block has settled; its KV is not yet in the prefix cache.
+    /// Only the **front** active block may settle (in-order commit; a trailing block that
+    /// finishes early simply waits in `active` until promoted).
     public mutating func markSettled(slotIndex: Int) {
         precondition(slots[slotIndex].state == .active, "markSettled requires an active slot")
+        let blockIndex = slots[slotIndex].blockIndex!
+        for other in slots where other.state == .active {
+            precondition((other.blockIndex ?? .max) >= blockIndex,
+                "only the front active block may settle (got \(blockIndex), "
+                + "active \(other.blockIndex ?? -1))")
+        }
         slots[slotIndex].state = .toCache
+    }
+
+    /// `active → dummy`: discard an in-flight block without committing it (EOS early-stop
+    /// cancels the trailing slot). Never touches the prefix cache — a cancelled block was
+    /// never captured.
+    public mutating func cancel(slotIndex: Int) {
+        precondition(slots[slotIndex].state == .active, "cancel requires an active slot")
+        slots[slotIndex] = .empty
     }
 
     /// `toCache → inCache`: the block's committed KV has been appended to ``ExactPrefixCache``.

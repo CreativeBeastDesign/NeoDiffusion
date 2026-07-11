@@ -100,6 +100,27 @@ public final class DiffusionEngine {
         /// Index of the committed block whose generated region first contained `eosId`
         /// (the block `eos_early_stop` fires on), or nil if eos never appeared.
         public let eosBlockIndex: Int?
+
+        // MARK: WP-1b MultiBD diagnostics + effective-parameter echoes
+        /// Total logical steps taken by the loop (the TPF denominator). At `nBuf == 1` this
+        /// equals `stepsPerBlock.sum()`; with two concurrently active blocks a single step
+        /// advances both, so `stepsPerBlock.sum() - logicalStepsTotal == dualActiveSteps`.
+        public let logicalStepsTotal: Int
+        /// Logical steps during which two blocks were active simultaneously.
+        public let dualActiveSteps: Int
+        /// Global step index (0-based, counted in logical steps) at which each activation
+        /// event fired (a trailing block entered the buffer). Empty at `nBuf == 1`.
+        public let activationSteps: [Int]
+        /// Per generated block: steps this block spent as the *trailing* slot with masks
+        /// remaining and zero Γ acceptances — i.e. steps where the τ_semi gate (or the
+        /// threshold) starved it. The τ_semi diagnostic.
+        public let trailingStarvedStepsPerBlock: [Int]
+        /// Effective parameters as the engine actually ran them (provenance rule: benches must
+        /// record these echoes, never the CLI inputs — elastic-cache logbook F7).
+        public let effectiveNBuf: Int
+        public let effectiveTauAdd: Float
+        public let effectiveTauSemi: Float
+        public let effectiveSpeculationK: Int
     }
 
     /// Mutable stats shared between the cached entry point's closures and `run` (the capture
@@ -194,8 +215,12 @@ public final class DiffusionEngine {
 
         let boundaryHolder = BoundaryHolder()
 
-        // Active-only forward: slice the active block out of the window; positions are absolute
-        // from the committed length (== window length − active length).
+        // Memoized active-window masks for dual-active phases (WP-1b): constant across every
+        // step of a phase — keyed by committed length since activeLen is 2B whenever used.
+        var maskMemo: [Int: MLXArray] = [:]
+
+        // Active-only forward: slice the active window out of the full window; positions are
+        // absolute from the committed length (== window length − active length).
         let forward: Forward = { [self, model, cache, activeCache, boundaryHolder] windowIds, activeLen in
             let W = windowIds.dim(windowIds.ndim - 1)
             let activeIds = windowIds[0..., (W - activeLen)...]
@@ -205,7 +230,20 @@ public final class DiffusionEngine {
             // materializes full attention weights per layer for the drift test — that
             // instrumentation must never run on the serving path.
             guard params.elasticCacheEnabled else {
-                return model(activeIds, positionIds: positionIds, caches: cache.layers)
+                // Single active block: mask nil (every committed key is allowed — the
+                // ExactPrefixCache argument). Two active blocks: block-causal active mask
+                // (the trailing block sees the front, never vice versa — WP-1b).
+                guard activeLen > B else {
+                    return model(activeIds, positionIds: positionIds, caches: cache.layers)
+                }
+                let prefixLen = W - activeLen
+                let mask = maskMemo[prefixLen] ?? {
+                    let m = BlockDiffusionMask.activeWindowMask(
+                        prefixLen: prefixLen, activeLen: activeLen, blockLength: B)
+                    maskMemo[prefixLen] = m
+                    return m
+                }()
+                return model(activeIds, positionIds: positionIds, caches: cache.layers, mask: mask)
             }
 
             let prefixLen = W - activeLen
@@ -279,10 +317,34 @@ public final class DiffusionEngine {
         return Int(boundaryLayerTensor.item(Int32.self))
     }
 
-    // MARK: - Shared loop
+    // MARK: - Shared loop (WP-1b slot scheduler)
+
+    /// In-flight state of one active block in the slot scheduler. `slots[0]` is always the
+    /// front (lowest block index) — the only block that may settle and commit (streaming
+    /// contract, phase-1 §7).
+    struct SlotRun {
+        let blockIndex: Int
+        let bufferSlot: Int
+        var active: MLXArray          // [1, B]
+        let promptMask: MLXArray      // [1, B] Bool
+        /// Swift-side count of prompt positions in this block (progress denominators are
+        /// over *generated* positions only — τ_add/τ_semi semantics, WP-1b).
+        let promptCount: Int
+        var postSteps: MLXArray       // in-graph post-steps accumulator
+        var stepsTaken: Int = 0
+        var trajectory = BlockTrajectory()
+        /// Steps this block spent as the trailing slot with masks left and zero Γ acceptances
+        /// (τ_semi starvation diagnostic).
+        var trailingStarvedSteps: Int = 0
+    }
 
     /// The block schedule shared by the cache-disabled and cached paths. `forward` abstracts how
-    /// logits over the active block are produced.
+    /// logits over the active window are produced.
+    ///
+    /// WP-1b (arXiv:2606.29215 Alg. 5): a slot scheduler. Up to `params.nBuf` blocks refine
+    /// concurrently; τ_add activates the next block off the newest block's progress; the front
+    /// block commits strictly in order, then the trailing slot is promoted. At `nBuf == 1`
+    /// every path below reduces exactly to the Phase-2 SingleBD schedule (parity-gated).
     func run(
         prompt: [Int],
         params: GenerationParams,
@@ -294,12 +356,16 @@ public final class DiffusionEngine {
         stats: RunStats? = nil
     ) -> Output {
         let B = params.blockLength
+        precondition(params.nBuf >= 1 && params.nBuf <= 2, "WP-1b implements nBuf in 1...2")
+        precondition(!(params.elasticCacheEnabled && params.nBuf > 1),
+            "Elastic-Cache x MultiBD composability is untested (roadmap §5 cell open); "
+            + "run one at a time")
         let promptLength = prompt.count
         let numBlocks = (promptLength + params.genLength + B - 1) / B
         let prefillBlocks = promptLength / B
         let maskId = Int32(params.maskId)
 
-        var buffer = BlockBuffer(nBuf: 1)
+        var buffer = BlockBuffer(nBuf: params.nBuf)
         var syncPoints = 0
 
         // Committed prefix: the pure-prompt blocks [0, prefillBlocks). Their ids are prompt
@@ -318,13 +384,21 @@ public final class DiffusionEngine {
         var transfersPerStep: [[Int]] = []
         var editsPerStep: [[Int]] = []
         var meanConfPerStep: [[Float]] = []
+        var trailingStarvedPerBlock: [Int] = []
         var eosBlockIndex: Int? = nil
+        var logicalStepsTotal = 0
+        var dualActiveSteps = 0
+        var activationSteps: [Int] = []
 
-        for numBlock in prefillBlocks ..< numBlocks {
-            let slot = buffer.activate(blockIndex: numBlock)
+        var slots: [SlotRun] = []
+        var nextBlockIndex = prefillBlocks
+        var stopped = false
+
+        // Initial active block: prompt tail where it exists, mask id elsewhere. Only the
+        // first generated block can hold prompt positions; the general build costs nothing.
+        func activateSlot() {
+            let numBlock = nextBlockIndex
             let blockStart = numBlock * B
-
-            // Initial active block: prompt tail where it exists, mask id elsewhere.
             var initialActive = [Int32](repeating: maskId, count: B)
             var promptMaskLocal = [Bool](repeating: false, count: B)
             for i in 0 ..< B {
@@ -334,58 +408,88 @@ public final class DiffusionEngine {
                     promptMaskLocal[i] = true
                 }
             }
-            let activeInit = MLXArray(initialActive).reshaped(1, B)
-            let promptMask = MLXArray(promptMaskLocal).reshaped(1, B)  // Bool [1, B]
+            let bufferSlot = buffer.activate(blockIndex: numBlock)
+            slots.append(SlotRun(
+                blockIndex: numBlock,
+                bufferSlot: bufferSlot,
+                active: MLXArray(initialActive).reshaped(1, B),
+                promptMask: MLXArray(promptMaskLocal).reshaped(1, B),
+                promptCount: promptMaskLocal.lazy.filter { $0 }.count,
+                postSteps: MLXArray(Int32(0))))
+            nextBlockIndex += 1
+        }
 
+        activateSlot()
+
+        while !slots.isEmpty {
+            let hasNextBlock = nextBlockIndex < numBlocks
             let denoiseStart = Date()
-            let (committedActive, steps, syncs, postSteps, forwards, trajectory) = denoiseBlock(
-                prefix: prefixArray,
-                initialActive: activeInit,
-                promptMask: promptMask,
-                params: params,
-                activeCache: activeCache,
-                boundaryHolder: boundaryHolder,
-                forward: forward)
-            syncPoints += syncs
-            denoiseForwards += forwards
+            let phase = denoisePhase(
+                prefix: prefixArray, slots: &slots, hasNextBlock: hasNextBlock,
+                params: params, activeCache: activeCache, boundaryHolder: boundaryHolder,
+                forward: forward,
+                globalStep: &logicalStepsTotal, dualActiveSteps: &dualActiveSteps)
+            syncPoints += phase.syncPoints
+            denoiseForwards += phase.forwards
             denoiseSeconds += Date().timeIntervalSince(denoiseStart)
-            transfersPerStep.append(trajectory.transfers)
-            editsPerStep.append(trajectory.edits)
-            meanConfPerStep.append(trajectory.meanConfidence)
 
-            // Commit-cleanliness / KV capture hook (cached path); no-op for cache-disabled.
-            let commitStart = Date()
-            buffer.markSettled(slotIndex: slot)
-            onBlockSettled?(numBlock, committedActive)
+            switch phase.event {
+            case .activation:
+                activationSteps.append(logicalStepsTotal - 1)
+                activateSlot()
 
-            // One readback per commit: materialize the block's ids for streaming + prefix growth.
-            let blockIds = committedActive.asArray(Int32.self).map { Int($0) }
-            syncPoints += 1
+            case .frontBreak:
+                // Commit the front block in order (streaming contract). The trailing slot,
+                // if any, is promoted and keeps its in-flight tokens and post-steps counter.
+                let front = slots.removeFirst()
+                let committedActive = front.active
+                let commitStart = Date()
+                buffer.markSettled(slotIndex: front.bufferSlot)
+                onBlockSettled?(front.blockIndex, committedActive)
 
-            committedIds.append(contentsOf: blockIds)
-            prefixArray = concatenated([prefixArray, committedActive], axis: 1)
-            buffer.markCommitted(slotIndex: slot)
+                // One readback per commit: materialize the block's ids for streaming + prefix growth.
+                let blockIds = committedActive.asArray(Int32.self).map { Int($0) }
+                syncPoints += 1
 
-            blockCommits.append(committedIds)
-            stepsPerBlock.append(steps)
-            postStepsPerBlock.append(postSteps)
-            // First generated block whose generated-region positions contain eos (E1).
-            if eosBlockIndex == nil {
-                let generatedInBlock = blockIds.enumerated().filter {
-                    blockStart + $0.offset >= promptLength
+                committedIds.append(contentsOf: blockIds)
+                prefixArray = concatenated([prefixArray, committedActive], axis: 1)
+                buffer.markCommitted(slotIndex: front.bufferSlot)
+
+                blockCommits.append(committedIds)
+                stepsPerBlock.append(front.stepsTaken)
+                postStepsPerBlock.append(phase.frontPostAtBreak)
+                transfersPerStep.append(front.trajectory.transfers)
+                editsPerStep.append(front.trajectory.edits)
+                meanConfPerStep.append(front.trajectory.meanConfidence)
+                trailingStarvedPerBlock.append(front.trailingStarvedSteps)
+
+                // First generated block whose generated-region positions contain eos (E1).
+                let blockStart = front.blockIndex * B
+                if eosBlockIndex == nil {
+                    let generatedInBlock = blockIds.enumerated().filter {
+                        blockStart + $0.offset >= promptLength
+                    }
+                    if generatedInBlock.contains(where: { $0.element == params.eosId }) {
+                        eosBlockIndex = blockCommits.count - 1
+                    }
                 }
-                if generatedInBlock.contains(where: { $0.element == params.eosId }) {
-                    eosBlockIndex = blockCommits.count - 1
-                }
-            }
-            streamBlock?(blockIds)
-            commitSeconds += Date().timeIntervalSince(commitStart)
+                streamBlock?(blockIds)
+                commitSeconds += Date().timeIntervalSince(commitStart)
 
-            // eos_early_stop: a committed block is always mask-free (both break conditions imply
-            // no masks), so we only test whether the generated region so far contains eos.
-            if params.eosEarlyStop {
-                let generated = committedIds[promptLength...]
-                if generated.contains(params.eosId) { break }
+                // eos_early_stop: a committed block is always mask-free, so only test whether
+                // the generated region so far contains eos. A live trailing slot is cancelled —
+                // its tokens are discarded and its KV was never captured.
+                if params.eosEarlyStop {
+                    let generated = committedIds[promptLength...]
+                    if generated.contains(params.eosId) {
+                        for slot in slots { buffer.cancel(slotIndex: slot.bufferSlot) }
+                        slots.removeAll()
+                        stopped = true
+                    }
+                }
+                if !stopped && slots.isEmpty && hasNextBlock {
+                    activateSlot()
+                }
             }
         }
 
@@ -411,193 +515,315 @@ public final class DiffusionEngine {
                 transfersPerStep: transfersPerStep,
                 editsPerStep: editsPerStep,
                 meanTransferConfidencePerStep: meanConfPerStep,
-                eosBlockIndex: eosBlockIndex))
+                eosBlockIndex: eosBlockIndex,
+                logicalStepsTotal: logicalStepsTotal,
+                dualActiveSteps: dualActiveSteps,
+                activationSteps: activationSteps,
+                trailingStarvedStepsPerBlock: trailingStarvedPerBlock,
+                effectiveNBuf: params.nBuf,
+                effectiveTauAdd: params.tauAdd,
+                effectiveTauSemi: params.tauSemi,
+                effectiveSpeculationK: speculationK))
     }
 
-    // MARK: - Per-block denoising with K-step speculative readback
+    // MARK: - Per-phase denoising with K-step speculative readback
 
-    /// Denoise one active block to settlement. Returns the committed active block `[1, B]`, the
-    /// number of denoising steps taken (matching the reference's per-block step count), the
-    /// number of blocking readbacks (1 per speculative batch of ≤ K steps), the `post_steps`
-    /// counter at loop exit (M6 diagnostic — read from the already-evaluated batch, so it adds
-    /// no synchronization), and the number of forwards evaluated (K per batch, honestly
-    /// counting speculative overshoot).
+    /// Per-block trajectory diagnostics (M8 E1), accumulated by the owning slot.
     struct BlockTrajectory {
         var transfers: [Int] = []
         var edits: [Int] = []
         var meanConfidence: [Float] = []
     }
 
-    func denoiseBlock(
+    /// Why a phase ended. A *phase* is a stretch of logical steps over a fixed set of active
+    /// slots; any scheduling event ends the phase at a speculative-batch boundary (overshoot
+    /// past the event is discarded, so results are exact and K-invariant).
+    enum PhaseEvent {
+        /// The front block settled or hit its post-steps budget — commit it.
+        case frontBreak
+        /// τ_add fired — activate the next block.
+        case activation
+    }
+
+    struct PhaseResult {
+        let event: PhaseEvent
+        let syncPoints: Int
+        let forwards: Int
+        /// The front slot's post-steps counter at the break step (valid on `.frontBreak`).
+        let frontPostAtBreak: Int
+    }
+
+    /// Run the current slot set until a scheduling event. Builds up to K speculative
+    /// `windowStep`s into one graph; a single blocking readback of the stacked `[2K]`
+    /// break/activation flags per batch (M5(c) budget: ≤1 readback per K steps + 1 per commit).
+    func denoisePhase(
         prefix: MLXArray,
-        initialActive: MLXArray,
-        promptMask: MLXArray,
+        slots: inout [SlotRun],
+        hasNextBlock: Bool,
         params: GenerationParams,
         activeCache: ActiveBlockCache? = nil,
         boundaryHolder: BoundaryHolder? = nil,
-        forward: Forward
-    ) -> (committed: MLXArray, steps: Int, syncPoints: Int, postSteps: Int, forwards: Int,
-          trajectory: BlockTrajectory) {
+        forward: Forward,
+        globalStep: inout Int,
+        dualActiveSteps: inout Int
+    ) -> PhaseResult {
         precondition(params.numToTransfer == 1,
             "Phase 2 parity implements numToTransfer == 1 (the live reference value); "
             + "num_to_transfer > 1 needs index-exact top-k tie handling (M6 bench extension)")
         let prefixLen = prefix.dim(1)
-
-        var active = initialActive          // [1, B] Int32
-        var postSteps = MLXArray(Int32(0))  // in-graph accumulator, no per-step readback
-        var stepsTaken = 0
+        let S = slots.count
+        let B = params.blockLength
+        let K = speculationK
         var syncPoints = 0
         var forwardsEvaluated = 0
-        var trajectory = BlockTrajectory()
-        let effectiveSpecK = speculationK
 
-        // Append the already-evaluated per-step stats of the `count` logical steps.
-        func recordStats(_ stats: [MLXArray], count: Int) {
-            for s in stats.prefix(count) {
-                let vals = s.asArray(Float.self)  // materialized by the batch eval — memcpy
-                trajectory.transfers.append(Int(vals[0]))
-                trajectory.edits.append(Int(vals[1]))
-                trajectory.meanConfidence.append(vals[2])
-            }
-        }
+        var windowActive = S == 1 ? slots[0].active
+            : concatenated(slots.map(\.active), axis: 1)
+        let promptMasks = S == 1 ? slots[0].promptMask
+            : concatenated(slots.map(\.promptMask), axis: 1)
+        let slotPromptCounts = slots.map(\.promptCount)
+        var posts = slots.map(\.postSteps)
 
         while true {
             // Build up to K speculative steps into one graph.
-            var specActive = active
-            var specPost = postSteps
-            var snapshots: [MLXArray] = []   // result active block if the break is here
-            var nextActives: [MLXArray] = [] // active block carried to the next step
-            var breakFlags: [MLXArray] = []  // scalar Bool per step
-            var posts: [MLXArray] = []       // post_steps after each step (M6 diagnostic)
-            var stats: [MLXArray] = []       // [3] per step (M8 E1 trajectory diagnostic)
-            for _ in 0 ..< effectiveSpecK {
-                let s = step(
-                    prefix: prefix, prefixLen: prefixLen, active: specActive, postSteps: specPost,
-                    promptMask: promptMask, params: params, forward: forward)
-                snapshots.append(s.resultActive)
-                nextActives.append(s.nextActive)
+            var specWindow = windowActive
+            var specPosts = posts
+            var snapshots: [MLXArray] = []     // result window if the break lands here
+            var nextWindows: [MLXArray] = []   // window carried to the next step
+            var breakFlags: [MLXArray] = []    // [1] Bool per step (front break)
+            var activationFlags: [MLXArray] = [] // [1] Bool per step (τ_add)
+            var postsPerStep: [[MLXArray]] = []
+            var statsPerStep: [MLXArray] = []  // [4*S] per step
+
+            for _ in 0 ..< K {
+                let s = windowStep(
+                    prefix: prefix, prefixLen: prefixLen, windowActive: specWindow,
+                    posts: specPosts, promptMasks: promptMasks,
+                    slotPromptCounts: slotPromptCounts,
+                    hasNextBlock: hasNextBlock, params: params, forward: forward)
+                snapshots.append(s.resultWindow)
+                nextWindows.append(s.nextWindow)
                 breakFlags.append(s.breakFlag)
-                posts.append(s.nextPost)
-                stats.append(s.stats)
-                specActive = s.nextActive
-                specPost = s.nextPost
+                activationFlags.append(s.activationFlag)
+                postsPerStep.append(s.nextPosts)
+                statsPerStep.append(s.stats)
+                specWindow = s.nextWindow
+                specPosts = s.nextPosts
             }
 
-            // Single blocking readback of the K stacked break flags.
-            let flags = concatenated(breakFlags, axis: 0)  // [K] Bool
+            // Single blocking readback of the 2K stacked event flags.
+            let flags = concatenated(breakFlags + activationFlags, axis: 0)  // [2K] Bool
             eval(flags)
-            eval(snapshots + nextActives + posts + stats)
-            
-            // Proposal B: update boundary at the end of batch if K > 1
-            if let activeCache = activeCache, let boundaryHolder = boundaryHolder,
-               params.elasticCacheEnabled && params.elasticStaticBoundary == nil && effectiveSpecK > 1 {
-                boundaryHolder.value = readBoundary(activeCache: activeCache, layerCount: model.layerCount, gamma: params.elasticGamma)
+            eval(snapshots + nextWindows + postsPerStep.flatMap { $0 } + statsPerStep)
+
+            // Proposal B (WP-1a elastic, nBuf == 1 only): refresh the delayed boundary from
+            // the batch's last evaluated drift similarities.
+            if let activeCache, let boundaryHolder,
+               params.elasticCacheEnabled && params.elasticStaticBoundary == nil && K > 1 {
+                boundaryHolder.value = readBoundary(
+                    activeCache: activeCache, layerCount: model.layerCount,
+                    gamma: params.elasticGamma)
             }
 
             let flagVals = flags.asArray(Bool.self)
             syncPoints += 1
-            forwardsEvaluated += effectiveSpecK
+            forwardsEvaluated += K
 
-            if let firstBreak = flagVals.firstIndex(of: true) {
-                stepsTaken += firstBreak + 1
-                // `posts[firstBreak]` / `stats[...]` were materialized by the eval above —
-                // reading them is a memcpy, not a graph sync (M5(c) budget unaffected).
-                let postAtBreak = Int(posts[firstBreak].item(Int32.self))
-                recordStats(stats, count: firstBreak + 1)
-                return (snapshots[firstBreak], stepsTaken, syncPoints, postAtBreak,
-                        forwardsEvaluated, trajectory)
+            let firstBreak = flagVals[0 ..< K].firstIndex(of: true)
+            let firstActivation = flagVals[K ..< 2 * K].firstIndex(of: true).map { $0 - K }
+
+            // Route the already-evaluated per-step stats of `count` logical steps to their slots.
+            func applyStats(_ count: Int) {
+                for r in 0 ..< count {
+                    let vals = statsPerStep[r].asArray(Float.self)  // materialized — memcpy
+                    for s in slots.indices {
+                        slots[s].trajectory.transfers.append(Int(vals[4 * s]))
+                        slots[s].trajectory.edits.append(Int(vals[4 * s + 1]))
+                        slots[s].trajectory.meanConfidence.append(vals[4 * s + 2])
+                        if s > 0 && vals[4 * s] == 0 && vals[4 * s + 3] > 0 {
+                            slots[s].trailingStarvedSteps += 1
+                        }
+                    }
+                }
+            }
+            func applyWindow(_ window: MLXArray, posts stepPosts: [MLXArray]) {
+                for s in slots.indices {
+                    slots[s].active = S == 1
+                        ? window : window[0..., (s * B) ..< ((s + 1) * B)]
+                    slots[s].postSteps = stepPosts[s]
+                }
+            }
+            func addSteps(_ n: Int) {
+                for s in slots.indices { slots[s].stepsTaken += n }
+                globalStep += n
+                if S == 2 { dualActiveSteps += n }
             }
 
-            // No break within this batch — advance by K steps and continue.
-            stepsTaken += effectiveSpecK
-            recordStats(stats, count: effectiveSpecK)
-            active = specActive
-            postSteps = specPost
+            // Break wins a same-step tie: the commit re-derives activation from fresh state.
+            if let j = firstBreak, j <= (firstActivation ?? Int.max) {
+                applyStats(j + 1)
+                // On a budget break the whole window's step-j write is discarded (simplest
+                // K-invariant rule; the trailing slot's step-j write goes with it — recorded
+                // deviation, WP-1b logbook). On a settle break `resultWindow == nextWindow`.
+                applyWindow(snapshots[j], posts: postsPerStep[j])
+                addSteps(j + 1)
+                let frontPost = Int(postsPerStep[j][0].item(Int32.self))  // memcpy, evaluated above
+                return PhaseResult(
+                    event: .frontBreak, syncPoints: syncPoints,
+                    forwards: forwardsEvaluated, frontPostAtBreak: frontPost)
+            }
+            if let j = firstActivation {
+                applyStats(j + 1)
+                applyWindow(nextWindows[j], posts: postsPerStep[j])
+                addSteps(j + 1)
+                return PhaseResult(
+                    event: .activation, syncPoints: syncPoints,
+                    forwards: forwardsEvaluated, frontPostAtBreak: 0)
+            }
+
+            // No event within this batch — advance by K steps and continue.
+            applyStats(K)
+            applyWindow(specWindow, posts: specPosts)
+            addSteps(K)
+            windowActive = specWindow
+            posts = specPosts
         }
     }
 
-    /// Result of one speculative step.
-    private struct StepResult {
-        let nextActive: MLXArray   // active block carried forward (post-update)
-        let resultActive: MLXArray // committed active block *if the loop breaks at this step*
-        let breakFlag: MLXArray    // scalar Bool
-        let nextPost: MLXArray     // post_steps accumulator carried forward
-        /// Trajectory diagnostics `[3]` Float32: |Γ|, |Δ|, mean x0_p over written positions
-        /// (0 when nothing written). Read back only from the already-evaluated batch.
+    /// Result of one speculative window step.
+    private struct WindowStepResult {
+        let nextWindow: MLXArray     // [1, S*B] window carried forward (post-update)
+        let resultWindow: MLXArray   // window if the loop breaks at this step (budget → pre-update)
+        let breakFlag: MLXArray      // [1] Bool — front settle or front budget
+        let activationFlag: MLXArray // [1] Bool — τ_add fired (single-active phases only)
+        let nextPosts: [MLXArray]    // per-slot post-steps accumulators carried forward
+        /// Diagnostics `[4*S]` Float32 per slot: |Γ|, |Δ|, mean x0_p over written positions,
+        /// masks remaining post-update. Read back only from the already-evaluated batch.
         let stats: MLXArray
     }
 
-    /// One denoising step, fully in-graph. Mirrors the reference loop body: recompute
-    /// `active_mask`, increment `post_steps` on a mask-free iteration, forward once, sample
-    /// (argmax + confidence), build Γ ∪ Δ, and apply. Both break conditions are computed as
-    /// scalar flags so the caller can find the break point without a per-step readback.
-    private func step(
-        prefix: MLXArray, prefixLen: Int, active: MLXArray, postSteps: MLXArray,
-        promptMask: MLXArray, params: GenerationParams, forward: Forward
-    ) -> StepResult {
+    /// One denoising step over the concatenated active window, fully in-graph. Generalizes the
+    /// Phase-2 single-block step to S ∈ {1, 2} slots (WP-1b, arXiv:2606.29215 Alg. 5): per-slot
+    /// Γ with the τ_semi-gated top-1 fallback, window-wide Δ, per-slot post counters, front-only
+    /// break flags, and the τ_add activation flag. At S == 1 this is exactly the Phase-2 step.
+    private func windowStep(
+        prefix: MLXArray, prefixLen: Int, windowActive: MLXArray,
+        posts: [MLXArray], promptMasks: MLXArray, slotPromptCounts: [Int],
+        hasNextBlock: Bool, params: GenerationParams, forward: Forward
+    ) -> WindowStepResult {
         let B = params.blockLength
+        let S = posts.count
+        let A = S * B
         let maskId = Int32(params.maskId)
 
-        let activeMask = active .== maskId                 // [1, B] Bool
-        let anyMask = activeMask.any()                     // scalar Bool
-        // post_steps increments only on a mask-free iteration (reference semantics).
-        let post = postSteps + which(anyMask, MLXArray(Int32(0)), MLXArray(Int32(1)))
-        let budgetBreak = post .> MLXArray(Int32(params.maxPostSteps))  // scalar Bool
+        let activeMask = windowActive .== maskId            // [1, A] Bool
+        // Per-slot post counters: each increments only on that block's mask-free iteration
+        // (reference semantics per block; the trailing block's budget only bites once promoted).
+        var nextPosts: [MLXArray] = []
+        for s in 0 ..< S {
+            let slotMaskAny = activeMask[0..., (s * B) ..< ((s + 1) * B)].any()
+            nextPosts.append(posts[s] + which(slotMaskAny, MLXArray(Int32(0)), MLXArray(Int32(1))))
+        }
+        let anyMaskFront = activeMask[0..., 0 ..< B].any()
+        let budgetBreak = nextPosts[0] .> MLXArray(Int32(params.maxPostSteps))  // scalar Bool
 
-        // One forward, over the full window, logits for the active block only.
-        let window = prefixLen > 0 ? concatenated([prefix, active], axis: 1) : active
-        let logits = forward(window, B)                    // [1, B, V] FP32
+        // One forward over the full window, logits for the active columns only.
+        let window = prefixLen > 0 ? concatenated([prefix, windowActive], axis: 1) : windowActive
+        let logits = forward(window, A)                     // [1, A, V] FP32
         let probs = softmax(logits, axis: -1)
-        let x0 = argMax(logits, axis: -1).asType(.int32)   // [1, B]
-        let x0p = probs.max(axis: -1)                      // [1, B] confidence of argmax token
+        let x0 = argMax(logits, axis: -1).asType(.int32)    // [1, A]
+        let x0p = probs.max(axis: -1)                       // [1, A]
 
-        // Γ (M2T): masked positions clearing τ_mask; if none, force the single most-confident
-        // masked position (numToTransfer == 1). Branchless — no readback of the high-conf count.
         let negInf = MLXArray(-Float.infinity)
-        let maskConf = which(activeMask, x0p, negInf)
-        let highConfMask = (maskConf .> MLXArray(params.threshold)) .&& activeMask
-        let numHigh = highConfMask.asType(.int32).sum()               // scalar
-        let forceTop1 = numHigh .== MLXArray(Int32(0))                // scalar Bool
-        let top1 = argMax(maskConf, axis: -1)                         // [1]
-        let positions = MLXArray(0 ..< Int32(B)).reshaped(1, B)
-        let oneHotTop1 = positions .== top1.reshaped(1, 1)            // [1, B] Bool
-        let gamma = highConfMask .|| (forceTop1 .&& oneHotTop1 .&& activeMask)
+        let maskConf = which(activeMask, x0p, negInf)       // [1, A]
+        let positionsB = MLXArray(0 ..< Int32(B)).reshaped(1, B)
 
-        // Δ (T2T): unmasked, non-prompt positions clearing τ_edit whose prediction changed.
-        let editable = (.!activeMask) .&& (.!promptMask)
+        // Γ (M2T) per slot: threshold acceptances plus the top-1 fallback. The fallback is
+        // gated on the *preceding* block being semi-complete (progress > τ_semi) or committed
+        // (Alg. 5 lines 11–14) — the front's predecessor is committed, so the front keeps the
+        // unconditional fallback (== the nBuf=1 semantics). Blocks are evaluated front-to-back
+        // within the step, so the gate sees the front's post-Γ progress (Alg. 5 loop order).
+        var slotGammas: [MLXArray] = []
+        var precedingSemiComplete = MLXArray(true)
+        for s in 0 ..< S {
+            let r = (s * B) ..< ((s + 1) * B)
+            let slotMask = activeMask[0..., r]
+            let slotConf = maskConf[0..., r]
+            let highConf = (slotConf .> MLXArray(params.threshold)) .&& slotMask
+            let numHigh = highConf.asType(.int32).sum()               // scalar
+            let forceTop1 = (numHigh .== MLXArray(Int32(0))) .&& precedingSemiComplete
+            let top1 = argMax(slotConf, axis: -1)                     // [1]
+            let oneHotTop1 = positionsB .== top1.reshaped(1, 1)       // [1, B] Bool
+            let gamma = highConf .|| (forceTop1 .&& oneHotTop1 .&& slotMask)
+            slotGammas.append(gamma)
+
+            if s + 1 < S {
+                let genCount = Float(B - slotPromptCounts[s])
+                let masksAfter = (slotMask .&& (.!gamma)).asType(.float32).sum()
+                let decodedAfter = (MLXArray(genCount) - masksAfter) / MLXArray(genCount)
+                precedingSemiComplete = decodedAfter .> MLXArray(params.tauSemi)
+            }
+        }
+        let gamma = S == 1 ? slotGammas[0] : concatenated(slotGammas, axis: -1)  // [1, A]
+
+        // Δ (T2T) over the whole window: unmasked, non-prompt positions clearing τ_edit whose
+        // prediction changed. Applies to both active blocks — every position is uncommitted
+        // (Alg. 5 line 16; the dual-block edit behavior is a measured open question).
+        let editable = (.!activeMask) .&& (.!promptMasks)
         let editConf = which(editable, x0p, negInf)
         let highConfEdit = (editConf .> MLXArray(params.editingThreshold)) .&& editable
-        let tokenChanged = x0 .!= active
+        let tokenChanged = x0 .!= windowActive
         let delta = highConfEdit .&& tokenChanged
-        let deltaAny = delta.any()
+        let deltaAnyFront = delta[0..., 0 ..< B].any()
 
         let finalTransfer = gamma .|| delta
-        let nextActive = which(finalTransfer, x0, active)
+        let nextWindow = which(finalTransfer, x0, windowActive)
 
-        // Settle break: no masks and no edits this step. Budget break: post_steps over budget
-        // (no update applied that iteration → result is the pre-update window).
-        let settleBreak = (.!anyMask) .&& (.!deltaAny)
-        // Reshape to [1] so the caller can `concatenated(..., axis: 0)` the K flags into one
-        // array for a single readback (0-dim scalars cannot be concatenated).
+        // Front break only (in-order commit): settle = front mask-free with no front edits
+        // this step; budget = front post-steps over budget (no update applied that iteration —
+        // the pre-update window is the result).
+        let settleBreak = (.!anyMaskFront) .&& (.!deltaAnyFront)
         let breakFlag = (budgetBreak .|| settleBreak).reshaped([1])
-        let resultActive = which(budgetBreak, active, nextActive)
+        let resultWindow = which(budgetBreak, windowActive, nextWindow)
 
-        // Trajectory diagnostics (M8 E1): counts + mean confidence of what this step wrote.
-        // On a budget-break step the write is discarded by `resultActive`, but the diagnostic
-        // still reports what the step *computed* — callers see the discarded step's stats
-        // only if it is the break step, matching stepsPerBlock's +1 semantics.
-        let gammaCount = gamma.asType(.float32).sum()
-        let deltaCount = delta.asType(.float32).sum()
-        let written = finalTransfer.asType(.float32)
-        let writtenCount = written.sum()
-        let meanConf = (x0p.asType(.float32) * written).sum()
-            / MLX.maximum(writtenCount, MLXArray(Float(1)))
-        let stats = concatenated(
-            [gammaCount.reshaped([1]), deltaCount.reshaped([1]), meanConf.reshaped([1])],
-            axis: 0)
+        // τ_add activation (Alg. 4/5): in single-active phases with a next block available,
+        // fire when the block's post-update decoded fraction over generated positions strictly
+        // exceeds τ_add; suppressed while an in-flight eos is present under eos_early_stop.
+        let activationFlag: MLXArray
+        if S == 1 && hasNextBlock {
+            let nextMaskCount = (nextWindow .== maskId).asType(.float32).sum()
+            let genCount = Float(B - slotPromptCounts[0])
+            let decodedFrac = (MLXArray(genCount) - nextMaskCount) / MLXArray(genCount)
+            var activation = decodedFrac .> MLXArray(params.tauAdd)
+            if params.eosEarlyStop {
+                let eosInFlight = (nextWindow .== MLXArray(Int32(params.eosId))).any()
+                activation = activation .&& (.!eosInFlight)
+            }
+            activationFlag = activation.reshaped([1])
+        } else {
+            activationFlag = MLXArray([false])
+        }
 
-        return StepResult(
-            nextActive: nextActive, resultActive: resultActive,
-            breakFlag: breakFlag, nextPost: post, stats: stats)
+        // Trajectory diagnostics per slot (M8 E1 + τ_semi starvation).
+        var statsParts: [MLXArray] = []
+        for s in 0 ..< S {
+            let r = (s * B) ..< ((s + 1) * B)
+            let slotDelta = delta[0..., r]
+            let written = (slotGammas[s] .|| slotDelta).asType(.float32)
+            let writtenCount = written.sum()
+            let meanConf = (x0p[0..., r].asType(.float32) * written).sum()
+                / MLX.maximum(writtenCount, MLXArray(Float(1)))
+            let masksRemaining = (nextWindow[0..., r] .== maskId).asType(.float32).sum()
+            statsParts.append(slotGammas[s].asType(.float32).sum().reshaped([1]))
+            statsParts.append(slotDelta.asType(.float32).sum().reshaped([1]))
+            statsParts.append(meanConf.reshaped([1]))
+            statsParts.append(masksRemaining.reshaped([1]))
+        }
+        let stats = concatenated(statsParts, axis: 0)       // [4*S]
+
+        return WindowStepResult(
+            nextWindow: nextWindow, resultWindow: resultWindow,
+            breakFlag: breakFlag, activationFlag: activationFlag,
+            nextPosts: nextPosts, stats: stats)
     }
 }
