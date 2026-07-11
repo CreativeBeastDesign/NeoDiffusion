@@ -39,7 +39,13 @@ Sweep arms (recorded verbatim; binary = post-commit `wp-2a-speculation` release 
 
 ## 4. Findings
 
-*(pending sweep)*
+**F1 — Acceptance is exceptional; the S2D2 mechanism works better here than in the paper's own setting.** (sourced: `scratch/wp2a_sweep.jsonl`, τ_span=1) Accepted tokens per verified step (median): **code 9.77, reasoning 6.78, chat 4.12** (H5 ordering confirmed). Steps/run drop: code 24→20, chat 50→40, with TPF-logical +21% (code) to +73% (chat). The verifier and the diffusion drafter agree on long runs — LLaDA2.1's block-causal AR view is a strong self-verifier.
+
+**F2 — Always-verify is compute-negative ~2–3× on the width metric (H2 first half refuted at τ_span=1).** (sourced) Width-corrected TPF: chat 0.82 (−45%), reasoning 1.12 (−65%), code 1.53 (−57%) vs baselines 1.49/3.21/3.57. Cause: every step pays 3B of forward width (target B + verifier 2B) for a ~0.7× step reduction, plus K=4 overshoot at 3B per discarded forward.
+
+**F3 — Batch-boundary routing is inert in this regime (H1 refuted at K=4).** (sourced) τ_span ∈ {8, 16} produced rows *identical* to τ_span=1 (same tokensProcessed to the token). Diagnosis: acceptance is so high that blocks settle in 1–2 batches of K=4; the first batch is always verified by initialization, code/reasoning blocks are single-batch (the routing update point — a batch with no event — never executes), and chat retains ≥τ_span masks after batch 1. **The routing granularity (4 steps × 3B) exceeds the total speculation opportunity per block.** The Proposal-B-style pattern that worked for elastic (long phases) cannot work when speculation itself shortens phases below one batch.
+
+*(K=1 probes — per-step routing granularity, zero overshoot — pending; they decide whether an operating point exists on the width metric.)*
 
 ## 5. Results summary
 

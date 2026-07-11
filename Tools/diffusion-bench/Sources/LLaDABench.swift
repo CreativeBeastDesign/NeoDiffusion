@@ -234,6 +234,10 @@ func runLLaDABench() async throws {
     let speculation: GenerationParams.SpeculationKind =
         (argValue("--speculation") == "s2d2") ? .s2d2 : .none
     let tauSpan = Int(argValue("--tau-span") ?? "1") ?? 1
+    // Optional Γ/Δ threshold overrides (WP-2a conservative-baseline probe: the S2D2 papers
+    // benchmark against τ_M2T=0.95-style decoding; the Q-mode default is 0.7).
+    let thresholdMaskOverride = argValue("--threshold-mask").flatMap(Float.init)
+    let thresholdEditOverride = argValue("--threshold-edit").flatMap(Float.init)
 
     // Prompt suites: fixed cases checked into Tools/diffusion-bench/PromptSuites (M6).
     // --prompt TEXT replaces them with a single ad-hoc case.
@@ -330,13 +334,16 @@ func runLLaDABench() async throws {
     }
 
     func params(for mode: GenerationParams.Mode) -> GenerationParams {
-        GenerationParams.mode(
+        var p = GenerationParams.mode(
             mode, blockLength: blockLength, genLength: genLength,
             maskId: tokenizer.maskId, eosId: tokenizer.eosId, eosEarlyStop: eosEarlyStop,
             nBuf: nBuf, tauAdd: tauAdd, tauSemi: tauSemi,
             speculation: speculation, tauSpan: tauSpan,
             elasticCacheEnabled: elasticCache, elasticGamma: elasticGamma, elasticBeta: elasticBeta,
             elasticStaticBoundary: elasticStaticBoundary)
+        if let t = thresholdMaskOverride { p.threshold = t }
+        if let t = thresholdEditOverride { p.editingThreshold = t }
+        return p
     }
 
     func generate(_ arm: LLaDAArm, promptIds: [Int])
@@ -391,7 +398,9 @@ func runLLaDABench() async throws {
         let stepsBlockSum = output.stepsPerBlock.reduce(0, +)
         let posts = output.metrics.postStepsPerBlock.reduce(0, +)
         let blocks = output.stepsPerBlock.count
-        let thresholds = arm.mode.thresholds
+        // Effective thresholds (overrides included), not the mode label's — rule F7.
+        let effectiveParams = params(for: arm.mode)
+        let thresholds = (mask: effectiveParams.threshold, edit: effectiveParams.editingThreshold)
         let result = LLaDARunResult(
             arm: arm.name, run: run, suite: suite, promptId: prompt.id,
             mode: arm.mode.rawValue,
