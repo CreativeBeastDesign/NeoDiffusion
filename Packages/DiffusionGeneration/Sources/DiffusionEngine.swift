@@ -1040,7 +1040,7 @@ public final class DiffusionEngine {
         // Δ (T2T) over the whole window: unmasked, non-prompt positions clearing τ_edit whose
         // prediction changed. Applies to both active blocks — every position is uncommitted
         // (Alg. 5 line 16; the dual-block edit behavior is a measured open question).
-        let editable = (.!activeMask) .&& (.!promptMasks)
+        let editable = (.!activeMask) .&& (.!promptMasks) .&& (.!frozenMask)
         let editConf = which(editable, x0p, negInf)
         let highConfEdit = (editConf .> MLXArray(params.editingThreshold)) .&& editable
         let tokenChanged = x0 .!= windowActive
