@@ -73,7 +73,7 @@ final class JotTests: XCTestCase {
         
         let p = GenerationParams(
             threshold: 0.7, editingThreshold: 0.5,
-            blockLength: B, genLength: B,
+            blockLength: B, genLength: B - 1, // generated tokens count is B - promptLength = 15
             maskId: 999, eosId: 998,
             jotEnabled: true,
             jotK: 2,
@@ -98,9 +98,9 @@ final class JotTests: XCTestCase {
             }
         }
         XCTAssertTrue(foundFrozen, "Expected JOT to freeze stable tokens and pass the frozen mask to forward")
-        XCTAssertEqual(output.tokens[0], 1)
-        XCTAssertEqual(Array(output.tokens[1..<15]), Array(repeating: 7, count: 14))
-        XCTAssertEqual(output.tokens[15], 7)
+        XCTAssertEqual(Array(output.tokens[0..<13]), Array(repeating: 7, count: 13))
+        XCTAssertEqual(output.tokens[13], 7) // fallback-unmasked position 14
+        XCTAssertEqual(output.tokens[14], 0) // fallback-unmasked position 15 (logits 0.0)
     }
 
     /// Verify collision resolution: if a delta edit occurs at a frozen position,
@@ -139,7 +139,7 @@ final class JotTests: XCTestCase {
         
         let p = GenerationParams(
             threshold: 0.7, editingThreshold: 0.5,
-            blockLength: B, genLength: B,
+            blockLength: B, genLength: B - 1, // generated tokens count is B - promptLength = 15
             maskId: 999, eosId: 998,
             jotEnabled: true,
             jotK: 2,
@@ -151,11 +151,11 @@ final class JotTests: XCTestCase {
         let output = engine.run(prompt: prompt, params: p, forward: forward, streamBlock: nil)
         
         // Verify output tokens at position 5 is 8 (the edit resolved correctly after unfreezing)
-        XCTAssertEqual(output.tokens[5], 8, "Edit collision failed to resolve")
-        XCTAssertEqual(output.tokens[0], 1)
-        XCTAssertEqual(Array(output.tokens[1..<5]), Array(repeating: 7, count: 4))
-        XCTAssertEqual(Array(output.tokens[6..<14]), Array(repeating: 7, count: 8))
-        XCTAssertEqual(output.tokens[14], 7)
-        XCTAssertEqual(output.tokens[15], 7)
+        // absolute position 5 corresponds to output.tokens index 4.
+        XCTAssertEqual(output.tokens[4], 8, "Edit collision failed to resolve")
+        XCTAssertEqual(Array(output.tokens[0..<4]), Array(repeating: 7, count: 4))
+        XCTAssertEqual(Array(output.tokens[5..<13]), Array(repeating: 7, count: 8))
+        XCTAssertEqual(output.tokens[13], 7)
+        XCTAssertEqual(output.tokens[14], 0)
     }
 }
