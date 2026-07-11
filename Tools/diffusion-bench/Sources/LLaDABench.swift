@@ -217,6 +217,9 @@ func runLLaDABench() async throws {
     let nBuf = Int(argValue("--n-buf") ?? "1") ?? 1
     let tauAdd = Float(argValue("--tau-add") ?? "2.0") ?? 2.0
     let tauSemi = Float(argValue("--tau-semi") ?? "0.9") ?? 0.9
+    // Full-text dump for blind quality scoring (JSONL keeps only 160-char prefixes):
+    // one JSON line per generation {arm, suite, promptId, run, text, tokens, eosBlock}.
+    let dumpTextPath = argValue("--dump-text")
 
     // Prompt suites: fixed cases checked into Tools/diffusion-bench/PromptSuites (M6).
     // --prompt TEXT replaces them with a single ad-hoc case.
@@ -485,6 +488,25 @@ func runLLaDABench() async throws {
                     appendResult(arm, run: run, suite: suite.name, prompt: prompt,
                                  promptIds: promptIds, output: output, seconds: seconds,
                                  peakGB: peakGB, env: env, warmup: warmup, text: text)
+                    if let dumpTextPath {
+                        let record: [String: String] = [
+                            "arm": arm.name, "suite": suite.name, "promptId": prompt.id,
+                            "run": String(run), "user": prompt.user, "text": text,
+                            "tokens": String(output.tokens.count),
+                            "eosBlock": output.metrics.eosBlockIndex.map(String.init) ?? "none",
+                        ]
+                        if let data = try? JSONEncoder().encode(record),
+                           let line = String(data: data, encoding: .utf8) {
+                            if let handle = FileHandle(forWritingAtPath: dumpTextPath) {
+                                handle.seekToEndOfFile()
+                                handle.write(Data((line + "\n").utf8))
+                                try? handle.close()
+                            } else {
+                                try? (line + "\n").write(
+                                    toFile: dumpTextPath, atomically: true, encoding: .utf8)
+                            }
+                        }
+                    }
 
                     // Console TPF-logical uses the engine's global step counter — at nBuf=2
                     // sum(stepsPerBlock) double-counts dual-phase steps (JSONL was already right).

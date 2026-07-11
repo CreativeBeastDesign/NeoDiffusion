@@ -37,14 +37,40 @@ Implement the source paper's Block-Buffer MultiBD (arXiv:2606.29215, Algorithm 5
 | 6 | 05:40 | Bench: `--n-buf/--tau-add/--tau-semi`; JSONL fields `nBuf/tauAdd/tauSemi/dualActiveSteps/activationSteps/trailingStarvedStepsPerBlock/single+dualActiveDenoiseSeconds`, all **effective engine echoes**; `logicalSteps`/`tpfLogical` switched to the global step counter (block-sum double-counts dual steps); console TPF fixed the same way | smoke run below |
 | 7 | 05:45 | Smoke, real 4-bit weights: `diffusion-bench llada --runs 1 --cooldown 0 --suites chat --gen-length 128 --arm nbuf2-smoke --arm-mode q --n-buf 2 --tau-add 0.3` | end-to-end good; peak 9.64 GB (baseline 9.57 — no paging blowup, risk 2 clear); accounting self-consistent (capital: blockSum 29 − logical 21 = dual 8 ✓); early signal: TPF-logical capital 1.86 vs 1.52 baseline, email 2.46 vs 2.06 |
 | 8 | 05:50 | **τ_add sweep launched**: `diffusion-bench llada --runs 3 --cooldown 30 --suites chat,reasoning --gen-length 128 --arm {nbuf1-refreeze, nbuf2-tadd01/03/05/07/09} --arm-mode q [--n-buf 2 --tau-add τ] --json scratch/wp1b_sweep.jsonl` (driver: 6 arms sequential, 30 s inter-arm) | log `scratch/wp1b_sweep.log`; results §4/§5 |
+| 9 | 06:25 | **Provenance rule catches a driver bug**: the tadd01 arm's rows echoed `nBuf 1, tauAdd 2` — the zsh driver's unquoted `$2` was *not* word-split (zsh default), so the MultiBD flags never reached the binary and 25 rows were baseline duplicates mislabeled as nbuf2 arms. Sweep killed; 25 rows scrubbed by effective-echo filter (`nbuf2* && nBuf==1`); driver fixed (`${=2}`); nbuf2 arms relaunched detached. First re-run row verified: echo `nBuf 2, tauAdd 0.1`, activation at step 0 | **the F7 rule works**: without the echoes this would have been a silently-void sweep, indistinguishable from "MultiBD has zero effect" — the elastic campaign's mislabeled-K failure mode, prevented this time |
 
-## 4. Findings
+## 4. Findings (sweep: 6 arms × chat+reasoning × 4 prompts × 3 runs, gen-128, Q mode, K=4; all counters deterministic across runs; envValid 0/144 — memory-pressured night, wall-clock is indicative only, counters decide per §0.1)
 
-*(to be filled from the sweep — hypotheses H1–H5 above decide)*
+**F1 — TPF-logical gain clears the reject line but lands below the source's math number (H1: partial).** (sourced: `scratch/wp1b_sweep.jsonl`) Best arms: chat **+23.3%** at τ_add=0.5 (TPF 1.79→2.21), reasoning **+22.3%** at τ_add∈{0.1,0.3} (4.77→5.83). Above the ≥+15% floor on both suites; below the paper's +44% (math, 4096-token budget). Likely runway-limited at gen-128 (blocks 4–5, early EOS) — the gen-256 probe (§5a) tests this.
+
+**F2 — The τ_add optimum is domain-dependent, and chat/reasoning differ from both of the paper's domains (H2: confirmed).** (sourced) Chat: flat +21% at 0.1–0.3, peak +23.3% at 0.5, **cliff to +3% at 0.7** (activation arrives too late to matter once the front block is nearly settled — dual% falls 80→35%). Reasoning: best early (0.1–0.3, +22%), gentle decay to +10% from 0.5. The paper's math=0.10 / code=0.90 settings bracket ours; per-mode presets are warranted (serving: chat 0.5, reasoning 0.3 — pending quality).
+
+**F3 — M1 wall-clock is net-negative at the winner; TPS verdict deferred to Studio (H3: confirmed, defer branch).** (sourced, host-scoped) Dual/single per-step latency multiplier (within-run ratio, robust to ambient swap): ~1.75× at chat τ_add=0.5 (paper H100: 1.24×). Weighted: steps ×0.80, cost per dual step ×1.75 over 52% of steps → ≈ ×1.11 net wall-clock on M1 — the M1 is too compute-bound at 64-token windows for the TPF gain to convert. Roofline attribution: compute-bound (multiplier ≥ TPF gain). The roadmap's ≥15% net-TPS accept gate is **formally undecided until the Studio backfill**; expected favorable there (M2 Ultra headroom; H100 analogue converted 1.78×TPF/1.24× → 1.44× TPS).
+
+**F4 — Dual-block interference is real at aggressive activation and vanishes at the winner (H4: refuted at low τ_add, holds at ≥0.5).** (sourced) Front-block steps vs nBuf=1, per-block: median +2.0 at τ_add=0.1, +1.0 at 0.3, **+0.0 at ≥0.5**. Chat edits double (4→8 total) under dual activity — the mbd-lms open question resolves as "editing keeps working; interference shows up as front-block steps only when the trailing block activates very early".
+
+**F5 — Trailing starvation behaves as designed and is negligible at the winner (H5: confirmed).** (sourced) τ_semi-gated fallback denial: 13 steps at τ_add=0.1 → 4 at 0.5 → 0 at ≥0.7 (chat). A τ_semi sweep is **not warranted** at the winning τ_add (≤4 starved steps ≈ ≤2% of steps — nothing to recover; recorded as the C.5(a) skip rationale).
+
+**F6 — TPF-honest diverges from TPF-logical as event density rises; overshoot is the cost of K=4 with events.** (sourced) Reasoning at τ_add=0.1: logical 4.77→5.83 but honest 3.21→2.67 — activation/commit events split batches and every break discards up to K−1 evaluated forwards, and short reasoning blocks make events dense. On hosts where forwards ≈ wall-clock (M1), overshoot eats the logical gain — same compute-bound story as F3. Future direction (not run tonight): event-aware K (drop to K=1–2 when activation/settle is predicted near) — files under the §4 kernel/loop track, not WP-1b.
+
+**F7 — The effective-echo provenance rule caught a silently-void sweep on its first outing** (timeline 9): zsh's unsplit `$2` dropped all MultiBD flags; rows echoed `nBuf 1, tauAdd 2.0` under nbuf2 arm names; 25 rows scrubbed by echo filter and re-run. Without the echoes the sweep would have read as "MultiBD has zero effect".
 
 ## 5. Results summary
 
-*(pending sweep completion)*
+| Arm (Q, gen-128) | chat tpfLog (Δ) | reasoning tpfLog (Δ) | chat dual% | front-Δsteps (med) | starved |
+|---|---|---|---|---|---|
+| nbuf1-refreeze | 1.79 (—) | 4.77 (—) | 0 | — | 0 |
+| τ_add=0.1 | 2.16 (+20.7%) | 5.83 (+22.3%) | 80% | +2.0 | 13 |
+| τ_add=0.3 | 2.16 (+20.7%) | 5.83 (+22.3%) | 70% | +1.0 | 10 |
+| **τ_add=0.5** | **2.21 (+23.3%)** | 5.24 (+10.0%) | 52% | +0.0 | 4 |
+| τ_add=0.7 | 1.84 (+3.1%) | 5.24 (+10.0%) | 35% | +0.0 | 2 |
+| τ_add=0.9 | 1.85 (+3.4%) | 5.23 (+9.6%) | 14% | +0.0 | 0 |
+
+**Overnight verdict (dev-only, §0.1): algorithmic ACCEPT, provisional.** The hardware-independent deciders clear the floor (+23%/+22% TPF-logical, deterministic, parity-gated); M1 wall-clock is net-negative (F3) so the roadmap's net-TPS gate defers to the Studio backfill; quality awaits André's blind scores (`scratch/wp1b_blind/`). Recommended state: **land with `nBuf=1` as the served default** and per-mode presets (chat τ_add 0.5, reasoning 0.3) enabled only after Studio TPS + quality confirm. §5a below adds the improvement-loop probes.
+
+### 5a. Improvement-loop probes (C.5)
+
+*(pending: τ_add=0.6 cliff localization; gen-256 length sensitivity on baseline/0.3/0.5; τ_semi probe skipped per F5; K=2-dual skipped — no paging observed, peak 9.64 GB)*
 
 ## 6. Deviations from the source algorithm (recorded per house rules)
 
