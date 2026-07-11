@@ -65,6 +65,19 @@ public struct GenerationParams: Sendable, Equatable {
     /// routing sweep arm.
     public var tauSpan: Int
 
+    /// WP-2b-2 dynamic confidence threshold (arXiv:2601.17917): adaptation strength α in
+    /// τ(t) = τ0·(1 − α(1 − r_mask)), where r_mask is the start-of-step masked fraction over
+    /// the slot's *generated* positions. `0` disables (τ(t) ≡ τ0 — exact parity); the paper's
+    /// optimum is α≈0.6 at τ0=0.9. Applies to τ_mask (Γ) only — τ_edit stays static
+    /// (decision 2026-07-11, one-variable discipline; see wp2b logbook).
+    public var dynamicTauAlpha: Float
+    /// WP-2b-3 EOS early exit (arXiv:2601.17917): once a Γ/Δ-settled, non-prompt EOS exists
+    /// in the front block, every still-masked window position after the first EOS is filled
+    /// with EOS in-graph, so the block (and any trailing slot) settles immediately. Output is
+    /// trim-invariant by construction (trim is inclusive of the first EOS). Requires
+    /// `eosEarlyStop`; default `false` = exact parity.
+    public var eosEarlyExit: Bool
+
     /// Whether Elastic-Cache is enabled (WP-1a).
     public var elasticCacheEnabled: Bool
     /// Drift threshold γ for Elastic-Cache.
@@ -90,6 +103,8 @@ public struct GenerationParams: Sendable, Equatable {
         tauSemi: Float = 0.9,
         speculation: SpeculationKind = .none,
         tauSpan: Int = 1,
+        dynamicTauAlpha: Float = 0.0,
+        eosEarlyExit: Bool = false,
         elasticCacheEnabled: Bool = false,
         elasticGamma: Float = 0.9,
         elasticBeta: Int = 16,
@@ -110,6 +125,8 @@ public struct GenerationParams: Sendable, Equatable {
         self.tauSemi = tauSemi
         self.speculation = speculation
         self.tauSpan = tauSpan
+        self.dynamicTauAlpha = dynamicTauAlpha
+        self.eosEarlyExit = eosEarlyExit
         self.elasticCacheEnabled = elasticCacheEnabled
         self.elasticGamma = elasticGamma
         self.elasticBeta = elasticBeta
@@ -148,6 +165,8 @@ public struct GenerationParams: Sendable, Equatable {
         tauSemi: Float = 0.9,
         speculation: SpeculationKind = .none,
         tauSpan: Int = 1,
+        dynamicTauAlpha: Float = 0.0,
+        eosEarlyExit: Bool = false,
         elasticCacheEnabled: Bool = false,
         elasticGamma: Float = 0.9,
         elasticBeta: Int = 16,
@@ -170,6 +189,8 @@ public struct GenerationParams: Sendable, Equatable {
             tauSemi: tauSemi,
             speculation: speculation,
             tauSpan: tauSpan,
+            dynamicTauAlpha: dynamicTauAlpha,
+            eosEarlyExit: eosEarlyExit,
             elasticCacheEnabled: elasticCacheEnabled,
             elasticGamma: elasticGamma,
             elasticBeta: elasticBeta,

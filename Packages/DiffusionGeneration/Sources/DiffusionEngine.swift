@@ -163,6 +163,9 @@ public final class DiffusionEngine {
         public let effectiveSpeculationK: Int
         public let effectiveSpeculation: String
         public let effectiveTauSpan: Int
+        // MARK: WP-2b effective echoes
+        public let effectiveDynamicTauAlpha: Float
+        public let effectiveEosEarlyExit: Bool
     }
 
     /// Mutable stats shared between the cached entry point's closures and `run` (the capture
@@ -445,6 +448,11 @@ public final class DiffusionEngine {
             "speculation x MultiBD is untested (roadmap §5 cell 1b×2a open); run one at a time")
         precondition(!(params.speculation != .none && params.elasticCacheEnabled),
             "speculation x Elastic-Cache: WP-1a is closed; do not combine")
+        precondition(!(params.dynamicTauAlpha > 0 && params.speculation != .none),
+            "dynamic τ x speculation is untested (roadmap §5 cell 2a×2b-2: threshold changes "
+            + "acceptance dynamics); run one at a time")
+        precondition(!params.eosEarlyExit || params.eosEarlyStop,
+            "eosEarlyExit extends eosEarlyStop (WP-2b-3); enable both")
         let promptLength = prompt.count
         let numBlocks = (promptLength + params.genLength + B - 1) / B
         let prefillBlocks = promptLength / B
@@ -625,7 +633,9 @@ public final class DiffusionEngine {
                 effectiveTauSemi: params.tauSemi,
                 effectiveSpeculationK: speculationK,
                 effectiveSpeculation: params.speculation.rawValue,
-                effectiveTauSpan: params.tauSpan))
+                effectiveTauSpan: params.tauSpan,
+                effectiveDynamicTauAlpha: params.dynamicTauAlpha,
+                effectiveEosEarlyExit: params.eosEarlyExit))
     }
 
     // MARK: - Per-phase denoising with K-step speculative readback
@@ -936,7 +946,24 @@ public final class DiffusionEngine {
                 let r = (s * B) ..< ((s + 1) * B)
                 let slotMask = activeMask[0..., r]
                 let slotConf = maskConf[0..., r]
-                let highConf = (slotConf .> MLXArray(params.threshold)) .&& slotMask
+                // WP-2b-2 dynamic τ (arXiv:2601.17917): τ(t) = τ0·(1 − α(1 − r_mask)), with
+                // r_mask the start-of-step masked fraction over this slot's *generated*
+                // positions (prompt positions are never masked, so the raw masked count is
+                // already generated-only). α == 0 keeps the static scalar — exact parity.
+                // Note: the threshold LOOSENS as the block fills (τ0 at r_mask=1 → τ0(1−α)
+                // at r_mask=0) — the formula is authoritative over the source note's prose
+                // (logbook note, WP-2b).
+                let tauMask: MLXArray
+                if params.dynamicTauAlpha > 0 {
+                    let genCount = Float(B - slotPromptCounts[s])
+                    let rMask = slotMask.asType(.float32).sum() / MLXArray(genCount)
+                    tauMask = MLXArray(params.threshold)
+                        * (MLXArray(Float(1)) - MLXArray(params.dynamicTauAlpha)
+                            * (MLXArray(Float(1)) - rMask))
+                } else {
+                    tauMask = MLXArray(params.threshold)
+                }
+                let highConf = (slotConf .> tauMask) .&& slotMask
                 let numHigh = highConf.asType(.int32).sum()               // scalar
                 let forceTop1 = (numHigh .== MLXArray(Int32(0))) .&& precedingSemiComplete
                 let top1 = argMax(slotConf, axis: -1)                     // [1]
@@ -966,7 +993,21 @@ public final class DiffusionEngine {
         let deltaAnyFront = delta[0..., 0 ..< B].any()
 
         let finalTransfer = gamma .|| delta
-        let nextWindow = which(finalTransfer, writeTok, windowActive)
+        var nextWindow = which(finalTransfer, writeTok, windowActive)
+
+        // WP-2b-3 EOS early exit (arXiv:2601.17917): once a settled, non-prompt EOS exists in
+        // the FRONT block, fill every still-masked window position after the first EOS with
+        // EOS in-graph — the block (and any trailing slot) then settles via the normal
+        // mask-free break. Trim is inclusive of the first EOS, so output text is unchanged
+        // unless Δ would later have edited that EOS away (the measured text-change-rate risk).
+        if params.eosEarlyExit {
+            let eosTok = MLXArray(Int32(params.eosId))
+            let settledEos = (nextWindow .== eosTok) .&& (.!promptMasks)     // [1, A]
+            let frontHasEos = settledEos[0..., 0 ..< B].any()                // scalar Bool
+            let afterFirstEos = cumsum(settledEos.asType(.int32), axis: -1) .>= MLXArray(Int32(1))
+            let filled = which(afterFirstEos .&& (nextWindow .== maskId), eosTok, nextWindow)
+            nextWindow = which(frontHasEos, filled, nextWindow)
+        }
 
         // Front break only (in-order commit): settle = front mask-free with no front edits
         // this step; budget = front post-steps over budget (no update applied that iteration —

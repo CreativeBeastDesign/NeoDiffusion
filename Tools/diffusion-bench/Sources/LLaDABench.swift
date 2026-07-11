@@ -184,6 +184,9 @@ struct LLaDARunResult: Codable {
     /// Tokens ÷ (tokensProcessedInForwards / blockLength): the cross-policy decider — plain
     /// TPF-honest misleads when forwards differ in width (32 target vs 64 verifier).
     let tpfWidthCorrected: Double
+    // WP-2b — engine effective echoes (rule F7).
+    let dynamicTauAlpha: Float
+    let eosEarlyExit: Bool
     let elasticCacheEnabled: Bool
     let elasticGamma: Float
     let elasticBeta: Int
@@ -234,6 +237,10 @@ func runLLaDABench() async throws {
     let speculation: GenerationParams.SpeculationKind =
         (argValue("--speculation") == "s2d2") ? .s2d2 : .none
     let tauSpan = Int(argValue("--tau-span") ?? "1") ?? 1
+
+    // WP-2b: dynamic τ (2b-2) + EOS early exit (2b-3). Rows record engine echoes (rule F7).
+    let dynTauAlpha = Float(argValue("--dyn-tau-alpha") ?? "0.0") ?? 0.0
+    let eosEarlyExit = hasFlag("--eos-early-exit")
     // Optional Γ/Δ threshold overrides (WP-2a conservative-baseline probe: the S2D2 papers
     // benchmark against τ_M2T=0.95-style decoding; the Q-mode default is 0.7).
     let thresholdMaskOverride = argValue("--threshold-mask").flatMap(Float.init)
@@ -339,6 +346,7 @@ func runLLaDABench() async throws {
             maskId: tokenizer.maskId, eosId: tokenizer.eosId, eosEarlyStop: eosEarlyStop,
             nBuf: nBuf, tauAdd: tauAdd, tauSemi: tauSemi,
             speculation: speculation, tauSpan: tauSpan,
+            dynamicTauAlpha: dynTauAlpha, eosEarlyExit: eosEarlyExit,
             elasticCacheEnabled: elasticCache, elasticGamma: elasticGamma, elasticBeta: elasticBeta,
             elasticStaticBoundary: elasticStaticBoundary)
         if let t = thresholdMaskOverride { p.threshold = t }
@@ -459,6 +467,8 @@ func runLLaDABench() async throws {
                 ? Double(output.tokens.count)
                     / (Double(output.metrics.tokensProcessedInForwards) / Double(blockLength))
                 : 0,
+            dynamicTauAlpha: output.metrics.effectiveDynamicTauAlpha,
+            eosEarlyExit: output.metrics.effectiveEosEarlyExit,
             elasticCacheEnabled: arm.cached && elasticCache,
             elasticGamma: elasticGamma,
             elasticBeta: elasticBeta,
