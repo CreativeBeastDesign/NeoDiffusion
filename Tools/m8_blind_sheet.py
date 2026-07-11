@@ -53,9 +53,11 @@ def build(args):
     for pid, masks in sorted(by_prompt.items()):
         if len(masks) != 2:
             continue
-        # Deterministic per-prompt shuffle.
+        # Deterministic per-prompt shuffle. Labels come from the pairs file (originally
+        # strict/referenceBias; WP-1b reuses the sheet for nbuf1/nbuf2 arms — any two labels).
         flip = int(hashlib.sha256(pid.encode()).hexdigest(), 16) % 2 == 1
-        order = ["referenceBias", "strict"] if flip else ["strict", "referenceBias"]
+        labels = sorted(masks.keys())
+        order = [labels[1], labels[0]] if flip else labels
         key[pid] = {"A": order[0], "B": order[1]}
         sheet.append(f"\n## {pid}\n\n**Prompt**: {masks[order[0]]['user']}\n")
         for label, mask in zip("AB", order):
@@ -95,9 +97,10 @@ def score(args):
             v = m.group(1).strip().upper()
             verdicts[pid] = key[pid].get(v, "tie" if v == "TIE" else None)
     wins = Counter(verdicts.values())
-    print(f"scored prompts: {len(verdicts)}")
-    print(f"strict wins: {wins.get('strict', 0)} | referenceBias wins: "
-          f"{wins.get('referenceBias', 0)} | ties: {wins.get('tie', 0)}")
+    labels = sorted({l for v in key.values() for l in v.values()})
+    print(f"scored prompts: {len(verdicts)} (key: {os.path.join(args.out, 'key.json')})")
+    print(" | ".join(f"{l} wins: {wins.get(l, 0)}" for l in labels)
+          + f" | ties: {wins.get('tie', 0)}")
     for pid, winner in sorted(verdicts.items()):
         print(f"  {pid}: {winner}")
 

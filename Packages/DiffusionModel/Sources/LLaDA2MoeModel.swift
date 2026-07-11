@@ -37,16 +37,19 @@ public class LLaDA2MoeModel: Module {
     }
 
     /// Cache-aware forward (phase-2 §5 M5): active-window hidden states through the cached inner
-    /// stack, then the output head with logits cast to **FP32** (§2.6). Returns `[1, B, vocab]`.
+    /// stack, then the output head with logits cast to **FP32** (§2.6). Returns `[1, A, vocab]`.
     ///
     /// - Parameters:
-    ///   - activeIds: active-window token ids `[1, B]`
-    ///   - positionIds: absolute positions `[1, B]` of the active window
+    ///   - activeIds: active-window token ids `[1, A]` (A = one block, or two for WP-1b MultiBD)
+    ///   - positionIds: absolute positions `[1, A]` of the active window
     ///   - caches: one committed-K/V cache per layer (updated in place)
+    ///   - mask: optional additive mask `[1, 1, A, committed + A]`; nil for a single active
+    ///     block, the block-causal active-window mask for a two-block window (WP-1b)
     public func callAsFunction(
-        _ activeIds: MLXArray, positionIds: MLXArray, caches: [LayerKVCache]
+        _ activeIds: MLXArray, positionIds: MLXArray, caches: [LayerKVCache],
+        mask: MLXArray? = nil
     ) -> MLXArray {
-        let hidden = model(activeIds, positionIds: positionIds, caches: caches)
+        let hidden = model(activeIds, positionIds: positionIds, caches: caches, mask: mask)
         return lmHead(hidden).asType(.float32)
     }
 
@@ -144,13 +147,14 @@ public class LLaDA2MoeInnerModel: Module {
     /// `caches` must have one entry per layer, aligned with `layers`; each is updated in place
     /// (its `pending*` set to this window's K/V) for a later commit.
     public func callAsFunction(
-        _ activeIds: MLXArray, positionIds: MLXArray, caches: [LayerKVCache]
+        _ activeIds: MLXArray, positionIds: MLXArray, caches: [LayerKVCache],
+        mask: MLXArray? = nil
     ) -> MLXArray {
         precondition(caches.count == layers.count, "one cache per layer required")
         var hidden = wordEmbeddings(activeIds)
         let (cos, sin) = rotaryEmbedding.cosSin(positionIds: positionIds)
         for (layer, cache) in zip(layers, caches) {
-            hidden = layer(hidden, cos: cos, sin: sin, cache: cache)
+            hidden = layer(hidden, cos: cos, sin: sin, cache: cache, mask: mask)
         }
         return norm(hidden)
     }

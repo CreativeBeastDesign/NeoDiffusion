@@ -52,6 +52,8 @@ Raise `N_buf` 1→2 in the Block-Buffer loop; add τ_add (activation) and τ_sem
 - Interaction with LLaDA2.1 editing: post-step (`max_post_steps`) refinement runs per active block; confirm edit behavior with two concurrently active blocks matches single-block quality (open question in [[mbd-lms]]).
 **Accept**: net TPS gain ≥15% on chat suite at ≤0.5pp quality cost, else record negative result with roofline attribution (compute-bound vs efficiency-bound).
 
+**STATUS (2026-07-11, `Plans/wp1b-logbook.md`): implemented + M1-swept on branch `wp-1b-multibd` — provisional algorithmic ACCEPT.** TPF-logical +23.3% chat (τ_add=0.5; cliff in (0.6, 0.7)) / +22.3% reasoning (τ_add 0.1–0.3) at gen-128, +29.5% reasoning at gen-256 (runway-limited at 128; both suites converge on τ_add≈0.5 at 256). τ_add/τ_semi semantics sourced from the paper (arXiv:2606.29215 Alg. 5 / Table 4; τ_semi gates the trailing block's top-1 fallback). M1 wall-clock does not convert (dual-step multiplier ~1.75× — compute-bound), so the net-TPS gate above is decided by the Studio backfill; served default stays nBuf=1 meanwhile. Quality: blind-scored by André (2026-07-11): 7/8 ties, 1/8 baseline win, 0 MultiBD wins — smoke-clean, consistent with the source's −0.59pp; formal ≤0.5pp gate goes to the Studio scored set.
+
 ### WP-1 order
 
 1a-Phase-A and 1b are independent (different levers, different code regions: cache policy vs loop control). Build **1b first** (smaller: loop is already buffer-shaped; no new kernels), then 1a while 1b's τ_add sweep runs. 1a's staleness ablations (B/C) come after both.

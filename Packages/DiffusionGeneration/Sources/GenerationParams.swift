@@ -36,6 +36,21 @@ public struct GenerationParams: Sendable, Equatable {
     /// trimmed at the first `eosId` in the generated region (inclusive).
     public var eosId: Int
 
+    /// Number of Block-Buffer slots (WP-1b MultiBD, arXiv:2606.29215 Alg. 5). `1` = SingleBD
+    /// (the Phase-2 parity semantics, byte-identical); `2` refines two blocks concurrently.
+    public var nBuf: Int
+    /// Activation threshold τ_add (**sourced**: Alg. 4/5 — "the latest active block has
+    /// progress > τ_add"): the next block activates when the newest active block's decoded
+    /// fraction over its *generated* positions strictly exceeds τ_add. Paper (LLaDA2.1-Mini,
+    /// Table 4): 0.10 math, 0.90 code. Default 2.0 = never activate (parity configuration).
+    public var tauAdd: Float
+    /// Semi-completion threshold τ_semi (**sourced**: Alg. 5 lines 12–14 + §C.4): a block with
+    /// zero above-threshold acceptances this step receives the forced top-1 acceptance only if
+    /// its *preceding* block is semi-complete — progress > τ_semi — or already committed (the
+    /// front block's predecessor is committed, so the front keeps today's unconditional
+    /// fallback). Paper (LLaDA2.1-Mini): 0.90.
+    public var tauSemi: Float
+
     /// Whether Elastic-Cache is enabled (WP-1a).
     public var elasticCacheEnabled: Bool
     /// Drift threshold γ for Elastic-Cache.
@@ -56,6 +71,9 @@ public struct GenerationParams: Sendable, Equatable {
         genLength: Int = 2048,
         maskId: Int = 156895,
         eosId: Int = 156892,
+        nBuf: Int = 1,
+        tauAdd: Float = 2.0,
+        tauSemi: Float = 0.9,
         elasticCacheEnabled: Bool = false,
         elasticGamma: Float = 0.9,
         elasticBeta: Int = 16,
@@ -71,6 +89,9 @@ public struct GenerationParams: Sendable, Equatable {
         self.genLength = genLength
         self.maskId = maskId
         self.eosId = eosId
+        self.nBuf = nBuf
+        self.tauAdd = tauAdd
+        self.tauSemi = tauSemi
         self.elasticCacheEnabled = elasticCacheEnabled
         self.elasticGamma = elasticGamma
         self.elasticBeta = elasticBeta
@@ -104,6 +125,9 @@ public struct GenerationParams: Sendable, Equatable {
         numToTransfer: Int = 1,
         eosEarlyStop: Bool = false,
         temperature: Float = 0.0,
+        nBuf: Int = 1,
+        tauAdd: Float = 2.0,
+        tauSemi: Float = 0.9,
         elasticCacheEnabled: Bool = false,
         elasticGamma: Float = 0.9,
         elasticBeta: Int = 16,
@@ -121,6 +145,9 @@ public struct GenerationParams: Sendable, Equatable {
             genLength: genLength,
             maskId: maskId,
             eosId: eosId,
+            nBuf: nBuf,
+            tauAdd: tauAdd,
+            tauSemi: tauSemi,
             elasticCacheEnabled: elasticCacheEnabled,
             elasticGamma: elasticGamma,
             elasticBeta: elasticBeta,

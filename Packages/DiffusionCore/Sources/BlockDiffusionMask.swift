@@ -51,4 +51,28 @@ public enum BlockDiffusionMask {
         }
         return mask.asType(dtype).expandedDimensions(axes: [0, 1])
     }
+
+    /// Additive mask for a cached **multi-block active window** (WP-1b MultiBD): rows are the
+    /// `activeLen` active-window queries, columns are `prefixLen` committed keys followed by
+    /// the `activeLen` active keys. Committed columns are all-allowed (every committed key is
+    /// in a ≤-front block — the ExactPrefixCache argument); the active×active part is strict
+    /// block-causal, so an earlier active block never sees a later one while the later block
+    /// attends the earlier (arXiv:2606.29215 §C.3 running-set semantics).
+    ///
+    /// Shape `[1, 1, activeLen, prefixLen + activeLen]`. For `activeLen == blockLength`
+    /// (single active block) the result is all-zero — equivalent to the `mask: nil` fast path;
+    /// callers should skip the mask entirely in that case.
+    public static func activeWindowMask(
+        prefixLen: Int,
+        activeLen: Int,
+        blockLength: Int,
+        dtype: DType = .float32
+    ) -> MLXArray {
+        precondition(activeLen % blockLength == 0, "activeLen must be a multiple of blockLength")
+        let activePart = build(
+            totalLength: activeLen, blockLength: blockLength, semantics: .strict, dtype: dtype)
+        guard prefixLen > 0 else { return activePart }
+        let prefixPart = MLXArray.zeros([1, 1, activeLen, prefixLen], dtype: dtype)
+        return concatenated([prefixPart, activePart], axis: -1)
+    }
 }

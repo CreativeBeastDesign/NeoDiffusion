@@ -47,12 +47,14 @@ public final class LLaDA2DecoderLayer: Module {
     }
 
     /// Cache-aware layer forward (phase-2 §5 M5): attention runs against `cache`'s committed K/V
-    /// (no mask) over the active window; the feed-forward is unchanged (per-position). Mirrors
-    /// ``callAsFunction(_:mask:cos:sin:)`` exactly but for the cached attention path.
+    /// over the active window; the feed-forward is unchanged (per-position). Mirrors
+    /// ``callAsFunction(_:mask:cos:sin:)`` exactly but for the cached attention path. `mask` is
+    /// nil for a single active block; WP-1b passes the block-causal active-window mask.
     public func callAsFunction(
-        _ x: MLXArray, cos: MLXArray, sin: MLXArray, cache: LayerKVCache
+        _ x: MLXArray, cos: MLXArray, sin: MLXArray, cache: LayerKVCache,
+        mask: MLXArray? = nil
     ) -> MLXArray {
-        var hidden = x + attention(inputLayernorm(x), cos: cos, sin: sin, cache: cache)
+        var hidden = x + attention(inputLayernorm(x), cos: cos, sin: sin, cache: cache, mask: mask)
         let ffnInput = postAttentionLayernorm(hidden)
         let ffnOutput: MLXArray
         switch mlp {

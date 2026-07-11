@@ -90,8 +90,13 @@ public final class LLaDA2Attention: Module {
     ///   - x: active-window hidden states `[1, B, hiddenSize]`
     ///   - cos/sin: rotary tables `[1, B, rotaryDim]` for the active window's **absolute** positions
     ///   - cache: this layer's committed K/V store; updated in place (`pending*` set)
+    ///   - mask: optional additive mask `[1, 1, activeLen, committedLen + activeLen]` — nil for
+    ///     a single active block (all keys allowed); WP-1b passes
+    ///     ``BlockDiffusionMask/activeWindowMask(prefixLen:activeLen:blockLength:dtype:)`` when
+    ///     the window holds two concurrently active blocks (block-causal between them).
     public func callAsFunction(
-        _ x: MLXArray, cos: MLXArray, sin: MLXArray, cache: LayerKVCache
+        _ x: MLXArray, cos: MLXArray, sin: MLXArray, cache: LayerKVCache,
+        mask: MLXArray? = nil
     ) -> MLXArray {
         let B = x.dim(0)
         let L = x.dim(1)
@@ -108,7 +113,8 @@ public final class LLaDA2Attention: Module {
         queries = PartialRotaryEmbedding.apply(queries, cos: cos, sin: sin)
         activeKeys = PartialRotaryEmbedding.apply(activeKeys, cos: cos, sin: sin)
 
-        // Attend against committed prefix ++ active. No mask: all committed keys are allowed.
+        // Attend against committed prefix ++ active. `mask` is nil for a single active block
+        // (all committed keys allowed); a two-block window passes the block-causal active mask.
         let keys = cache.keys.map { concatenated([$0, activeKeys], axis: 2) } ?? activeKeys
         let values = cache.values.map { concatenated([$0, activeValues], axis: 2) } ?? activeValues
 
@@ -116,7 +122,7 @@ public final class LLaDA2Attention: Module {
         cache.pendingValues = activeValues
 
         let attended = Self.attend(
-            queries: queries, keys: keys, values: values, scale: scale, mask: nil)
+            queries: queries, keys: keys, values: values, scale: scale, mask: mask)
         let output = attended
             .transposed(0, 2, 1, 3)
             .reshaped(B, L, numHeads * headDim)

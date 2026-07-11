@@ -165,6 +165,16 @@ struct LLaDARunResult: Codable {
     let peakMemoryGB: Double
     let speculationK: Int
     let eosEarlyStop: Bool
+    // WP-1b MultiBD — ENGINE effective echoes (never CLI inputs; provenance rule F7),
+    // plus the dual-phase diagnostics that decide the WP under roadmap §0.1.
+    let nBuf: Int
+    let tauAdd: Float
+    let tauSemi: Float
+    let dualActiveSteps: Int
+    let activationSteps: [Int]
+    let trailingStarvedStepsPerBlock: [Int]
+    let singleActiveDenoiseSeconds: Double
+    let dualActiveDenoiseSeconds: Double
     let elasticCacheEnabled: Bool
     let elasticGamma: Float
     let elasticBeta: Int
@@ -201,6 +211,15 @@ func runLLaDABench() async throws {
     let elasticGamma = Float(argValue("--elastic-gamma") ?? "0.9") ?? 0.9
     let elasticBeta = Int(argValue("--elastic-beta") ?? "16") ?? 16
     let elasticStaticBoundary = argValue("--elastic-static-boundary").flatMap { Int($0) }
+
+    // WP-1b MultiBD (arXiv:2606.29215 Alg. 5). JSONL rows record the ENGINE's effective
+    // echoes, not these CLI values (provenance rule, elastic-cache logbook F7).
+    let nBuf = Int(argValue("--n-buf") ?? "1") ?? 1
+    let tauAdd = Float(argValue("--tau-add") ?? "2.0") ?? 2.0
+    let tauSemi = Float(argValue("--tau-semi") ?? "0.9") ?? 0.9
+    // Full-text dump for blind quality scoring (JSONL keeps only 160-char prefixes):
+    // one JSON line per generation {arm, suite, promptId, run, text, tokens, eosBlock}.
+    let dumpTextPath = argValue("--dump-text")
 
     // Prompt suites: fixed cases checked into Tools/diffusion-bench/PromptSuites (M6).
     // --prompt TEXT replaces them with a single ad-hoc case.
@@ -273,6 +292,7 @@ func runLLaDABench() async throws {
         GenerationParams.mode(
             mode, blockLength: blockLength, genLength: genLength,
             maskId: tokenizer.maskId, eosId: tokenizer.eosId, eosEarlyStop: eosEarlyStop,
+            nBuf: nBuf, tauAdd: tauAdd, tauSemi: tauSemi,
             elasticCacheEnabled: elasticCache, elasticGamma: elasticGamma, elasticBeta: elasticBeta,
             elasticStaticBoundary: elasticStaticBoundary)
     }
@@ -323,7 +343,10 @@ func runLLaDABench() async throws {
         promptIds: [Int], output: DiffusionEngine.Output, seconds: Double,
         peakGB: Double, env: EnvSnapshot, warmup: Bool, text: String
     ) {
-        let steps = output.stepsPerBlock.reduce(0, +)
+        // Global logical steps from the engine (the TPF denominator). At nBuf=2 a step can
+        // advance two blocks, so sum(stepsPerBlock) would double-count dual-phase steps.
+        let steps = output.metrics.logicalStepsTotal
+        let stepsBlockSum = output.stepsPerBlock.reduce(0, +)
         let posts = output.metrics.postStepsPerBlock.reduce(0, +)
         let blocks = output.stepsPerBlock.count
         let thresholds = arm.mode.thresholds
@@ -359,11 +382,19 @@ func runLLaDABench() async throws {
             tpfHonest: output.metrics.forwardsEvaluated > 0
                 ? Double(output.tokens.count) / Double(output.metrics.forwardsEvaluated) : 0,
             tpfLogical: steps > 0 ? Double(output.tokens.count) / Double(steps) : 0,
-            stepsPerBlockMean: blocks > 0 ? Double(steps) / Double(blocks) : 0,
+            stepsPerBlockMean: blocks > 0 ? Double(stepsBlockSum) / Double(blocks) : 0,
             postStepsPerBlockMean: blocks > 0 ? Double(posts) / Double(blocks) : 0,
             peakMemoryGB: peakGB,
-            speculationK: speculationK,
+            speculationK: output.metrics.effectiveSpeculationK,
             eosEarlyStop: eosEarlyStop,
+            nBuf: output.metrics.effectiveNBuf,
+            tauAdd: output.metrics.effectiveTauAdd,
+            tauSemi: output.metrics.effectiveTauSemi,
+            dualActiveSteps: output.metrics.dualActiveSteps,
+            activationSteps: output.metrics.activationSteps,
+            trailingStarvedStepsPerBlock: output.metrics.trailingStarvedStepsPerBlock,
+            singleActiveDenoiseSeconds: output.metrics.singleActiveDenoiseSeconds,
+            dualActiveDenoiseSeconds: output.metrics.dualActiveDenoiseSeconds,
             elasticCacheEnabled: arm.cached && elasticCache,
             elasticGamma: elasticGamma,
             elasticBeta: elasticBeta,
@@ -457,8 +488,30 @@ func runLLaDABench() async throws {
                     appendResult(arm, run: run, suite: suite.name, prompt: prompt,
                                  promptIds: promptIds, output: output, seconds: seconds,
                                  peakGB: peakGB, env: env, warmup: warmup, text: text)
+                    if let dumpTextPath {
+                        let record: [String: String] = [
+                            "arm": arm.name, "suite": suite.name, "promptId": prompt.id,
+                            "run": String(run), "user": prompt.user, "text": text,
+                            "tokens": String(output.tokens.count),
+                            "eosBlock": output.metrics.eosBlockIndex.map(String.init) ?? "none",
+                        ]
+                        if let data = try? JSONEncoder().encode(record),
+                           let line = String(data: data, encoding: .utf8) {
+                            if let handle = FileHandle(forWritingAtPath: dumpTextPath) {
+                                handle.seekToEndOfFile()
+                                handle.write(Data((line + "\n").utf8))
+                                try? handle.close()
+                            } else {
+                                try? (line + "\n").write(
+                                    toFile: dumpTextPath, atomically: true, encoding: .utf8)
+                            }
+                        }
+                    }
 
-                    let steps = output.stepsPerBlock.reduce(0, +)
+                    // Console TPF-logical uses the engine's global step counter — at nBuf=2
+                    // sum(stepsPerBlock) double-counts dual-phase steps (JSONL was already right).
+                    let steps = output.metrics.logicalStepsTotal
+                    let stepsBlockSum = output.stepsPerBlock.reduce(0, +)
                     var flags = ""
                     if warmup { flags += " [warmup]" }
                     if !env.isValid { flags += " [ENV-INVALID: \(env.note)]" }
@@ -473,7 +526,7 @@ func runLLaDABench() async throws {
                             ? Double(output.tokens.count)
                                 / Double(output.metrics.forwardsEvaluated) : 0,
                         output.stepsPerBlock.isEmpty ? 0
-                            : Double(steps) / Double(output.stepsPerBlock.count),
+                            : Double(stepsBlockSum) / Double(output.stepsPerBlock.count),
                         output.metrics.postStepsPerBlock.isEmpty ? 0
                             : Double(output.metrics.postStepsPerBlock.reduce(0, +))
                                 / Double(output.metrics.postStepsPerBlock.count),
