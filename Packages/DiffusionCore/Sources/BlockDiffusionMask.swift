@@ -75,4 +75,40 @@ public enum BlockDiffusionMask {
         let prefixPart = MLXArray.zeros([1, 1, activeLen, prefixLen], dtype: dtype)
         return concatenated([prefixPart, activePart], axis: -1)
     }
+
+    /// S2D2 self-verification mask (WP-2a; arXiv:2603.25702 Eq. 3, the "2L trick" over a full
+    /// block): the verifier window is `[draft copy (B) | mask copy (B)]` at duplicated absolute
+    /// positions, attending the committed prefix freely. Structure `M_ver = [[A_B, 0], [A_<B, I_B]]`:
+    ///
+    /// - draft rows (first copy): **causal** over the draft copy — position i sees drafts ≤ i —
+    ///   so draft K/V encode tokens under autoregressive context;
+    /// - verifier rows (second copy, position i): drafts **strictly** < i plus its own masked
+    ///   position (identity) — the block-size-1 AR view: "condition on drafts left of i, keep i
+    ///   masked".
+    ///
+    /// Shape `[1, 1, 2B, prefixLen + 2B]`. The full-B form (the paper verifies only the span,
+    /// we pay the fixed 2B width) keeps tensor shapes static across steps — required by the
+    /// K-step lazy batching. Non-span verifier rows are don't-care outputs.
+    public static func s2d2VerifierMask(
+        prefixLen: Int,
+        blockLength: Int,
+        dtype: DType = .float32
+    ) -> MLXArray {
+        let B = Int32(blockLength)
+        let rows = MLXArray(0 ..< 2 * B).reshaped(2 * blockLength, 1)
+        let cols = MLXArray(0 ..< 2 * B).reshaped(1, 2 * blockLength)
+        let rowIsDraft = rows .< B
+        let colIsDraft = cols .< B
+        let rowPos = rows % B
+        let colPos = cols % B
+        let draftCausal = rowIsDraft .&& colIsDraft .&& (colPos .<= rowPos)
+        let verifierStrict = (.!rowIsDraft) .&& colIsDraft .&& (colPos .< rowPos)
+        let verifierSelf = (.!rowIsDraft) .&& (.!colIsDraft) .&& (colPos .== rowPos)
+        let allowed = draftCausal .|| verifierStrict .|| verifierSelf
+        let pairPart = which(allowed, MLXArray(Float(0)), MLXArray(-Float.infinity))
+            .asType(dtype).expandedDimensions(axes: [0, 1])
+        guard prefixLen > 0 else { return pairPart }
+        let prefixPart = MLXArray.zeros([1, 1, 2 * blockLength, prefixLen], dtype: dtype)
+        return concatenated([prefixPart, pairPart], axis: -1)
+    }
 }

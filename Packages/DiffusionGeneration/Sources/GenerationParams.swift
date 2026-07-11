@@ -51,6 +51,20 @@ public struct GenerationParams: Sendable, Equatable {
     /// fallback). Paper (LLaDA2.1-Mini): 0.90.
     public var tauSemi: Float
 
+    /// Single-model speculative decoding policy (WP-2a). `.none` = the parity-gated default;
+    /// `.s2d2` = block-size-1 AR self-verification (arXiv:2603.25702) — cached path only,
+    /// nBuf == 1 only, output legitimately differs from vanilla decoding (hybrid trajectory).
+    public enum SpeculationKind: String, Sendable, Equatable {
+        case none
+        case s2d2
+    }
+    /// Which speculation policy runs (WP-2a).
+    public var speculation: SpeculationKind
+    /// S2D2 min-span routing threshold τ_span: verify only when the first contiguous masked
+    /// span has at least this many positions. v1 ships always-verify (1); reserved for the
+    /// routing sweep arm.
+    public var tauSpan: Int
+
     /// Whether Elastic-Cache is enabled (WP-1a).
     public var elasticCacheEnabled: Bool
     /// Drift threshold γ for Elastic-Cache.
@@ -74,6 +88,8 @@ public struct GenerationParams: Sendable, Equatable {
         nBuf: Int = 1,
         tauAdd: Float = 2.0,
         tauSemi: Float = 0.9,
+        speculation: SpeculationKind = .none,
+        tauSpan: Int = 1,
         elasticCacheEnabled: Bool = false,
         elasticGamma: Float = 0.9,
         elasticBeta: Int = 16,
@@ -92,6 +108,8 @@ public struct GenerationParams: Sendable, Equatable {
         self.nBuf = nBuf
         self.tauAdd = tauAdd
         self.tauSemi = tauSemi
+        self.speculation = speculation
+        self.tauSpan = tauSpan
         self.elasticCacheEnabled = elasticCacheEnabled
         self.elasticGamma = elasticGamma
         self.elasticBeta = elasticBeta
@@ -128,6 +146,8 @@ public struct GenerationParams: Sendable, Equatable {
         nBuf: Int = 1,
         tauAdd: Float = 2.0,
         tauSemi: Float = 0.9,
+        speculation: SpeculationKind = .none,
+        tauSpan: Int = 1,
         elasticCacheEnabled: Bool = false,
         elasticGamma: Float = 0.9,
         elasticBeta: Int = 16,
@@ -148,6 +168,8 @@ public struct GenerationParams: Sendable, Equatable {
             nBuf: nBuf,
             tauAdd: tauAdd,
             tauSemi: tauSemi,
+            speculation: speculation,
+            tauSpan: tauSpan,
             elasticCacheEnabled: elasticCacheEnabled,
             elasticGamma: elasticGamma,
             elasticBeta: elasticBeta,

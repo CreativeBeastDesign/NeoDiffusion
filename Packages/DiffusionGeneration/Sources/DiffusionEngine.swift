@@ -121,12 +121,25 @@ public final class DiffusionEngine {
         /// speculative batch ends in a blocking readback.
         public let singleActiveDenoiseSeconds: Double
         public let dualActiveDenoiseSeconds: Double
+        // MARK: WP-2a speculation diagnostics
+        /// Per block, per logical step: tokens written by the speculation policy that step
+        /// (accepted draft prefix + the correction token; 0 on non-speculated steps or when
+        /// `speculation == .none`). The accepted-tokens histogram source.
+        public let acceptedPerStep: [[Int]]
+        /// Total active-window tokens processed across all evaluated forwards (width-aware
+        /// accounting: a 2B-wide verifier forward counts 2B, a B-wide target forward counts B;
+        /// includes speculative overshoot and capture/prefill forwards at their widths).
+        /// Width-corrected TPF = tokens / (tokensProcessedInForwards / blockLength).
+        public let tokensProcessedInForwards: Int
+
         /// Effective parameters as the engine actually ran them (provenance rule: benches must
         /// record these echoes, never the CLI inputs — elastic-cache logbook F7).
         public let effectiveNBuf: Int
         public let effectiveTauAdd: Float
         public let effectiveTauSemi: Float
         public let effectiveSpeculationK: Int
+        public let effectiveSpeculation: String
+        public let effectiveTauSpan: Int
     }
 
     /// Mutable stats shared between the cached entry point's closures and `run` (the capture
@@ -141,6 +154,12 @@ public final class DiffusionEngine {
     /// The cache-disabled path builds a full `.strict` mask over the window; a cached path can
     /// forward only the active block against committed KV (no mask needed).
     public typealias Forward = (_ windowIds: MLXArray, _ activeLen: Int) -> MLXArray
+
+    /// Signature of the S2D2 verifier forward (WP-2a): given the `[1, 2B]` pair window
+    /// `[draft copy | mask copy]`, return FP32 logits `[1, 2B, V]`. The closure owns the
+    /// duplicated absolute position ids and the memoized ``BlockDiffusionMask/s2d2VerifierMask``;
+    /// cached path only (conditions on committed prefix KV).
+    public typealias VerifierForward = (_ pairWindowIds: MLXArray) -> MLXArray
 
     // MARK: - Public entry point (cache-disabled)
 
@@ -294,6 +313,27 @@ public final class DiffusionEngine {
             return logits
         }
 
+        // S2D2 verifier forward (WP-2a): one 2B-wide forward under the M_ver mask at duplicated
+        // absolute positions, against the committed prefix KV. Mask memoized per committed
+        // length (constant across a block's denoising; commits happen only between phases).
+        var verifierMaskMemo: [Int: MLXArray] = [:]
+        let verifierForward: VerifierForward? = params.speculation == .s2d2
+            ? { [model, cache] pairIds in
+                let blockLen = pairIds.dim(1) / 2
+                let prefixLen = cache.committedLength
+                let blockPositions = MLXArray(Int32(prefixLen) ..< Int32(prefixLen + blockLen))
+                let positionIds = concatenated([blockPositions, blockPositions], axis: 0)
+                    .expandedDimensions(axis: 0)
+                let mask = verifierMaskMemo[prefixLen] ?? {
+                    let m = BlockDiffusionMask.s2d2VerifierMask(
+                        prefixLen: prefixLen, blockLength: blockLen)
+                    verifierMaskMemo[prefixLen] = m
+                    return m
+                }()
+                return model(pairIds, positionIds: positionIds, caches: cache.layers, mask: mask)
+            }
+            : nil
+
         // On settle, run the capture forward over the committed tokens and commit clean K/V.
         let onSettled: (Int, MLXArray) -> Void = { blockIndex, committedActive in
             captureAndCommit(committedActive, startPos: blockIndex * B)
@@ -303,7 +343,8 @@ public final class DiffusionEngine {
         }
 
         return run(prompt: prompt, params: params, activeCache: activeCache, boundaryHolder: boundaryHolder,
-                   forward: forward, streamBlock: streamBlock, onBlockSettled: onSettled, stats: stats)
+                   forward: forward, verifierForward: verifierForward,
+                   streamBlock: streamBlock, onBlockSettled: onSettled, stats: stats)
     }
 
     private func readBoundary(activeCache: ActiveBlockCache, layerCount: Int, gamma: Float) -> Int {
@@ -344,6 +385,14 @@ public final class DiffusionEngine {
         var trailingStarvedSteps: Int = 0
     }
 
+    /// Whether this run's configuration speculates (WP-2a S2D2): policy on, single slot,
+    /// and a verifier closure available (cached path).
+    private func speculating(
+        _ params: GenerationParams, slots: Int, verifierForward: VerifierForward?
+    ) -> Bool {
+        params.speculation == .s2d2 && slots == 1 && verifierForward != nil
+    }
+
     /// The block schedule shared by the cache-disabled and cached paths. `forward` abstracts how
     /// logits over the active window are produced.
     ///
@@ -357,6 +406,7 @@ public final class DiffusionEngine {
         activeCache: ActiveBlockCache? = nil,
         boundaryHolder: BoundaryHolder? = nil,
         forward: Forward,
+        verifierForward: VerifierForward? = nil,
         streamBlock: (([Int]) -> Void)?,
         onBlockSettled: ((_ blockIndex: Int, _ committedActive: MLXArray) -> Void)? = nil,
         stats: RunStats? = nil
@@ -366,6 +416,12 @@ public final class DiffusionEngine {
         precondition(!(params.elasticCacheEnabled && params.nBuf > 1),
             "Elastic-Cache x MultiBD composability is untested (roadmap §5 cell open); "
             + "run one at a time")
+        precondition(params.speculation == .none || verifierForward != nil,
+            "S2D2 requires the cached path (the verifier conditions on committed prefix KV)")
+        precondition(!(params.speculation != .none && params.nBuf > 1),
+            "speculation x MultiBD is untested (roadmap §5 cell 1b×2a open); run one at a time")
+        precondition(!(params.speculation != .none && params.elasticCacheEnabled),
+            "speculation x Elastic-Cache: WP-1a is closed; do not combine")
         let promptLength = prompt.count
         let numBlocks = (promptLength + params.genLength + B - 1) / B
         let prefillBlocks = promptLength / B
@@ -391,10 +447,12 @@ public final class DiffusionEngine {
         var editsPerStep: [[Int]] = []
         var meanConfPerStep: [[Float]] = []
         var trailingStarvedPerBlock: [Int] = []
+        var acceptedPerStep: [[Int]] = []
         var eosBlockIndex: Int? = nil
         var logicalStepsTotal = 0
         var dualActiveSteps = 0
         var activationSteps: [Int] = []
+        var tokensProcessed = 0
 
         var slots: [SlotRun] = []
         var nextBlockIndex = prefillBlocks
@@ -437,10 +495,11 @@ public final class DiffusionEngine {
             let phase = denoisePhase(
                 prefix: prefixArray, slots: &slots, hasNextBlock: hasNextBlock,
                 params: params, activeCache: activeCache, boundaryHolder: boundaryHolder,
-                forward: forward,
+                forward: forward, verifierForward: verifierForward,
                 globalStep: &logicalStepsTotal, dualActiveSteps: &dualActiveSteps)
             syncPoints += phase.syncPoints
             denoiseForwards += phase.forwards
+            tokensProcessed += phase.tokensProcessed
             let phaseSeconds = Date().timeIntervalSince(denoiseStart)
             denoiseSeconds += phaseSeconds
             if phaseWidth == 2 { dualActiveDenoiseSeconds += phaseSeconds }
@@ -475,6 +534,7 @@ public final class DiffusionEngine {
                 editsPerStep.append(front.trajectory.edits)
                 meanConfPerStep.append(front.trajectory.meanConfidence)
                 trailingStarvedPerBlock.append(front.trailingStarvedSteps)
+                acceptedPerStep.append(front.trajectory.accepted)
 
                 // First generated block whose generated-region positions contain eos (E1).
                 let blockStart = front.blockIndex * B
@@ -535,19 +595,25 @@ public final class DiffusionEngine {
                 trailingStarvedStepsPerBlock: trailingStarvedPerBlock,
                 singleActiveDenoiseSeconds: singleActiveDenoiseSeconds,
                 dualActiveDenoiseSeconds: dualActiveDenoiseSeconds,
+                acceptedPerStep: acceptedPerStep,
+                tokensProcessedInForwards: tokensProcessed + (stats?.extraForwards ?? 0) * B,
                 effectiveNBuf: params.nBuf,
                 effectiveTauAdd: params.tauAdd,
                 effectiveTauSemi: params.tauSemi,
-                effectiveSpeculationK: speculationK))
+                effectiveSpeculationK: speculationK,
+                effectiveSpeculation: params.speculation.rawValue,
+                effectiveTauSpan: params.tauSpan))
     }
 
     // MARK: - Per-phase denoising with K-step speculative readback
 
-    /// Per-block trajectory diagnostics (M8 E1), accumulated by the owning slot.
+    /// Per-block trajectory diagnostics (M8 E1 + WP-2a), accumulated by the owning slot.
     struct BlockTrajectory {
         var transfers: [Int] = []
         var edits: [Int] = []
         var meanConfidence: [Float] = []
+        /// Tokens written by the speculation policy per step (WP-2a; 0 when not speculating).
+        var accepted: [Int] = []
     }
 
     /// Why a phase ended. A *phase* is a stretch of logical steps over a fixed set of active
@@ -564,6 +630,9 @@ public final class DiffusionEngine {
         let event: PhaseEvent
         let syncPoints: Int
         let forwards: Int
+        /// Active-window tokens processed across the phase's evaluated forwards (width-aware:
+        /// target forwards count A, verifier forwards 2B — WP-2a accounting).
+        let tokensProcessed: Int
         /// The front slot's post-steps counter at the break step (valid on `.frontBreak`).
         let frontPostAtBreak: Int
     }
@@ -579,6 +648,7 @@ public final class DiffusionEngine {
         activeCache: ActiveBlockCache? = nil,
         boundaryHolder: BoundaryHolder? = nil,
         forward: Forward,
+        verifierForward: VerifierForward? = nil,
         globalStep: inout Int,
         dualActiveSteps: inout Int
     ) -> PhaseResult {
@@ -589,8 +659,10 @@ public final class DiffusionEngine {
         let S = slots.count
         let B = params.blockLength
         let K = speculationK
+        let specActive = speculating(params, slots: S, verifierForward: verifierForward)
         var syncPoints = 0
         var forwardsEvaluated = 0
+        var tokensProcessed = 0
 
         var windowActive = S == 1 ? slots[0].active
             : concatenated(slots.map(\.active), axis: 1)
@@ -615,7 +687,8 @@ public final class DiffusionEngine {
                     prefix: prefix, prefixLen: prefixLen, windowActive: specWindow,
                     posts: specPosts, promptMasks: promptMasks,
                     slotPromptCounts: slotPromptCounts,
-                    hasNextBlock: hasNextBlock, params: params, forward: forward)
+                    hasNextBlock: hasNextBlock, params: params, forward: forward,
+                    verifierForward: specActive ? verifierForward : nil)
                 snapshots.append(s.resultWindow)
                 nextWindows.append(s.nextWindow)
                 breakFlags.append(s.breakFlag)
@@ -642,7 +715,8 @@ public final class DiffusionEngine {
 
             let flagVals = flags.asArray(Bool.self)
             syncPoints += 1
-            forwardsEvaluated += K
+            forwardsEvaluated += K * (specActive ? 2 : 1)
+            tokensProcessed += K * (S * B + (specActive ? 2 * B : 0))
 
             let firstBreak = flagVals[0 ..< K].firstIndex(of: true)
             let firstActivation = flagVals[K ..< 2 * K].firstIndex(of: true).map { $0 - K }
@@ -652,10 +726,11 @@ public final class DiffusionEngine {
                 for r in 0 ..< count {
                     let vals = statsPerStep[r].asArray(Float.self)  // materialized — memcpy
                     for s in slots.indices {
-                        slots[s].trajectory.transfers.append(Int(vals[4 * s]))
-                        slots[s].trajectory.edits.append(Int(vals[4 * s + 1]))
-                        slots[s].trajectory.meanConfidence.append(vals[4 * s + 2])
-                        if s > 0 && vals[4 * s] == 0 && vals[4 * s + 3] > 0 {
+                        slots[s].trajectory.transfers.append(Int(vals[5 * s]))
+                        slots[s].trajectory.edits.append(Int(vals[5 * s + 1]))
+                        slots[s].trajectory.meanConfidence.append(vals[5 * s + 2])
+                        slots[s].trajectory.accepted.append(Int(vals[5 * s + 4]))
+                        if s > 0 && vals[5 * s] == 0 && vals[5 * s + 3] > 0 {
                             slots[s].trailingStarvedSteps += 1
                         }
                     }
@@ -685,7 +760,8 @@ public final class DiffusionEngine {
                 let frontPost = Int(postsPerStep[j][0].item(Int32.self))  // memcpy, evaluated above
                 return PhaseResult(
                     event: .frontBreak, syncPoints: syncPoints,
-                    forwards: forwardsEvaluated, frontPostAtBreak: frontPost)
+                    forwards: forwardsEvaluated, tokensProcessed: tokensProcessed,
+                    frontPostAtBreak: frontPost)
             }
             if let j = firstActivation {
                 applyStats(j + 1)
@@ -693,7 +769,8 @@ public final class DiffusionEngine {
                 addSteps(j + 1)
                 return PhaseResult(
                     event: .activation, syncPoints: syncPoints,
-                    forwards: forwardsEvaluated, frontPostAtBreak: 0)
+                    forwards: forwardsEvaluated, tokensProcessed: tokensProcessed,
+                    frontPostAtBreak: 0)
             }
 
             // No event within this batch — advance by K steps and continue.
@@ -712,8 +789,9 @@ public final class DiffusionEngine {
         let breakFlag: MLXArray      // [1] Bool — front settle or front budget
         let activationFlag: MLXArray // [1] Bool — τ_add fired (single-active phases only)
         let nextPosts: [MLXArray]    // per-slot post-steps accumulators carried forward
-        /// Diagnostics `[4*S]` Float32 per slot: |Γ|, |Δ|, mean x0_p over written positions,
-        /// masks remaining post-update. Read back only from the already-evaluated batch.
+        /// Diagnostics `[5*S]` Float32 per slot: |Γ|, |Δ|, mean x0_p over written positions,
+        /// masks remaining post-update, speculation-accepted count (WP-2a; slot 0 only).
+        /// Read back only from the already-evaluated batch.
         let stats: MLXArray
     }
 
@@ -724,7 +802,8 @@ public final class DiffusionEngine {
     private func windowStep(
         prefix: MLXArray, prefixLen: Int, windowActive: MLXArray,
         posts: [MLXArray], promptMasks: MLXArray, slotPromptCounts: [Int],
-        hasNextBlock: Bool, params: GenerationParams, forward: Forward
+        hasNextBlock: Bool, params: GenerationParams, forward: Forward,
+        verifierForward: VerifierForward? = nil
     ) -> WindowStepResult {
         let B = params.blockLength
         let S = posts.count
@@ -753,33 +832,70 @@ public final class DiffusionEngine {
         let maskConf = which(activeMask, x0p, negInf)       // [1, A]
         let positionsB = MLXArray(0 ..< Int32(B)).reshaped(1, B)
 
-        // Γ (M2T) per slot: threshold acceptances plus the top-1 fallback. The fallback is
-        // gated on the *preceding* block being semi-complete (progress > τ_semi) or committed
-        // (Alg. 5 lines 11–14) — the front's predecessor is committed, so the front keeps the
-        // unconditional fallback (== the nBuf=1 semantics). Blocks are evaluated front-to-back
-        // within the step, so the gate sees the front's post-Γ progress (Alg. 5 loop order).
-        var slotGammas: [MLXArray] = []
-        var precedingSemiComplete = MLXArray(true)
-        for s in 0 ..< S {
-            let r = (s * B) ..< ((s + 1) * B)
-            let slotMask = activeMask[0..., r]
-            let slotConf = maskConf[0..., r]
-            let highConf = (slotConf .> MLXArray(params.threshold)) .&& slotMask
-            let numHigh = highConf.asType(.int32).sum()               // scalar
-            let forceTop1 = (numHigh .== MLXArray(Int32(0))) .&& precedingSemiComplete
-            let top1 = argMax(slotConf, axis: -1)                     // [1]
-            let oneHotTop1 = positionsB .== top1.reshaped(1, 1)       // [1, B] Bool
-            let gamma = highConf .|| (forceTop1 .&& oneHotTop1 .&& slotMask)
-            slotGammas.append(gamma)
+        let gamma: MLXArray            // [1, A] positions written from writeTok this step
+        let writeTok: MLXArray         // [1, A] token source (x0, or verifier correction)
+        var specAcceptedCount = MLXArray(Float(0))
 
-            if s + 1 < S {
-                let genCount = Float(B - slotPromptCounts[s])
-                let masksAfter = (slotMask .&& (.!gamma)).asType(.float32).sum()
-                let decodedAfter = (MLXArray(genCount) - masksAfter) / MLXArray(genCount)
-                precedingSemiComplete = decodedAfter .> MLXArray(params.tauSemi)
+        if let verifierForward, S == 1 {
+            // WP-2a S2D2 self-verification (arXiv:2603.25702 Alg. 3, temp-0 greedy): draft the
+            // first contiguous masked span C_t from this forward's x0, verify with one 2B-wide
+            // block-size-1-AR forward (M_ver), accept the matching prefix, and take the
+            // verifier's token at the first mismatch. Non-span masked positions keep the plain
+            // threshold Γ; the top-1 fallback is subsumed (the span always yields ≥1 token
+            // while masks exist), and Δ below is untouched (accepted tokens stay editable).
+            let firstMasked = argMax(activeMask.asType(.int32), axis: -1)
+                .asType(.int32).reshaped(1, 1)                        // [1,1] span start
+            let unmaskedCum = cumsum((.!activeMask).asType(.int32), axis: -1)
+            // Span membership: masked, and every position before it up to the span start is
+            // unmasked (inclusive unmasked-count equals the span start index).
+            let spanMask = activeMask .&& (unmaskedCum .== firstMasked)
+            let draftFull = which(spanMask, x0, windowActive)         // [1, B]
+            let pairWindow = concatenated([draftFull, windowActive], axis: -1)  // [1, 2B]
+            let vLogits = verifierForward(pairWindow)                 // [1, 2B, V]
+            let qTok = argMax(vLogits[0..., B..., 0...], axis: -1).asType(.int32)  // [1, B]
+
+            let match = (qTok .== x0) .&& spanMask
+            let fail = spanMask .&& (.!match)
+            let failCum = cumsum(fail.asType(.int32), axis: -1)       // [1, B] inclusive
+            let acceptDraft = spanMask .&& (failCum .== MLXArray(Int32(0)))
+            let correction = fail .&& (failCum .== MLXArray(Int32(1)))
+            let specGamma = acceptDraft .|| correction
+
+            let nonSpan = activeMask .&& (.!spanMask)
+            let highConfNonSpan = (maskConf .> MLXArray(params.threshold)) .&& nonSpan
+            gamma = specGamma .|| highConfNonSpan
+            writeTok = which(correction, qTok, x0)
+            specAcceptedCount = specGamma.asType(.float32).sum()
+        } else {
+            // Γ (M2T) per slot: threshold acceptances plus the top-1 fallback. The fallback is
+            // gated on the *preceding* block being semi-complete (progress > τ_semi) or committed
+            // (Alg. 5 lines 11–14) — the front's predecessor is committed, so the front keeps the
+            // unconditional fallback (== the nBuf=1 semantics). Blocks are evaluated front-to-back
+            // within the step, so the gate sees the front's post-Γ progress (Alg. 5 loop order).
+            var slotGammas: [MLXArray] = []
+            var precedingSemiComplete = MLXArray(true)
+            for s in 0 ..< S {
+                let r = (s * B) ..< ((s + 1) * B)
+                let slotMask = activeMask[0..., r]
+                let slotConf = maskConf[0..., r]
+                let highConf = (slotConf .> MLXArray(params.threshold)) .&& slotMask
+                let numHigh = highConf.asType(.int32).sum()               // scalar
+                let forceTop1 = (numHigh .== MLXArray(Int32(0))) .&& precedingSemiComplete
+                let top1 = argMax(slotConf, axis: -1)                     // [1]
+                let oneHotTop1 = positionsB .== top1.reshaped(1, 1)       // [1, B] Bool
+                let slotGamma = highConf .|| (forceTop1 .&& oneHotTop1 .&& slotMask)
+                slotGammas.append(slotGamma)
+
+                if s + 1 < S {
+                    let genCount = Float(B - slotPromptCounts[s])
+                    let masksAfter = (slotMask .&& (.!slotGamma)).asType(.float32).sum()
+                    let decodedAfter = (MLXArray(genCount) - masksAfter) / MLXArray(genCount)
+                    precedingSemiComplete = decodedAfter .> MLXArray(params.tauSemi)
+                }
             }
+            gamma = S == 1 ? slotGammas[0] : concatenated(slotGammas, axis: -1)  // [1, A]
+            writeTok = x0
         }
-        let gamma = S == 1 ? slotGammas[0] : concatenated(slotGammas, axis: -1)  // [1, A]
 
         // Δ (T2T) over the whole window: unmasked, non-prompt positions clearing τ_edit whose
         // prediction changed. Applies to both active blocks — every position is uncommitted
@@ -792,7 +908,7 @@ public final class DiffusionEngine {
         let deltaAnyFront = delta[0..., 0 ..< B].any()
 
         let finalTransfer = gamma .|| delta
-        let nextWindow = which(finalTransfer, x0, windowActive)
+        let nextWindow = which(finalTransfer, writeTok, windowActive)
 
         // Front break only (in-order commit): settle = front mask-free with no front edits
         // this step; budget = front post-steps over budget (no update applied that iteration —
@@ -819,22 +935,24 @@ public final class DiffusionEngine {
             activationFlag = MLXArray([false])
         }
 
-        // Trajectory diagnostics per slot (M8 E1 + τ_semi starvation).
+        // Trajectory diagnostics per slot (M8 E1 + τ_semi starvation + WP-2a acceptance).
         var statsParts: [MLXArray] = []
         for s in 0 ..< S {
             let r = (s * B) ..< ((s + 1) * B)
             let slotDelta = delta[0..., r]
-            let written = (slotGammas[s] .|| slotDelta).asType(.float32)
+            let slotGamma = gamma[0..., r]
+            let written = (slotGamma .|| slotDelta).asType(.float32)
             let writtenCount = written.sum()
             let meanConf = (x0p[0..., r].asType(.float32) * written).sum()
                 / MLX.maximum(writtenCount, MLXArray(Float(1)))
             let masksRemaining = (nextWindow[0..., r] .== maskId).asType(.float32).sum()
-            statsParts.append(slotGammas[s].asType(.float32).sum().reshaped([1]))
+            statsParts.append(slotGamma.asType(.float32).sum().reshaped([1]))
             statsParts.append(slotDelta.asType(.float32).sum().reshaped([1]))
             statsParts.append(meanConf.reshaped([1]))
             statsParts.append(masksRemaining.reshaped([1]))
+            statsParts.append((s == 0 ? specAcceptedCount : MLXArray(Float(0))).reshaped([1]))
         }
-        let stats = concatenated(statsParts, axis: 0)       // [4*S]
+        let stats = concatenated(statsParts, axis: 0)       // [5*S]
 
         return WindowStepResult(
             nextWindow: nextWindow, resultWindow: resultWindow,
