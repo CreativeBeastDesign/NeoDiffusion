@@ -99,7 +99,7 @@ final class JotTests: XCTestCase {
         }
         XCTAssertTrue(foundFrozen, "Expected JOT to freeze stable tokens and pass the frozen mask to forward")
         XCTAssertEqual(Array(output.tokens[0..<13]), Array(repeating: 7, count: 13))
-        XCTAssertEqual(output.tokens[13], 7) // fallback-unmasked position 14
+        XCTAssertEqual(output.tokens[13], 0) // fallback-unmasked position 14 (logits 0.0)
         XCTAssertEqual(output.tokens[14], 0) // fallback-unmasked position 15 (logits 0.0)
     }
 
@@ -155,7 +155,7 @@ final class JotTests: XCTestCase {
         XCTAssertEqual(output.tokens[4], 8, "Edit collision failed to resolve")
         XCTAssertEqual(Array(output.tokens[0..<4]), Array(repeating: 7, count: 4))
         XCTAssertEqual(Array(output.tokens[5..<13]), Array(repeating: 7, count: 8))
-        XCTAssertEqual(output.tokens[13], 7)
+        XCTAssertEqual(output.tokens[13], 0)
         XCTAssertEqual(output.tokens[14], 0)
     }
 }
