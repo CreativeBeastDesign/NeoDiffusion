@@ -57,11 +57,17 @@ final class JotTests: XCTestCase {
                 observedFrozenMasks.append(frozen)
             }
             
-            // Logits: predict token 7 at conf 0.95 (c ≈ 9.85) at all positions
-            // conf = e^c / (e^c + 999) = 0.95  =>  c = ln(0.95/0.05 * 999) ≈ 9.85
+            let W = windowIds.dim(windowIds.ndim - 1)
             var logits = [Float](repeating: 0, count: activeLen * vocab)
             for i in 0 ..< activeLen {
-                logits[i * vocab + 7] = 9.85
+                let absPos = W - activeLen + i
+                if absPos == 15 {
+                    // Low confidence to keep it masked, preventing block from settling early
+                    logits[i * vocab + 7] = 0.0
+                } else {
+                    // Logits: predict token 7 at conf 0.95 (c ≈ 9.85)
+                    logits[i * vocab + 7] = 9.85
+                }
             }
             return MLXArray(logits).reshaped(1, activeLen, vocab)
         }
@@ -93,7 +99,8 @@ final class JotTests: XCTestCase {
             }
         }
         XCTAssertTrue(foundFrozen, "Expected JOT to freeze stable tokens and pass the frozen mask to forward")
-        XCTAssertEqual(output.tokens, Array(repeating: 7, count: B))
+        XCTAssertEqual(output.tokens[0..<15], Array(repeating: 7, count: 15))
+        XCTAssertEqual(output.tokens[15], 999) // remains masked
     }
 
     /// Verify collision resolution: if a delta edit occurs at a frozen position,
@@ -110,22 +117,22 @@ final class JotTests: XCTestCase {
                 observedFrozenMasks.append(frozen)
             }
             
+            let W = windowIds.dim(windowIds.ndim - 1)
             var logits = [Float](repeating: 0, count: activeLen * vocab)
-            if stepCount < 2 {
-                // Steps 0 and 1: predict token 7 with high confidence
-                for i in 0 ..< activeLen {
+            
+            for i in 0 ..< activeLen {
+                let absPos = W - activeLen + i
+                if absPos == 15 {
+                    // Low confidence to keep it masked, preventing block from settling early
+                    logits[i * vocab + 7] = 0.0
+                } else if absPos == 5 && stepCount >= 2 {
+                    // Edit position 5 to token 8 on step 2+
+                    logits[i * vocab + 8] = 9.85
+                } else {
                     logits[i * vocab + 7] = 9.85
                 }
-            } else {
-                // Step 2: predict token 8 with high confidence on position 5 (triggering edit!)
-                for i in 0 ..< activeLen {
-                    if i == 5 {
-                        logits[i * vocab + 8] = 9.85
-                    } else {
-                        logits[i * vocab + 7] = 9.85
-                    }
-                }
             }
+            
             stepCount += 1
             return MLXArray(logits).reshaped(1, activeLen, vocab)
         }
@@ -143,7 +150,9 @@ final class JotTests: XCTestCase {
         let engine = DiffusionEngine(model: model, speculationK: 1)
         let output = engine.run(prompt: prompt, params: p, forward: forward, streamBlock: nil)
         
-        // Verify output tokens at position 5 is 8 (the edit resolved correctly)
+        // Verify output tokens at position 5 is 8 (the edit resolved correctly after unfreezing)
         XCTAssertEqual(output.tokens[5], 8, "Edit collision failed to resolve")
+        XCTAssertEqual(output.tokens[0..<5], Array(repeating: 7, count: 5))
+        XCTAssertEqual(output.tokens[6..<15], Array(repeating: 7, count: 9))
     }
 }
