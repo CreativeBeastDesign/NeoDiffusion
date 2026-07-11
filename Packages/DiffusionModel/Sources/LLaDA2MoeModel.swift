@@ -47,9 +47,9 @@ public class LLaDA2MoeModel: Module {
     ///     block, the block-causal active-window mask for a two-block window (WP-1b)
     public func callAsFunction(
         _ activeIds: MLXArray, positionIds: MLXArray, caches: [LayerKVCache],
-        mask: MLXArray? = nil
+        mask: MLXArray? = nil, frozen: MLXArray? = nil
     ) -> MLXArray {
-        let hidden = model(activeIds, positionIds: positionIds, caches: caches, mask: mask)
+        let hidden = model(activeIds, positionIds: positionIds, caches: caches, mask: mask, frozen: frozen)
         return lmHead(hidden).asType(.float32)
     }
 
@@ -148,13 +148,13 @@ public class LLaDA2MoeInnerModel: Module {
     /// (its `pending*` set to this window's K/V) for a later commit.
     public func callAsFunction(
         _ activeIds: MLXArray, positionIds: MLXArray, caches: [LayerKVCache],
-        mask: MLXArray? = nil
+        mask: MLXArray? = nil, frozen: MLXArray? = nil
     ) -> MLXArray {
         precondition(caches.count == layers.count, "one cache per layer required")
         var hidden = wordEmbeddings(activeIds)
         let (cos, sin) = rotaryEmbedding.cosSin(positionIds: positionIds)
         for (layer, cache) in zip(layers, caches) {
-            hidden = layer(hidden, cos: cos, sin: sin, cache: cache, mask: mask)
+            hidden = layer(hidden, cos: cos, sin: sin, cache: cache, mask: mask, frozen: frozen)
         }
         return norm(hidden)
     }
