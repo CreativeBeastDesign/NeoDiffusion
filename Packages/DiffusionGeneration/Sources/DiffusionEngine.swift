@@ -660,6 +660,13 @@ public final class DiffusionEngine {
         let B = params.blockLength
         let K = speculationK
         let specActive = speculating(params, slots: S, verifierForward: verifierForward)
+        // Min-span routing (S2D2 §4.3, batch-boundary variant): a batch is verified iff the
+        // previous batch ended with ≥ τ_span masks remaining (proxy for the span length — exact
+        // while the masked region is one contiguous run, which holds until Γ punches holes).
+        // Routing at batch boundaries is a REAL compute saving (the verifier forward is not
+        // built at all), at the price of K-dependence for τ_span > 1 — same trade as the
+        // elastic Proposal-B pattern; K-invariance is guaranteed (and tested) at τ_span == 1.
+        var verifyThisBatch = specActive   // first batch of a phase: masks == B ≥ any τ_span
         var syncPoints = 0
         var forwardsEvaluated = 0
         var tokensProcessed = 0
@@ -688,7 +695,7 @@ public final class DiffusionEngine {
                     posts: specPosts, promptMasks: promptMasks,
                     slotPromptCounts: slotPromptCounts,
                     hasNextBlock: hasNextBlock, params: params, forward: forward,
-                    verifierForward: specActive ? verifierForward : nil)
+                    verifierForward: verifyThisBatch ? verifierForward : nil)
                 snapshots.append(s.resultWindow)
                 nextWindows.append(s.nextWindow)
                 breakFlags.append(s.breakFlag)
@@ -715,8 +722,8 @@ public final class DiffusionEngine {
 
             let flagVals = flags.asArray(Bool.self)
             syncPoints += 1
-            forwardsEvaluated += K * (specActive ? 2 : 1)
-            tokensProcessed += K * (S * B + (specActive ? 2 * B : 0))
+            forwardsEvaluated += K * (verifyThisBatch ? 2 : 1)
+            tokensProcessed += K * (S * B + (verifyThisBatch ? 2 * B : 0))
 
             let firstBreak = flagVals[0 ..< K].firstIndex(of: true)
             let firstActivation = flagVals[K ..< 2 * K].firstIndex(of: true).map { $0 - K }
@@ -779,6 +786,13 @@ public final class DiffusionEngine {
             addSteps(K)
             windowActive = specWindow
             posts = specPosts
+
+            // Min-span routing update from the batch's last evaluated step (memcpy, no sync):
+            // masks remaining in the front block is the span-length proxy.
+            if specActive && params.tauSpan > 1 {
+                let vals = statsPerStep[K - 1].asArray(Float.self)
+                verifyThisBatch = Int(vals[3]) >= params.tauSpan
+            }
         }
     }
 

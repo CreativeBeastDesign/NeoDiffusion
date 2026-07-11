@@ -175,6 +175,15 @@ struct LLaDARunResult: Codable {
     let trailingStarvedStepsPerBlock: [Int]
     let singleActiveDenoiseSeconds: Double
     let dualActiveDenoiseSeconds: Double
+    // WP-2a speculation — engine effective echoes + width-aware accounting.
+    let speculation: String
+    let tauSpan: Int
+    let acceptedTotal: Int
+    let acceptedPerVerifiedStepMean: Double
+    let tokensProcessedInForwards: Int
+    /// Tokens ÷ (tokensProcessedInForwards / blockLength): the cross-policy decider — plain
+    /// TPF-honest misleads when forwards differ in width (32 target vs 64 verifier).
+    let tpfWidthCorrected: Double
     let elasticCacheEnabled: Bool
     let elasticGamma: Float
     let elasticBeta: Int
@@ -220,6 +229,11 @@ func runLLaDABench() async throws {
     // Full-text dump for blind quality scoring (JSONL keeps only 160-char prefixes):
     // one JSON line per generation {arm, suite, promptId, run, text, tokens, eosBlock}.
     let dumpTextPath = argValue("--dump-text")
+
+    // WP-2a speculation. JSONL rows record ENGINE effective echoes (rule F7).
+    let speculation: GenerationParams.SpeculationKind =
+        (argValue("--speculation") == "s2d2") ? .s2d2 : .none
+    let tauSpan = Int(argValue("--tau-span") ?? "1") ?? 1
 
     // Prompt suites: fixed cases checked into Tools/diffusion-bench/PromptSuites (M6).
     // --prompt TEXT replaces them with a single ad-hoc case.
@@ -293,6 +307,7 @@ func runLLaDABench() async throws {
             mode, blockLength: blockLength, genLength: genLength,
             maskId: tokenizer.maskId, eosId: tokenizer.eosId, eosEarlyStop: eosEarlyStop,
             nBuf: nBuf, tauAdd: tauAdd, tauSemi: tauSemi,
+            speculation: speculation, tauSpan: tauSpan,
             elasticCacheEnabled: elasticCache, elasticGamma: elasticGamma, elasticBeta: elasticBeta,
             elasticStaticBoundary: elasticStaticBoundary)
     }
@@ -395,6 +410,19 @@ func runLLaDABench() async throws {
             trailingStarvedStepsPerBlock: output.metrics.trailingStarvedStepsPerBlock,
             singleActiveDenoiseSeconds: output.metrics.singleActiveDenoiseSeconds,
             dualActiveDenoiseSeconds: output.metrics.dualActiveDenoiseSeconds,
+            speculation: output.metrics.effectiveSpeculation,
+            tauSpan: output.metrics.effectiveTauSpan,
+            acceptedTotal: output.metrics.acceptedPerStep.flatMap { $0 }.reduce(0, +),
+            acceptedPerVerifiedStepMean: {
+                let verified = output.metrics.acceptedPerStep.flatMap { $0 }.filter { $0 > 0 }
+                guard !verified.isEmpty else { return 0 }
+                return Double(verified.reduce(0, +)) / Double(verified.count)
+            }(),
+            tokensProcessedInForwards: output.metrics.tokensProcessedInForwards,
+            tpfWidthCorrected: output.metrics.tokensProcessedInForwards > 0
+                ? Double(output.tokens.count)
+                    / (Double(output.metrics.tokensProcessedInForwards) / Double(blockLength))
+                : 0,
             elasticCacheEnabled: arm.cached && elasticCache,
             elasticGamma: elasticGamma,
             elasticBeta: elasticBeta,
