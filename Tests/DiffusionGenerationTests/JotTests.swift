@@ -28,7 +28,6 @@ final class JotTests: XCTestCase {
 
     /// Verification that JOT disabled matches baseline exactly.
     func testJotParityWhenDisabled() throws {
-        var failures: [String] = []
         for c in traces.cases {
             var p = c.params.toGenerationParams()
             p.jotEnabled = false
@@ -99,7 +98,7 @@ final class JotTests: XCTestCase {
             }
         }
         XCTAssertTrue(foundFrozen, "Expected JOT to freeze stable tokens and pass the frozen mask to forward")
-        XCTAssertEqual(output.tokens[0..<15], Array(repeating: 7, count: 15))
+        XCTAssertEqual(Array(output.tokens[0..<15]), Array(repeating: 7, count: 15))
         XCTAssertEqual(output.tokens[15], 999) // remains masked
     }
 
@@ -152,7 +151,7 @@ final class JotTests: XCTestCase {
         
         // Verify output tokens at position 5 is 8 (the edit resolved correctly after unfreezing)
         XCTAssertEqual(output.tokens[5], 8, "Edit collision failed to resolve")
-        XCTAssertEqual(output.tokens[0..<5], Array(repeating: 7, count: 5))
-        XCTAssertEqual(output.tokens[6..<15], Array(repeating: 7, count: 9))
+        XCTAssertEqual(Array(output.tokens[0..<5]), Array(repeating: 7, count: 5))
+        XCTAssertEqual(Array(output.tokens[6..<15]), Array(repeating: 7, count: 9))
     }
 }
