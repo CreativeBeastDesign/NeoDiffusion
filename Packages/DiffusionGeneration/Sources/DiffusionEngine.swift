@@ -166,6 +166,10 @@ public final class DiffusionEngine {
         // MARK: WP-2b effective echoes
         public let effectiveDynamicTauAlpha: Float
         public let effectiveEosEarlyExit: Bool
+        // MARK: JOT effective echoes
+        public let effectiveJotEnabled: Bool
+        public let effectiveJotK: Int
+        public let effectiveJotThreshold: Float
     }
 
     /// Mutable stats shared between the cached entry point's closures and `run` (the capture
@@ -179,7 +183,7 @@ public final class DiffusionEngine {
     /// active-block positions `B`, return **FP32 logits over the last `B` positions** `[1, B, V]`.
     /// The cache-disabled path builds a full `.strict` mask over the window; a cached path can
     /// forward only the active block against committed KV (no mask needed).
-    public typealias Forward = (_ windowIds: MLXArray, _ activeLen: Int) -> MLXArray
+    public typealias Forward = (_ windowIds: MLXArray, _ activeLen: Int, _ frozen: MLXArray?) -> MLXArray
 
     /// Signature of the S2D2 verifier forward (WP-2a): given the `[1, 2B]` pair window
     /// `[draft copy | mask copy]`, return FP32 logits `[1, 2B, V]`. The closure owns the
@@ -203,7 +207,7 @@ public final class DiffusionEngine {
         maskSemantics: BlockDiffusionMask.Semantics = .strict,
         streamBlock: (([Int]) -> Void)? = nil
     ) -> Output {
-        let forward: Forward = { [model] windowIds, activeLen in
+        let forward: Forward = { [model] windowIds, activeLen, frozen in
             let W = windowIds.dim(windowIds.ndim - 1)
             let logits = model.logits(
                 forTokens: windowIds, blockLength: params.blockLength,
@@ -272,7 +276,7 @@ public final class DiffusionEngine {
 
         // Active-only forward: slice the active window out of the full window; positions are
         // absolute from the committed length (== window length − active length).
-        let forward: Forward = { [self, model, cache, activeCache, boundaryHolder] windowIds, activeLen in
+        let forward: Forward = { [self, model, cache, activeCache, boundaryHolder] windowIds, activeLen, frozen in
             let W = windowIds.dim(windowIds.ndim - 1)
             let activeIds = windowIds[0..., (W - activeLen)...]
             let positionIds = MLXArray(Int32(W - activeLen) ..< Int32(W)).expandedDimensions(axis: 0)
@@ -285,7 +289,7 @@ public final class DiffusionEngine {
                 // ExactPrefixCache argument). Two active blocks: block-causal active mask
                 // (the trailing block sees the front, never vice versa — WP-1b).
                 guard activeLen > B else {
-                    return model(activeIds, positionIds: positionIds, caches: cache.layers)
+                    return model(activeIds, positionIds: positionIds, caches: cache.layers, mask: nil, frozen: frozen)
                 }
                 let prefixLen = W - activeLen
                 let mask = maskMemo[prefixLen] ?? {
@@ -294,7 +298,7 @@ public final class DiffusionEngine {
                     maskMemo[prefixLen] = m
                     return m
                 }()
-                return model(activeIds, positionIds: positionIds, caches: cache.layers, mask: mask)
+                return model(activeIds, positionIds: positionIds, caches: cache.layers, mask: mask, frozen: frozen)
             }
 
             let prefixLen = W - activeLen
@@ -409,6 +413,10 @@ public final class DiffusionEngine {
         /// Steps this block spent as the trailing slot with masks left and zero Γ acceptances
         /// (τ_semi starvation diagnostic).
         var trailingStarvedSteps: Int = 0
+        // JOT tracking states (in-graph)
+        var jotStableCount: MLXArray   // [1, B] Int32
+        var prevPredictions: MLXArray  // [1, B] Int32
+        var frozenMask: MLXArray       // [1, B] Bool
     }
 
     /// Whether this run's configuration speculates (WP-2a S2D2): policy on, single slot,
@@ -504,13 +512,17 @@ public final class DiffusionEngine {
                 }
             }
             let bufferSlot = buffer.activate(blockIndex: numBlock)
+            let activeArray = MLXArray(initialActive).reshaped(1, B)
             slots.append(SlotRun(
                 blockIndex: numBlock,
                 bufferSlot: bufferSlot,
-                active: MLXArray(initialActive).reshaped(1, B),
+                active: activeArray,
                 promptMask: MLXArray(promptMaskLocal).reshaped(1, B),
                 promptCount: promptMaskLocal.lazy.filter { $0 }.count,
-                postSteps: MLXArray(Int32(0))))
+                postSteps: MLXArray(Int32(0)),
+                jotStableCount: MLXArray.zeros([1, B], dtype: .int32),
+                prevPredictions: activeArray,
+                frozenMask: MLXArray.zeros([1, B], dtype: .bool)))
             nextBlockIndex += 1
         }
 
@@ -635,7 +647,10 @@ public final class DiffusionEngine {
                 effectiveSpeculation: params.speculation.rawValue,
                 effectiveTauSpan: params.tauSpan,
                 effectiveDynamicTauAlpha: params.dynamicTauAlpha,
-                effectiveEosEarlyExit: params.eosEarlyExit))
+                effectiveEosEarlyExit: params.eosEarlyExit,
+                effectiveJotEnabled: params.jotEnabled,
+                effectiveJotK: params.jotK,
+                effectiveJotThreshold: params.jotThreshold))
     }
 
     // MARK: - Per-phase denoising with K-step speculative readback
@@ -711,10 +726,20 @@ public final class DiffusionEngine {
         let slotPromptCounts = slots.map(\.promptCount)
         var posts = slots.map(\.postSteps)
 
+        var jotStableCount = S == 1 ? slots[0].jotStableCount
+            : concatenated(slots.map(\.jotStableCount), axis: 1)
+        var prevPredictions = S == 1 ? slots[0].prevPredictions
+            : concatenated(slots.map(\.prevPredictions), axis: 1)
+        var frozenMask = S == 1 ? slots[0].frozenMask
+            : concatenated(slots.map(\.frozenMask), axis: 1)
+
         while true {
             // Build up to K speculative steps into one graph.
             var specWindow = windowActive
             var specPosts = posts
+            var specJotStableCount = jotStableCount
+            var specPrevPredictions = prevPredictions
+            var specFrozenMask = frozenMask
             var snapshots: [MLXArray] = []     // result window if the break lands here
             var nextWindows: [MLXArray] = []   // window carried to the next step
             var breakFlags: [MLXArray] = []    // [1] Bool per step (front break)
@@ -724,6 +749,10 @@ public final class DiffusionEngine {
             var tracesPerStep: [MLXArray] = [] // [5, B] per step (offline tracing only)
             let tracing = onTrace != nil && S == 1
 
+            var jotStableCountsPerStep: [MLXArray] = []
+            var prevPredictionsPerStep: [MLXArray] = []
+            var frozenMasksPerStep: [MLXArray] = []
+
             for _ in 0 ..< K {
                 let s = windowStep(
                     prefix: prefix, prefixLen: prefixLen, windowActive: specWindow,
@@ -731,7 +760,10 @@ public final class DiffusionEngine {
                     slotPromptCounts: slotPromptCounts,
                     hasNextBlock: hasNextBlock, params: params, forward: forward,
                     verifierForward: verifyThisBatch ? verifierForward : nil,
-                    tracing: tracing)
+                    tracing: tracing,
+                    jotStableCount: specJotStableCount,
+                    prevPredictions: specPrevPredictions,
+                    frozenMask: specFrozenMask)
                 snapshots.append(s.resultWindow)
                 nextWindows.append(s.nextWindow)
                 breakFlags.append(s.breakFlag)
@@ -739,15 +771,23 @@ public final class DiffusionEngine {
                 postsPerStep.append(s.nextPosts)
                 statsPerStep.append(s.stats)
                 if let t = s.trace { tracesPerStep.append(t) }
+                
+                jotStableCountsPerStep.append(s.nextJotStableCount)
+                prevPredictionsPerStep.append(s.nextPrevPredictions)
+                frozenMasksPerStep.append(s.nextFrozenMask)
+                
                 specWindow = s.nextWindow
                 specPosts = s.nextPosts
+                specJotStableCount = s.nextJotStableCount
+                specPrevPredictions = s.nextPrevPredictions
+                specFrozenMask = s.nextFrozenMask
             }
 
             // Single blocking readback of the 2K stacked event flags.
             let flags = concatenated(breakFlags + activationFlags, axis: 0)  // [2K] Bool
             eval(flags)
             eval(snapshots + nextWindows + postsPerStep.flatMap { $0 } + statsPerStep
-                 + tracesPerStep)
+                 + tracesPerStep + jotStableCountsPerStep + prevPredictionsPerStep + frozenMasksPerStep)
 
             // Proposal B (WP-1a elastic, nBuf == 1 only): refresh the delayed boundary from
             // the batch's last evaluated drift similarities.
@@ -792,11 +832,17 @@ public final class DiffusionEngine {
                     }
                 }
             }
-            func applyWindow(_ window: MLXArray, posts stepPosts: [MLXArray]) {
+            func applyWindow(_ window: MLXArray, posts stepPosts: [MLXArray], jotStableCount: MLXArray, prevPredictions: MLXArray, frozenMask: MLXArray) {
                 for s in slots.indices {
                     slots[s].active = S == 1
                         ? window : window[0..., (s * B) ..< ((s + 1) * B)]
                     slots[s].postSteps = stepPosts[s]
+                    slots[s].jotStableCount = S == 1
+                        ? jotStableCount : jotStableCount[0..., (s * B) ..< ((s + 1) * B)]
+                    slots[s].prevPredictions = S == 1
+                        ? prevPredictions : prevPredictions[0..., (s * B) ..< ((s + 1) * B)]
+                    slots[s].frozenMask = S == 1
+                        ? frozenMask : frozenMask[0..., (s * B) ..< ((s + 1) * B)]
                 }
             }
             func addSteps(_ n: Int) {
@@ -811,7 +857,7 @@ public final class DiffusionEngine {
                 // On a budget break the whole window's step-j write is discarded (simplest
                 // K-invariant rule; the trailing slot's step-j write goes with it — recorded
                 // deviation, WP-1b logbook). On a settle break `resultWindow == nextWindow`.
-                applyWindow(snapshots[j], posts: postsPerStep[j])
+                applyWindow(snapshots[j], posts: postsPerStep[j], jotStableCount: jotStableCountsPerStep[j], prevPredictions: prevPredictionsPerStep[j], frozenMask: frozenMasksPerStep[j])
                 addSteps(j + 1)
                 let frontPost = Int(postsPerStep[j][0].item(Int32.self))  // memcpy, evaluated above
                 return PhaseResult(
@@ -821,7 +867,7 @@ public final class DiffusionEngine {
             }
             if let j = firstActivation {
                 applyStats(j + 1)
-                applyWindow(nextWindows[j], posts: postsPerStep[j])
+                applyWindow(nextWindows[j], posts: postsPerStep[j], jotStableCount: jotStableCountsPerStep[j], prevPredictions: prevPredictionsPerStep[j], frozenMask: frozenMasksPerStep[j])
                 addSteps(j + 1)
                 return PhaseResult(
                     event: .activation, syncPoints: syncPoints,
@@ -831,10 +877,13 @@ public final class DiffusionEngine {
 
             // No event within this batch — advance by K steps and continue.
             applyStats(K)
-            applyWindow(specWindow, posts: specPosts)
+            applyWindow(specWindow, posts: specPosts, jotStableCount: specJotStableCount, prevPredictions: specPrevPredictions, frozenMask: specFrozenMask)
             addSteps(K)
             windowActive = specWindow
             posts = specPosts
+            jotStableCount = specJotStableCount
+            prevPredictions = specPrevPredictions
+            frozenMask = specFrozenMask
 
             // Min-span routing update from the batch's last evaluated step (memcpy, no sync):
             // masks remaining in the front block is the span-length proxy.
@@ -860,6 +909,9 @@ public final class DiffusionEngine {
         /// step mask), built only when the engine's `onTrace` hook is set. Evaluated with the
         /// batch; read back in `applyStats`.
         let trace: MLXArray?
+        let nextJotStableCount: MLXArray
+        let nextPrevPredictions: MLXArray
+        let nextFrozenMask: MLXArray
     }
 
     /// One denoising step over the concatenated active window, fully in-graph. Generalizes the
@@ -871,7 +923,10 @@ public final class DiffusionEngine {
         posts: [MLXArray], promptMasks: MLXArray, slotPromptCounts: [Int],
         hasNextBlock: Bool, params: GenerationParams, forward: Forward,
         verifierForward: VerifierForward? = nil,
-        tracing: Bool = false
+        tracing: Bool = false,
+        jotStableCount: MLXArray,
+        prevPredictions: MLXArray,
+        frozenMask: MLXArray
     ) -> WindowStepResult {
         let B = params.blockLength
         let S = posts.count
@@ -891,7 +946,7 @@ public final class DiffusionEngine {
 
         // One forward over the full window, logits for the active columns only.
         let window = prefixLen > 0 ? concatenated([prefix, windowActive], axis: 1) : windowActive
-        let logits = forward(window, A)                     // [1, A, V] FP32
+        let logits = forward(window, A, params.jotEnabled ? frozenMask : nil)                     // [1, A, V] FP32
         let probs = softmax(logits, axis: -1)
         let x0 = argMax(logits, axis: -1).asType(.int32)    // [1, A]
         let x0p = probs.max(axis: -1)                       // [1, A]
@@ -992,8 +1047,43 @@ public final class DiffusionEngine {
         let delta = highConfEdit .&& tokenChanged
         let deltaAnyFront = delta[0..., 0 ..< B].any()
 
-        let finalTransfer = gamma .|| delta
+        // JOT evaluation (before update):
+        let nextJotStableCount: MLXArray
+        let nextFrozenMask: MLXArray
+        let nextPrevPredictions: MLXArray
+        let newlyFrozen: MLXArray
+
+        if params.jotEnabled {
+            // stable if prediction unchanged, confidence clears threshold, and position is currently masked
+            let isStable = (x0 .== prevPredictions) .&& (x0p .> MLXArray(params.jotThreshold)) .&& activeMask
+            nextJotStableCount = which(x0 .== prevPredictions, jotStableCount + MLXArray(Int32(1)), MLXArray(Int32(1)))
+            newlyFrozen = (nextJotStableCount .>= MLXArray(Int32(params.jotK))) .&& isStable
+            nextFrozenMask = frozenMask .|| newlyFrozen
+            nextPrevPredictions = x0
+        } else {
+            nextJotStableCount = jotStableCount
+            newlyFrozen = MLXArray.zeros([1, A], dtype: .bool)
+            nextFrozenMask = frozenMask
+            nextPrevPredictions = prevPredictions
+        }
+
+        let finalTransfer = gamma .|| delta .|| newlyFrozen
         var nextWindow = which(finalTransfer, writeTok, windowActive)
+
+        // JOT collision resolution with Δ-editing (after update):
+        let nextJotStableCountFinal: MLXArray
+        let nextFrozenMaskFinal: MLXArray
+        if params.jotEnabled {
+            // A collision occurs if Δ edits a position that is currently frozen
+            let collision = delta .&& nextFrozenMask
+            nextFrozenMaskFinal = nextFrozenMask .&& (.!collision)
+            nextJotStableCountFinal = which(collision, MLXArray(Int32(0)), nextJotStableCount)
+            // Set the position back to maskId in nextWindow:
+            nextWindow = which(collision, MLXArray(maskId), nextWindow)
+        } else {
+            nextJotStableCountFinal = nextJotStableCount
+            nextFrozenMaskFinal = nextFrozenMask
+        }
 
         // WP-2b-3 EOS early exit (arXiv:2601.17917): once a settled, non-prompt EOS exists in
         // the FRONT block, fill every still-masked window position after the first EOS with
@@ -1067,6 +1157,9 @@ public final class DiffusionEngine {
         return WindowStepResult(
             nextWindow: nextWindow, resultWindow: resultWindow,
             breakFlag: breakFlag, activationFlag: activationFlag,
-            nextPosts: nextPosts, stats: stats, trace: trace)
+            nextPosts: nextPosts, stats: stats, trace: trace,
+            nextJotStableCount: nextJotStableCountFinal,
+            nextPrevPredictions: nextPrevPredictions,
+            nextFrozenMask: nextFrozenMaskFinal)
     }
 }
