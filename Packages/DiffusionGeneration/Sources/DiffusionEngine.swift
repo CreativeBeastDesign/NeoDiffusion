@@ -1054,8 +1054,8 @@ public final class DiffusionEngine {
         let newlyFrozen: MLXArray
 
         if params.jotEnabled {
-            // stable if prediction unchanged, confidence clears threshold, and position is currently masked
-            let isStable = (x0 .== prevPredictions) .&& (x0p .> MLXArray(params.jotThreshold)) .&& activeMask
+            // stable if prediction unchanged and confidence clears threshold
+            let isStable = (x0 .== prevPredictions) .&& (x0p .> MLXArray(params.jotThreshold))
             nextJotStableCount = which(x0 .== prevPredictions, jotStableCount + MLXArray(Int32(1)), MLXArray(Int32(1)))
             newlyFrozen = (nextJotStableCount .>= MLXArray(Int32(params.jotK))) .&& isStable
             nextFrozenMask = frozenMask .|| newlyFrozen
