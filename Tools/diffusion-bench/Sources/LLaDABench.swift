@@ -302,6 +302,33 @@ func runLLaDABench() async throws {
     let isoFormatter = ISO8601DateFormatter()
     var jsonLines: [String] = []
 
+    // WP-2a calibration / JOT pre-experiment: per-step per-position trace dump (offline runs
+    // only — adds a per-step readback; use with --runs 1). One JSONL line per logical step.
+    var tracePromptId = ""
+    if let dumpTracesPath = argValue("--dump-traces") {
+        FileManager.default.createFile(atPath: dumpTracesPath, contents: nil)
+        guard let traceHandle = FileHandle(forWritingAtPath: dumpTracesPath) else {
+            fatalError("cannot open --dump-traces path \(dumpTracesPath)")
+        }
+        print("trace dump enabled -> \(dumpTracesPath) (per-step readbacks; offline use only)")
+        engine.onTrace = { t in
+            let rec: [String: Any] = [
+                "promptId": tracePromptId,
+                "block": t.blockIndex,
+                "step": t.stepInBlock,
+                "conf": t.confidence.map { Double($0) },
+                "gamma": t.transferred.map { $0 ? 1 : 0 },
+                "delta": t.edited.map { $0 ? 1 : 0 },
+                "x0": t.argmaxToken,
+                "masked": t.masked.map { $0 ? 1 : 0 },
+            ]
+            if let data = try? JSONSerialization.data(withJSONObject: rec),
+               let line = String(data: data, encoding: .utf8) {
+                traceHandle.write(Data((line + "\n").utf8))
+            }
+        }
+    }
+
     func params(for mode: GenerationParams.Mode) -> GenerationParams {
         GenerationParams.mode(
             mode, blockLength: blockLength, genLength: genLength,
@@ -510,6 +537,7 @@ func runLLaDABench() async throws {
             for suite in suites {
                 for prompt in suite.prompts {
                     let promptIds = try encodePrompt(prompt.user)
+                    tracePromptId = prompt.id
                     let (output, seconds, peakGB, env, warmup) = generate(arm, promptIds: promptIds)
                     runTotal += seconds
                     let text = tokenizer.decode(tokens: output.tokens)

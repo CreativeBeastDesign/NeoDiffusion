@@ -1,0 +1,205 @@
+{
+ "name": "calibration",
+ "prompts": [
+  {
+   "id": "cal-chat-01",
+   "user": "Explain the concept of \"monetary policy\" and how central banks use interest rates to control inflation, using an analogy involving a thermostat."
+  },
+  {
+   "id": "cal-chat-02",
+   "user": "Act as a neutral political analyst. Summarize the core arguments for and against universal basic income (UBI), highlighting the economic theories backing both sides."
+  },
+  {
+   "id": "cal-chat-03",
+   "user": "Critique the following statement: \"History is written by the victors.\" Provide historical examples that support this claim and at least two distinct examples that challenge it."
+  },
+  {
+   "id": "cal-chat-04",
+   "user": "Write a professional, polite, yet firm email to a client explaining that their project scope has expanded significantly and that a budget increase of 25% is required before proceeding with the next phase."
+  },
+  {
+   "id": "cal-chat-05",
+   "user": "Compare the philosophy of Stoicism with Epicureanism regarding their definitions of a \"good life\" and how one should handle personal adversity."
+  },
+  {
+   "id": "cal-chat-06",
+   "user": "Provide a comprehensive summary of the major shifts in global supply chain logistics that occurred between 2020 and 2026, focusing on nearshoring trends."
+  },
+  {
+   "id": "cal-chat-07",
+   "user": "Synthesize a brief overview of quantum computing for a non-technical corporate executive, explicitly explaining why it does not simply mean \"faster classical computers.\""
+  },
+  {
+   "id": "cal-chat-08",
+   "user": "A user is upset because their flight was canceled, and they are missing a family wedding. Draft an empathetic customer support response that balances policy constraints with human compassion."
+  },
+  {
+   "id": "cal-reason-09",
+   "user": "A room contains 5 people. Each person shakes hands with every other person exactly once. How many handshakes occur in total? Walk through your logical steps clearly."
+  },
+  {
+   "id": "cal-reason-10",
+   "user": "A farmer needs to cross a river with a wolf, a goat, and a cabbage. His boat can only hold himself and one of the three items at a time. If left alone, the wolf will eat the goat, and the goat will eat the cabbage. How can he get everything across safely?"
+  },
+  {
+   "id": "cal-reason-11",
+   "user": "Analyze the following scenario: If all Glips are Bloops, and no Bloops are Snarks, is it logically possible for some Snarks to be Glips? Provide a formal deductive proof or breakdown."
+  },
+  {
+   "id": "cal-reason-12",
+   "user": "Five runners (A, B, C, D, E) finish a race. A finishes ahead of B but behind C. D finishes ahead of E but behind B. What is the exact finishing order of all five runners from first to last?"
+  },
+  {
+   "id": "cal-reason-13",
+   "user": "A specific virus population doubles every hour. If it takes exactly 48 hours for the population to completely fill a petri dish, how many hours does it take for the dish to be exactly half full? Explain the mathematical rationale."
+  },
+  {
+   "id": "cal-reason-14",
+   "user": "You have two hourglasses: one measures exactly 4 minutes, and the other measures exactly 7 minutes. How can you use them to measure exactly 9 minutes sequentially?"
+  },
+  {
+   "id": "cal-reason-15",
+   "user": "If a clock shows the time as exactly 3:15, what is the precise angle in degrees between the hour hand and the minute hand? Show your calculation."
+  },
+  {
+   "id": "cal-reason-16",
+   "user": "Evaluate the strategic vulnerability in this game theory setup: Two competing firms must choose whether to price their product high or low. If both choose high, both earn $5M. If both choose low, both earn $2M. If one chooses high and the other low, the low-pricing firm earns $8M and the high-pricing firm earns $0. Identify the Nash equilibrium."
+  },
+  {
+   "id": "cal-code-17",
+   "user": "Write a Python function that accepts a string containing nested parentheses, brackets, and braces `(), [], {}` and returns a boolean indicating whether the input string is syntactically valid/balanced."
+  },
+  {
+   "id": "cal-code-18",
+   "user": "Implement an asynchronous Python script using `asyncio` and `aiohttp` that concurrently fetches JSON data from five different mock endpoints, catches any HTTP errors gracefully, and aggregates the results into a single dictionary."
+  },
+  {
+   "id": "cal-code-19",
+   "user": "Review this Python function for a memory leak or inefficiency:\n    def process_data(large_list):\n        result = []\n        for item in large_list:\n            if item not in result:\n                result.append(item)\n        return result\n    Explain why it performs poorly on large inputs and provide an optimized O(n) version."
+  },
+  {
+   "id": "cal-code-20",
+   "user": "Write a Python script using pandas to read a CSV file with columns 'Timestamp', 'UserID', and 'Action'. Find the top 3 users with the highest number of daily active interactions over a 30-day window."
+  },
+  {
+   "id": "cal-code-21",
+   "user": "Write a concurrent worker pool framework in Go. The program should distribute a slice of 100 integers across 5 worker goroutines using channels, compute the factorial of each number, and collect the results safely."
+  },
+  {
+   "id": "cal-code-22",
+   "user": "Debug the following Go code block. Identify the race condition or issue, explain why it happens, and provide the corrected version:\n    func main() {\n        var wg sync.WaitGroup\n        count := 0\n        for i := 0; i < 1000; i++ {\n            wg.Add(1)\n            go func() {\n                count++\n                wg.Done()\n            }()\n        }\n        wg.Wait()\n        fmt.Println(count)\n    }"
+  },
+  {
+   "id": "cal-code-23",
+   "user": "Implement a custom HTTP middleware in Go that acts as a rate limiter using the token bucket algorithm, restricting IP addresses to a maximum of 10 requests per minute."
+  },
+  {
+   "id": "cal-code-24",
+   "user": "Write a Go function that takes two sorted slices of integers and merges them into a single sorted slice without using any built-in sorting libraries. Optimize for time and memory."
+  },
+  {
+   "id": "cal-code-25",
+   "user": "Write an elegant Swift implementation of a generic Stack data structure using an enum or a struct. Include `push`, `pop`, `peek`, and `isEmpty` capabilities, adhering to modern Swift style guidelines."
+  },
+  {
+   "id": "cal-code-26",
+   "user": "Convert this traditional closure-based completion handler code in Swift to use modern `async/await` structural concurrency patterns:\n    func fetchUserProfile(id: String, completion: @escaping (Result<User, Error>) -> Void)"
+  },
+  {
+   "id": "cal-code-27",
+   "user": "Write a Swift function using the Combine framework (or Actors) that observes changes to a text field, debounces the input by 300 milliseconds, filters out strings shorter than 3 characters, and prints the final query string."
+  },
+  {
+   "id": "cal-code-28",
+   "user": "Fix this Swift memory leak scenario: Explain the difference between `unowned` and `weak` references when resolving a strong reference cycle inside a closure capturing `self`."
+  },
+  {
+   "id": "cal-code-29",
+   "user": "Implement a thread-safe Binary Search Tree (BST) in Rust. Ensure it compiles cleanly under the strict ownership model, using appropriate smart pointers (`Rc`, `Arc`, `RefCell`, or `Mutex`) where necessary."
+  },
+  {
+   "id": "cal-code-30",
+   "user": "Write a Rust function that reads a file line by line, parses each line into an integer, handles missing or malformed data using the `Result` type without crashing (`panic!`), and returns the total sum."
+  },
+  {
+   "id": "cal-code-31",
+   "user": "Optimize this Rust function to minimize heap allocations and avoid unnecessary cloning of data:\n    fn process_words(words: Vec<String>) -> Vec<String> {\n        words.iter().map(|w| w.trim().to_uppercase()).collect()\n    }\n    Rewrite it to accept and return string slices where appropriate."
+  },
+  {
+   "id": "cal-code-32",
+   "user": "Explain how the Rust borrow checker handles the lifetimes in a function that takes two string references and returns a reference to the longest one. Provide the correctly annotated code signature."
+  },
+  {
+   "id": "cal-code-33",
+   "user": "Implement Dijkstra's algorithm from scratch in the programming language of your choice. Provide clear type definitions for the graph nodes and edges."
+  },
+  {
+   "id": "cal-code-34",
+   "user": "Design an LRU (Least Recently Used) Cache data structure with `get(key)` and `put(key, value)` methods. Both operations must run in O(1) time complexity. Explain your architectural choice."
+  },
+  {
+   "id": "cal-code-35",
+   "user": "Given an array of integers representing daily stock prices, write an algorithm to find the maximum profit you could achieve by buying and selling that stock multiple times (you must sell before you buy again)."
+  },
+  {
+   "id": "cal-code-36",
+   "user": "Write a function that solves the classic \"N-Queens\" puzzle using backtracking, returning all valid board configurations for an N x N grid."
+  },
+  {
+   "id": "cal-code-37",
+   "user": "The following SQL query is executing slowly on a database with millions of rows:\n    SELECT * FROM orders WHERE status = 'COMPLETED' AND order_date > '2025-01-01' ORDER BY total_amount DESC LIMIT 10;\n    Suggest at least three concrete indexing strategies or query modifications to speed it up."
+  },
+  {
+   "id": "cal-code-38",
+   "user": "A web service handles massive JSON payloads. Profiling reveals that string allocations during JSON parsing are bottlenecking the CPU. Propose three structural architectural patterns to alleviate this."
+  },
+  {
+   "id": "cal-code-39",
+   "user": "Identify the logical edge cases missing from a function designed to parse URL strings into components (scheme, host, path, query parameters). List inputs that could break naive implementations."
+  },
+  {
+   "id": "cal-code-40",
+   "user": "Refactor a complex, deeply nested block of 5 conditional `if-else` loops into a clean, flat architecture using guard clauses, early returns, or pattern matching."
+  },
+  {
+   "id": "cal-de-41",
+   "user": "Übersetze den folgenden Text präzise ins Deutsche, wobei ein professioneller, geschäftsmäßiger Ton beibehalten werden muss: \"We are thrilled to announce our expansion into the European market. Our team has worked tirelessly to ensure our software meets all regional compliance standards.\""
+  },
+  {
+   "id": "cal-de-42",
+   "user": "Verfasse eine formelle E-Mail auf Deutsch, in der du dich für eine Stelle als Senior Software Engineer bewirbst. Beziehe dich auf langjährige Erfahrung mit verteilten Systemen und Cloud-Architektur."
+  },
+  {
+   "id": "cal-de-43",
+   "user": "Erkläre den grammatikalischen Unterschied zwischen den deutschen Konjunktionen \"weil\", \"denn\" und \"da\". Gib für jede Konjunktion ein konkretes Beispiel und erläutere die jeweilige Wortstellung im Satz."
+  },
+  {
+   "id": "cal-de-44",
+   "user": "Korrigiere und optimiere den folgenden deutschen Text im Hinblick auf Stil, Rechtschreibung und Kommasetzung: \"Der Kunde der gestern angerufen hatte wollte wissen, ob das Produkt lieferbar ist weil im Onlineshop steht das es ausverkauft sei.\""
+  },
+  {
+   "id": "cal-de-45",
+   "user": "Führe eine kurze literarische Analyse des Gedichts \"Der Erlkönig\" von Johann Wolfgang von Goethe durch. Was sind die zentralen Motive und wie wird die Spannung sprachlich aufgebaut?"
+  },
+  {
+   "id": "cal-de-46",
+   "user": "Schreibe eine Zusammenfassung (ca. 200 Wörter) über die wirtschaftliche Bedeutung des deutschen \"Mittelstands\" im Vergleich zu Großkonzernen."
+  },
+  {
+   "id": "cal-de-47",
+   "user": "Simuliere ein kurzes Kundenservicedialog auf Deutsch: Ein Kunde beschwert sich höflich, aber bestimmt darüber, dass seine Rechnung fälschlicherweise doppelt abgebucht wurde. Reagiere als Support-Mitarbeiter lösungsorientiert."
+  },
+  {
+   "id": "cal-de-48",
+   "user": "Was bedeutet der juristische Begriff \"Verhältnismäßigkeitsprinzip\" im deutschen Recht? Erkläre die drei Stufen (Geeignetheit, Erforderlichkeit, Angemessenheit) anhand eines Beispiels."
+  },
+  {
+   "id": "cal-de-49",
+   "user": "Schreibe eine technische Dokumentation auf Deutsch für eine REST-API-Endpunkt, der Benutzerdaten aktualisiert (`PATCH /api/v1/users/:id`). Beschreibe Parameter, Validierungsregeln und HTTP-Statuscodes."
+  },
+  {
+   "id": "cal-de-50",
+   "user": "Diskutiere die Vor- und Nachteile der deutschen Energiewende aus ökonomischer und ökologischer Sicht. Bleibe dabei objektiv und sachlich."
+  }
+ ]
+}

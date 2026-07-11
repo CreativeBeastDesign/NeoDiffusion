@@ -42,6 +42,29 @@ public final class DiffusionEngine {
         public init() {}
     }
 
+    /// One decoded step's per-position trace (WP-2a calibration / JOT pre-experiment; emitted
+    /// only when `onTrace` is set — an offline instrumentation path, never the serving path).
+    /// Arrays are over the front block's `B` positions at that logical step.
+    public struct StepTrace {
+        public let blockIndex: Int
+        public let stepInBlock: Int
+        /// Top-1 confidence per position (x0_p).
+        public let confidence: [Float]
+        /// Positions unmasked this step (Γ, including speculation acceptances).
+        public let transferred: [Bool]
+        /// Positions edited this step (Δ).
+        public let edited: [Bool]
+        /// Argmax token id per position at this step.
+        public let argmaxToken: [Int]
+        /// Masked positions at the START of this step.
+        public let masked: [Bool]
+    }
+
+    /// Offline trace hook (WP-2a): called once per applied logical step with the front slot's
+    /// per-position trace. Adds a per-step readback of small arrays — set it only for
+    /// calibration/analysis runs (<50 prompts), never in serving.
+    public var onTrace: ((StepTrace) -> Void)?
+
     public init(model: LLaDA2MoeModel, speculationK: Int = 4, instrument: Bool = false) {
         precondition(speculationK >= 1, "speculationK must be >= 1")
         self.model = model
@@ -687,7 +710,9 @@ public final class DiffusionEngine {
             var breakFlags: [MLXArray] = []    // [1] Bool per step (front break)
             var activationFlags: [MLXArray] = [] // [1] Bool per step (τ_add)
             var postsPerStep: [[MLXArray]] = []
-            var statsPerStep: [MLXArray] = []  // [4*S] per step
+            var statsPerStep: [MLXArray] = []  // [5*S] per step
+            var tracesPerStep: [MLXArray] = [] // [5, B] per step (offline tracing only)
+            let tracing = onTrace != nil && S == 1
 
             for _ in 0 ..< K {
                 let s = windowStep(
@@ -695,13 +720,15 @@ public final class DiffusionEngine {
                     posts: specPosts, promptMasks: promptMasks,
                     slotPromptCounts: slotPromptCounts,
                     hasNextBlock: hasNextBlock, params: params, forward: forward,
-                    verifierForward: verifyThisBatch ? verifierForward : nil)
+                    verifierForward: verifyThisBatch ? verifierForward : nil,
+                    tracing: tracing)
                 snapshots.append(s.resultWindow)
                 nextWindows.append(s.nextWindow)
                 breakFlags.append(s.breakFlag)
                 activationFlags.append(s.activationFlag)
                 postsPerStep.append(s.nextPosts)
                 statsPerStep.append(s.stats)
+                if let t = s.trace { tracesPerStep.append(t) }
                 specWindow = s.nextWindow
                 specPosts = s.nextPosts
             }
@@ -709,7 +736,8 @@ public final class DiffusionEngine {
             // Single blocking readback of the 2K stacked event flags.
             let flags = concatenated(breakFlags + activationFlags, axis: 0)  // [2K] Bool
             eval(flags)
-            eval(snapshots + nextWindows + postsPerStep.flatMap { $0 } + statsPerStep)
+            eval(snapshots + nextWindows + postsPerStep.flatMap { $0 } + statsPerStep
+                 + tracesPerStep)
 
             // Proposal B (WP-1a elastic, nBuf == 1 only): refresh the delayed boundary from
             // the batch's last evaluated drift similarities.
@@ -740,6 +768,17 @@ public final class DiffusionEngine {
                         if s > 0 && vals[5 * s] == 0 && vals[5 * s + 3] > 0 {
                             slots[s].trailingStarvedSteps += 1
                         }
+                    }
+                    if tracing, r < tracesPerStep.count, let onTrace {
+                        let t = tracesPerStep[r].asArray(Float.self)  // [5*B] memcpy
+                        onTrace(StepTrace(
+                            blockIndex: slots[0].blockIndex,
+                            stepInBlock: slots[0].stepsTaken + r,
+                            confidence: Array(t[0 ..< B]),
+                            transferred: t[B ..< 2 * B].map { $0 > 0.5 },
+                            edited: t[2 * B ..< 3 * B].map { $0 > 0.5 },
+                            argmaxToken: t[3 * B ..< 4 * B].map { Int($0) },
+                            masked: t[4 * B ..< 5 * B].map { $0 > 0.5 }))
                     }
                 }
             }
@@ -807,6 +846,10 @@ public final class DiffusionEngine {
         /// masks remaining post-update, speculation-accepted count (WP-2a; slot 0 only).
         /// Read back only from the already-evaluated batch.
         let stats: MLXArray
+        /// Per-position trace `[5, B]` for the front slot (x0_p, Γ, Δ, argmax token, start-of-
+        /// step mask), built only when the engine's `onTrace` hook is set. Evaluated with the
+        /// batch; read back in `applyStats`.
+        let trace: MLXArray?
     }
 
     /// One denoising step over the concatenated active window, fully in-graph. Generalizes the
@@ -817,7 +860,8 @@ public final class DiffusionEngine {
         prefix: MLXArray, prefixLen: Int, windowActive: MLXArray,
         posts: [MLXArray], promptMasks: MLXArray, slotPromptCounts: [Int],
         hasNextBlock: Bool, params: GenerationParams, forward: Forward,
-        verifierForward: VerifierForward? = nil
+        verifierForward: VerifierForward? = nil,
+        tracing: Bool = false
     ) -> WindowStepResult {
         let B = params.blockLength
         let S = posts.count
@@ -968,9 +1012,20 @@ public final class DiffusionEngine {
         }
         let stats = concatenated(statsParts, axis: 0)       // [5*S]
 
+        // Offline per-position trace (front slot; WP-2a calibration + JOT pre-experiment).
+        let trace: MLXArray? = tracing
+            ? concatenated([
+                x0p[0..., 0 ..< B].asType(.float32),
+                gamma[0..., 0 ..< B].asType(.float32),
+                delta[0..., 0 ..< B].asType(.float32),
+                x0[0..., 0 ..< B].asType(.float32),
+                activeMask[0..., 0 ..< B].asType(.float32),
+            ], axis: 0)
+            : nil
+
         return WindowStepResult(
             nextWindow: nextWindow, resultWindow: resultWindow,
             breakFlag: breakFlag, activationFlag: activationFlag,
-            nextPosts: nextPosts, stats: stats)
+            nextPosts: nextPosts, stats: stats, trace: trace)
     }
 }
