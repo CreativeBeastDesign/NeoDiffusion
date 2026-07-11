@@ -52,14 +52,14 @@ public final class LLaDA2DecoderLayer: Module {
     /// nil for a single active block; WP-1b passes the block-causal active-window mask.
     public func callAsFunction(
         _ x: MLXArray, cos: MLXArray, sin: MLXArray, cache: LayerKVCache,
-        mask: MLXArray? = nil
+        mask: MLXArray? = nil, frozen: MLXArray? = nil
     ) -> MLXArray {
         var hidden = x + attention(inputLayernorm(x), cos: cos, sin: sin, cache: cache, mask: mask)
         let ffnInput = postAttentionLayernorm(hidden)
         let ffnOutput: MLXArray
         switch mlp {
         case let dense as LLaDA2MLP: ffnOutput = dense(ffnInput)
-        case let moe as LLaDA2SparseMoEBlock: ffnOutput = moe(ffnInput)
+        case let moe as LLaDA2SparseMoEBlock: ffnOutput = moe(ffnInput, frozen: frozen)
         default: fatalError("unsupported mlp module type \(type(of: mlp))")
         }
         hidden = hidden + ffnOutput
