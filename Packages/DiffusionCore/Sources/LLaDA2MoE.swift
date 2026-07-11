@@ -257,20 +257,69 @@ public final class LLaDA2SparseMoEBlock: Module {
         super.init()
     }
 
-    public func callAsFunction(_ x: MLXArray) -> MLXArray {
+    public func callAsFunction(_ x: MLXArray, frozen: MLXArray? = nil) -> MLXArray {
         let shape = x.shape
         let flat = x.reshaped(-1, shape.last!)  // [T, H]
+        let T = flat.dim(0)
 
-        let (indices, weights, _) = gate(flat)
-        let expertOut = experts(flat, indices: indices)  // [T, k, H]
+        guard let frozen = frozen else {
+            // Normal execution path
+            let (indices, weights, _) = gate(flat)
+            let expertOut = experts(flat, indices: indices)  // [T, k, H]
 
-        var combined = (expertOut.asType(.float32) * weights.expandedDimensions(axis: -1))
+            var combined = (expertOut.asType(.float32) * weights.expandedDimensions(axis: -1))
+                .sum(axis: 1)
+                .asType(x.dtype)
+
+            if let sharedExperts {
+                combined = combined + sharedExperts(flat)
+            }
+            return combined.reshaped(shape)
+        }
+
+        // JOT execution path: skip MoE for frozen tokens
+        let frozenFlat = frozen.reshaped(-1) // [T] Bool
+        let activeMask = .!frozenFlat // [T] Bool
+        
+        let numActive = activeMask.asType(.int32).sum().item(Int32.self)
+        if numActive == 0 {
+            return MLXArray.zeros(shape, dtype: x.dtype)
+        }
+        if numActive == T {
+            let (indices, weights, _) = gate(flat)
+            let expertOut = experts(flat, indices: indices)
+
+            var combined = (expertOut.asType(.float32) * weights.expandedDimensions(axis: -1))
+                .sum(axis: 1)
+                .asType(x.dtype)
+
+            if let sharedExperts {
+                combined = combined + sharedExperts(flat)
+            }
+            return combined.reshaped(shape)
+        }
+
+        // Select only the active tokens
+        let activeInt = activeMask.asType(.int32)
+        let sortedIndices = argSort(-activeInt)
+        let activeIndices = sortedIndices[..<Int(numActive)]
+        let activeTokens = flat[activeIndices]
+
+        let (indices, weights, _) = gate(activeTokens)
+        let expertOut = experts(activeTokens, indices: indices)
+
+        var combinedActive = (expertOut.asType(.float32) * weights.expandedDimensions(axis: -1))
             .sum(axis: 1)
             .asType(x.dtype)
 
         if let sharedExperts {
-            combined = combined + sharedExperts(flat)
+            combinedActive = combinedActive + sharedExperts(activeTokens)
         }
+
+        // Scatter back to original token positions
+        var combined = MLXArray.zeros([T, shape.last!], dtype: x.dtype)
+        combined[activeIndices] = combinedActive
+
         return combined.reshaped(shape)
     }
 }
