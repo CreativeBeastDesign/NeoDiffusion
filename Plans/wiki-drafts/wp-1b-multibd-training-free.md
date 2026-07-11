@@ -27,7 +27,8 @@ Algorithm 5 ("Optimized MultiBD with a fixed Block Buffer") in the existing Bloc
 | **0.5** | **2.21 (+23%)** | 5.24 (+10%) |
 | 0.7 / 0.9 | ~1.85 (+3%) | ~5.24 (+10%) |
 
-- Chat has a **cliff between 0.5 and 0.7**; reasoning prefers early activation. Both optima differ from the paper's math (0.10) and code (0.90) — τ_add must be tuned per serving mode, not ported.
+- **gen-256 probes**: reasoning's gain grows with runway (+29.5% at τ_add=0.5, vs +22% at gen-128) and both suites converge on τ_add≈0.5 — the gen-128 numbers are runway-limited lower bounds, and a single long-form preset looks viable. The chat cliff localizes to (0.6, 0.7).
+- Chat has a **cliff between 0.6 and 0.7**; reasoning prefers early activation. Both optima differ from the paper's math (0.10) and code (0.90) — τ_add must be tuned per serving mode, not ported.
 - Front-block interference (the [[mbd-lms]] open question on editing with two live blocks): +2 steps/block median at τ_add=0.1, **zero at ≥0.5**; T2T editing keeps functioning (chat edits 4→8).
 - **Wall-clock does not convert on the M1**: dual-phase per-step latency ≈1.75× single (H100: 1.24×) ⇒ ≈+11% net M1 wall-clock at the chat winner despite −20% steps. Compute-bound roofline attribution; net-TPS verdict → Studio backfill (M2 Ultra expected to behave like the paper's H100 conversion, 1.78×TPF/1.24× → 1.44× TPS).
 - TPF-honest lags TPF-logical as event density rises (batch-split overshoot at K=4) — an event-aware-K follow-up is filed under the kernel/loop track.

@@ -68,9 +68,18 @@ Implement the source paper's Block-Buffer MultiBD (arXiv:2606.29215, Algorithm 5
 
 **Overnight verdict (dev-only, §0.1): algorithmic ACCEPT, provisional.** The hardware-independent deciders clear the floor (+23%/+22% TPF-logical, deterministic, parity-gated); M1 wall-clock is net-negative (F3) so the roadmap's net-TPS gate defers to the Studio backfill; quality awaits André's blind scores (`scratch/wp1b_blind/`). Recommended state: **land with `nBuf=1` as the served default** and per-mode presets (chat τ_add 0.5, reasoning 0.3) enabled only after Studio TPS + quality confirm. §5a below adds the improvement-loop probes.
 
-### 5a. Improvement-loop probes (C.5)
+### 5a. Improvement-loop probes (C.5; runs 1×, counters deterministic; `scratch/wp1b_probes.jsonl`)
 
-*(pending: τ_add=0.6 cliff localization; gen-256 length sensitivity on baseline/0.3/0.5; τ_semi probe skipped per F5; K=2-dual skipped — no paging observed, peak 9.64 GB)*
+Commands: `diffusion-bench llada --runs 1 --cooldown 0 --suites {chat | chat,reasoning} --gen-length {128|256} --arm <name> --arm-mode q --n-buf 2 --tau-add τ --json scratch/wp1b_probes.jsonl` (post-sweep binary: bench-only `--dump-text` delta, engine identical).
+
+- **Cliff localization (τ_add=0.6, chat, gen-128)**: TPF 2.18 (+22%) — the chat plateau extends through 0.6; the cliff sits in (0.6, 0.7). Winner stays 0.5 (margin to the cliff).
+- **Length sensitivity (gen-256)**: baseline chat 1.87 / reasoning 3.46; τ_add=0.5 → chat 2.21 (**+18%**), reasoning 4.48 (**+29.5%**); τ_add=0.3 → 2.16 (+15.5%) / 4.46 (+28.9%). Reasoning's gain **grows** with runway (+22%→+29.5%), confirming F1's runway-limited reading; the domain gap narrows at longer budgets and **both suites agree on τ_add≈0.5 at gen-256** — a single preset may suffice for long-form serving.
+- **τ_semi probe: skipped** (F5 rationale — ≤4 starved steps at the winner; nothing to recover).
+- **K=2 dual-phase: skipped** (no paging: peak 9.64 GB vs 9.57 baseline; the F6 overshoot observation files the event-aware-K idea under the §4 loop track instead).
+
+### 5b. Blind quality sheet (for André)
+
+`scratch/wp1b_blind/sheet.md` — 8 prompts (chat+reasoning, gen-128), nbuf1 vs nbuf2-τ_add=0.5, deterministic A/B shuffle (generalized `Tools/m8_blind_sheet.py`, labels from the pairs file; key merge unchanged). Objective checks (`checks.md`): no 4-gram repetition, no mask leaks, comparable lengths. Score with `python3 Tools/m8_blind_sheet.py --score scratch/wp1b_blind/sheet.md`. Source expectation to beat: −0.59pp at ≤0.5pp floor.
 
 ## 6. Deviations from the source algorithm (recorded per house rules)
 
