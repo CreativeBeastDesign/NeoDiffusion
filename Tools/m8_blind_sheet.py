@@ -97,9 +97,10 @@ def score(args):
             v = m.group(1).strip().upper()
             verdicts[pid] = key[pid].get(v, "tie" if v == "TIE" else None)
     wins = Counter(verdicts.values())
-    print(f"scored prompts: {len(verdicts)}")
-    print(f"strict wins: {wins.get('strict', 0)} | referenceBias wins: "
-          f"{wins.get('referenceBias', 0)} | ties: {wins.get('tie', 0)}")
+    labels = sorted({l for v in key.values() for l in v.values()})
+    print(f"scored prompts: {len(verdicts)} (key: {os.path.join(args.out, 'key.json')})")
+    print(" | ".join(f"{l} wins: {wins.get(l, 0)}" for l in labels)
+          + f" | ties: {wins.get('tie', 0)}")
     for pid, winner in sorted(verdicts.items()):
         print(f"  {pid}: {winner}")
 

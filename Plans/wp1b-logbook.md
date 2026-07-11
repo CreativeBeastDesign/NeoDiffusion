@@ -79,7 +79,11 @@ Commands: `diffusion-bench llada --runs 1 --cooldown 0 --suites {chat | chat,rea
 
 ### 5b. Blind quality sheet (for André)
 
-`scratch/wp1b_blind/sheet.md` — 8 prompts (chat+reasoning, gen-128), nbuf1 vs nbuf2-τ_add=0.5, deterministic A/B shuffle (generalized `Tools/m8_blind_sheet.py`, labels from the pairs file; key merge unchanged). Objective checks (`checks.md`): no 4-gram repetition, no mask leaks, comparable lengths. Score with `python3 Tools/m8_blind_sheet.py --score scratch/wp1b_blind/sheet.md`. Source expectation to beat: −0.59pp at ≤0.5pp floor.
+`scratch/wp1b_blind/sheet.md` — 8 prompts (chat+reasoning, gen-128), nbuf1 vs nbuf2-τ_add=0.5, deterministic A/B shuffle (generalized `Tools/m8_blind_sheet.py`, labels from the pairs file; key merge unchanged). Objective checks (`checks.md`): no 4-gram repetition, no mask leaks, comparable lengths.
+
+**SCORED (André, 2026-07-11 morning): 7/8 ties, 1/8 nbuf1 win (chat-explain — baseline gave more information), 0 MultiBD wins.** André's notes: outputs mostly identical or virtually identical; some too short to judge factual correctness. Scoring caveat found and fixed en route: `--score` without `--out` silently merged against the default M8 key (overlapping prompt ids made it look plausible) — the scorer now prints which key it used; verdict above confirmed against `scratch/wp1b_blind/key.json`.
+
+**F8 — Quality at the winner is smoke-clean (blind-scored).** (sourced) 7 ties + 1 baseline win on 8 prompts is consistent with the source's small residual cost (−0.59pp on math); no degeneration signals. An 8-prompt sheet cannot resolve the ≤0.5pp roadmap floor — the Studio scored-set comparison remains the formal quality gate, but nothing here blocks landing with `nBuf=1` default.
 
 ## 6. Deviations from the source algorithm (recorded per house rules)
 

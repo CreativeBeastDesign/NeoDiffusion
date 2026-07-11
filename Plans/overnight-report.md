@@ -10,7 +10,7 @@ Three tracks per the approved plan. All verdicts from hardware-independent count
 
 ## What needs you
 
-1. **Score the WP-1b blind sheet**: `scratch/wp1b_blind/sheet.md` (8 prompts, nbuf1 vs nbuf2-τ0.5, don't open `key.json` first), then `python3 Tools/m8_blind_sheet.py --score scratch/wp1b_blind/sheet.md`. (The M8 strict-vs-referenceBias sheet `scratch/m8_blind/sheet.md` is still pending too.)
+1. ~~Score the WP-1b blind sheet~~ **DONE (2026-07-11 morning): 7/8 ties, 1/8 baseline win, 0 MultiBD wins — smoke-clean.** (The M8 strict-vs-referenceBias sheet `scratch/m8_blind/sheet.md` is still pending.)
 2. **Review/merge branches**: `wp-1b-multibd` (the WP; 5 commits, tests green, ready for review) and `wp1a-salvage` (reference implementation of the faithful drift test; recommend keep-unmerged, it's dead code for serving). `main` already has the serving fix + elastic closure docs.
 3. **Wiki import**: move the two drafts from `Plans/wiki-drafts/` into `05-Experiments/`; the WP-1b page links [[mbd-lms]] — note the paper is arXiv:2606.29215 and my Algorithm-5 extraction is in the wp1b logbook §1 if the vault note needs updating.
 4. **Studio backfill list** (one session, per §0.1.4): re-run `scratch/wp1b_sweep.log`'s recorded arms + the probe commands (logbook §5a) → decides the net-TPS accept gate and the serving presets (proposal: chat τ_add 0.5, reasoning 0.3 at gen-128; single τ_add 0.5 for long-form).

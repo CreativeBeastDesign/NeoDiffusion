@@ -33,10 +33,13 @@ Algorithm 5 ("Optimized MultiBD with a fixed Block Buffer") in the existing Bloc
 - **Wall-clock does not convert on the M1**: dual-phase per-step latency ≈1.75× single (H100: 1.24×) ⇒ ≈+11% net M1 wall-clock at the chat winner despite −20% steps. Compute-bound roofline attribution; net-TPS verdict → Studio backfill (M2 Ultra expected to behave like the paper's H100 conversion, 1.78×TPF/1.24× → 1.44× TPS).
 - TPF-honest lags TPF-logical as event density rises (batch-split overshoot at K=4) — an event-aware-K follow-up is filed under the kernel/loop track.
 
+## Quality (blind-scored, 2026-07-11)
+
+8-prompt paired sheet, nbuf1 vs nbuf2-τ_add=0.5: **7 ties, 1 baseline win, 0 MultiBD wins** — outputs mostly indistinguishable; consistent with the source's −0.59pp residual cost. Smoke-level only; the Studio scored set decides the ≤0.5pp floor formally.
+
 ## Open items
 
-- André's blind quality scores (`scratch/wp1b_blind/sheet.md`) — the −0.59pp source delta is the expectation to beat at ≤0.5pp (roadmap floor).
-- Studio backfill: re-run the recorded arms (logbook §3) → decide the ≥15% net-TPS accept gate and the served presets (chat τ_add 0.5, reasoning 0.3).
+- Studio backfill: re-run the recorded arms (logbook §3) → decide the ≥15% net-TPS accept gate and the served presets (chat τ_add 0.5, reasoning 0.3 at gen-128; τ_add 0.5 unified for long-form).
 - Composability matrix cells touching 1b (roadmap §5): Elastic is closed-negative (cell moot); 2a speculation × dual slots stays **open**.
 
 ## Related
