@@ -191,6 +191,10 @@ struct LLaDARunResult: Codable {
     let elasticGamma: Float
     let elasticBeta: Int
     let elasticStaticBoundary: Int?
+    // JOT effective echoes (rule F7)
+    let jotEnabled: Bool
+    let jotK: Int
+    let jotThreshold: Float
     // Warmup / process / environment classification (m6-logbook Findings 1/2/7):
     // the process's first generation carries ~19 s one-off cost; cross-process
     // comparisons carry thermal drift; env fields + validity label per the frozen rule.
@@ -245,6 +249,11 @@ func runLLaDABench() async throws {
     // benchmark against τ_M2T=0.95-style decoding; the Q-mode default is 0.7).
     let thresholdMaskOverride = argValue("--threshold-mask").flatMap(Float.init)
     let thresholdEditOverride = argValue("--threshold-edit").flatMap(Float.init)
+
+    // JOT token-level early stopping
+    let jotEnabled = hasFlag("--jot")
+    let jotK = Int(argValue("--jot-k") ?? "2") ?? 2
+    let jotThreshold = Float(argValue("--jot-threshold") ?? "0.9") ?? 0.9
 
     // Prompt suites: fixed cases checked into Tools/diffusion-bench/PromptSuites (M6).
     // --prompt TEXT replaces them with a single ad-hoc case.
@@ -348,7 +357,8 @@ func runLLaDABench() async throws {
             speculation: speculation, tauSpan: tauSpan,
             dynamicTauAlpha: dynTauAlpha, eosEarlyExit: eosEarlyExit,
             elasticCacheEnabled: elasticCache, elasticGamma: elasticGamma, elasticBeta: elasticBeta,
-            elasticStaticBoundary: elasticStaticBoundary)
+            elasticStaticBoundary: elasticStaticBoundary,
+            jotEnabled: jotEnabled, jotK: jotK, jotThreshold: jotThreshold)
         if let t = thresholdMaskOverride { p.threshold = t }
         if let t = thresholdEditOverride { p.editingThreshold = t }
         return p
@@ -473,6 +483,9 @@ func runLLaDABench() async throws {
             elasticGamma: elasticGamma,
             elasticBeta: elasticBeta,
             elasticStaticBoundary: elasticStaticBoundary,
+            jotEnabled: output.metrics.effectiveJotEnabled,
+            jotK: output.metrics.effectiveJotK,
+            jotThreshold: output.metrics.effectiveJotThreshold,
             warmupIncluded: warmup,
             processId: Int(ProcessInfo.processInfo.processIdentifier),
             host: sysctlString("hw.model"),
