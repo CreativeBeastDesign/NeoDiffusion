@@ -51,9 +51,24 @@ Sweep arms (recorded verbatim; binary = post-commit `wp-2a-speculation` release 
 
 **F6 — Causal confirmation: against a τ=0.95 baseline, S2D2 converts (+19.1% chat, +15.2% reasoning, +4.9% code, width-corrected; steps halve).** (sourced: `base-t95` / `s2d2-t95-k1` arms) The identity predicted conversion exactly where it happened. But in absolute terms `s2d2-t95` (chat 1.13) still loses to plain Q-mode (1.49): on compute-bound hosts, aggressive thresholding is the cheaper harvest of the same parallelism. **Surviving niche**: a quality-leaning "verified-conservative" preset (τ=0.95 + AR verification — the S2D2 paper reports accuracy *gains* in this regime) at ~25% compute premium over Q-mode; decision needs the blind sheet + Studio wall-clock.
 
-## 5. Results summary
+**F7 — Spiffy ceiling readout: GO on forward count, blocked by width economics on the M1; runtime deferred to the Studio decision.** (sourced: `scratch/draft_graph.json`, hash 9eb8d6295c91, 50-prompt calibration traces) 44.9% of Q-mode transitions are exactly draftable by an {(i, j=1)} formula (token-miss 35–40%, Δ-abort 7–13%); calibrated libraries cover 61%/72%/78% at D=3/5/8 → **projected forward savings 27.6%/32.2%/35.2%** — well past the ≥10% gate. But sequence-dim drafting pays (1+D)·B width *every* step: at D=3 that is ≈2.9× more compute for 28% fewer forwards — no M1-positive D exists. Per §0.1: the forward-count win is the hardware-independent fact; whether (1+D)-wide forwards cost ≪ (1+D)× is the host question. **The runtime is NOT built on M1; the calibrated graph + readout ship for the Studio decision.** (Prediction scorecard: H3's "readout decides, direction unknown" — the count-ceiling turned out HIGH, refuting my own informal expectation that variable-Γ would zero it.)
 
-*(pending)*
+**F8 — JOT pre-experiment (by-product)**: k=2 → 44.2% of positions prediction-stable ≥2 steps before unmask, 4.9% later Δ-edited; k=4 → 15.0%/4.8%. Entry condition met at shallow windows; roadmap Tier-3 entry updated.
+
+## 5. Results summary (M1, gen-128, Q mode unless noted; width-corrected TPF = tokens ÷ 32-token-equivalent forwards)
+
+| Arm | chat WC (Δ vs Q-base) | reasoning WC | code WC | note |
+|---|---|---|---|---|
+| base-wp2a (Q, τ=0.7) | **1.49** | **3.21** | **3.57** | the shipped default |
+| s2d2 τ_span 1/8/16, K=4 | 0.82 (−45%) | 1.12 (−65%) | 1.53 (−57%) | routing inert (F3) |
+| s2d2 K=1, τ_span 8/16 | 0.98 (−35%) | 1.43 (−56%) | 1.92 (−46%) | overshoot-free floor |
+| base-t95 (τ=0.95) | 0.95 | 1.75 | 2.29 | the papers' regime |
+| **s2d2-t95-k1** | 1.13 (**+19% vs t95**) | 2.02 (+15%) | 2.40 (+5%) | converts vs its own baseline; still < Q-mode |
+
+**Verdict (M1, §0.1): WP-2a's roadmap gate (≥20% TPS over the then-current stack) is NOT met on the dev host, and the reason is now mechanistic, not empirical noise.** The break-even identity (F5) — verification pays iff acc/verified-step > 2× baseline tokens/step — places Q-mode just out of reach on every suite, because aggressive threshold decoding already banks the parallelism single-model speculation sells. Both candidates' *mechanisms* work excellently here (S2D2 acceptance 4–10/step; Spiffy count-ceiling 27–35%). Dispositions:
+1. **S2D2 lands as engine capability, default off** (`speculation: .none` serving default unchanged; parity suite proves the off-path byte-identical). Its niche — the **verified-conservative preset** (τ=0.95 + S2D2, +15–19% over its own baseline, paper-documented quality gains) — awaits André's blind scores (`scratch/wp2a_blind/`) and the Studio wall-clock.
+2. **Spiffy runtime: deferred to Studio** with the calibrated graph recorded (F7); on a host where (1+D)-wide forwards amortize, the 27–35% forward saving is the biggest single number Phase 3 has surfaced.
+3. Studio backfill decides both host questions in one session (recorded arms, logbook §3 + this table).
 
 ## 6. Deviations from the source (recorded)
 
