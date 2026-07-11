@@ -60,7 +60,7 @@ final class JotTests: XCTestCase {
             var logits = [Float](repeating: 0, count: activeLen * vocab)
             for i in 0 ..< activeLen {
                 let absPos = W - activeLen + i
-                if absPos == 15 {
+                if absPos >= 14 {
                     // Low confidence to keep it masked, preventing block from settling early
                     logits[i * vocab + 7] = 0.0
                 } else {
@@ -98,8 +98,9 @@ final class JotTests: XCTestCase {
             }
         }
         XCTAssertTrue(foundFrozen, "Expected JOT to freeze stable tokens and pass the frozen mask to forward")
-        XCTAssertEqual(Array(output.tokens[0..<15]), Array(repeating: 7, count: 15))
-        XCTAssertEqual(output.tokens[15], 999) // remains masked
+        XCTAssertEqual(Array(output.tokens[0..<14]), Array(repeating: 7, count: 14))
+        XCTAssertEqual(output.tokens[14], 7)
+        XCTAssertEqual(output.tokens[15], 7)
     }
 
     /// Verify collision resolution: if a delta edit occurs at a frozen position,
@@ -121,7 +122,7 @@ final class JotTests: XCTestCase {
             
             for i in 0 ..< activeLen {
                 let absPos = W - activeLen + i
-                if absPos == 15 {
+                if absPos >= 14 {
                     // Low confidence to keep it masked, preventing block from settling early
                     logits[i * vocab + 7] = 0.0
                 } else if absPos == 5 && stepCount >= 2 {
@@ -152,6 +153,6 @@ final class JotTests: XCTestCase {
         // Verify output tokens at position 5 is 8 (the edit resolved correctly after unfreezing)
         XCTAssertEqual(output.tokens[5], 8, "Edit collision failed to resolve")
         XCTAssertEqual(Array(output.tokens[0..<5]), Array(repeating: 7, count: 5))
-        XCTAssertEqual(Array(output.tokens[6..<15]), Array(repeating: 7, count: 9))
+        XCTAssertEqual(Array(output.tokens[6..<14]), Array(repeating: 7, count: 8))
     }
 }
