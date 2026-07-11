@@ -87,6 +87,13 @@ public struct GenerationParams: Sendable, Equatable {
     /// Optional static layer boundary for Proposal A (Static Depth Pruning).
     public var elasticStaticBoundary: Int?
 
+    /// Whether JOT (Just on Time) token-level early stopping is enabled.
+    public var jotEnabled: Bool
+    /// Number of steps a token's prediction must remain stable before it is frozen.
+    public var jotK: Int
+    /// Confidence threshold above which a token can be frozen.
+    public var jotThreshold: Float
+
     public init(
         threshold: Float,
         editingThreshold: Float,
@@ -108,7 +115,10 @@ public struct GenerationParams: Sendable, Equatable {
         elasticCacheEnabled: Bool = false,
         elasticGamma: Float = 0.9,
         elasticBeta: Int = 16,
-        elasticStaticBoundary: Int? = nil
+        elasticStaticBoundary: Int? = nil,
+        jotEnabled: Bool = false,
+        jotK: Int = 2,
+        jotThreshold: Float = 0.9
     ) {
         self.threshold = threshold
         self.editingThreshold = editingThreshold
@@ -131,6 +141,9 @@ public struct GenerationParams: Sendable, Equatable {
         self.elasticGamma = elasticGamma
         self.elasticBeta = elasticBeta
         self.elasticStaticBoundary = elasticStaticBoundary
+        self.jotEnabled = jotEnabled
+        self.jotK = jotK
+        self.jotThreshold = jotThreshold
     }
 
     /// The two served modes from the LLaDA2.1-mini model card (phase-2 §1, gotcha 10).
@@ -170,7 +183,10 @@ public struct GenerationParams: Sendable, Equatable {
         elasticCacheEnabled: Bool = false,
         elasticGamma: Float = 0.9,
         elasticBeta: Int = 16,
-        elasticStaticBoundary: Int? = nil
+        elasticStaticBoundary: Int? = nil,
+        jotEnabled: Bool = false,
+        jotK: Int = 2,
+        jotThreshold: Float = 0.9
     ) -> GenerationParams {
         let (mask, edit) = mode.thresholds
         return GenerationParams(
@@ -194,6 +210,9 @@ public struct GenerationParams: Sendable, Equatable {
             elasticCacheEnabled: elasticCacheEnabled,
             elasticGamma: elasticGamma,
             elasticBeta: elasticBeta,
-            elasticStaticBoundary: elasticStaticBoundary)
+            elasticStaticBoundary: elasticStaticBoundary,
+            jotEnabled: jotEnabled,
+            jotK: jotK,
+            jotThreshold: jotThreshold)
     }
 }
