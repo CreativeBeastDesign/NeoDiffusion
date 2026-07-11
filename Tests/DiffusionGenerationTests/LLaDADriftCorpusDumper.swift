@@ -62,7 +62,7 @@ final class LLaDADriftCorpusDumper: XCTestCase {
             // plus window/logits capture on a sampling schedule (block-relative steps
             // 0 and 4, then every 16th — ≤ ~8 windows per prompt).
             var stepInBlock: [Int: Int] = [:]  // block ordinal → forwards seen
-            let forward: DiffusionEngine.Forward = { [model = container.model] windowIds, activeLen in
+            let forward: DiffusionEngine.Forward = { [model = container.model] windowIds, activeLen, frozen in
                 let W = windowIds.dim(windowIds.ndim - 1)
                 let logits = model.logits(forTokens: windowIds, blockLength: params.blockLength)
                 let active = logits[0..., (W - activeLen)..., 0...]

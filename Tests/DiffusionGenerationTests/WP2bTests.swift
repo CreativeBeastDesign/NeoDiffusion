@@ -70,7 +70,7 @@ final class WP2bTests: XCTestCase {
     func testDynamicTauLivenessSynthetic() throws {
         let vocab = 1000
         // conf = e^c / (e^c + 999) = 0.6  ⇒  c = ln(0.6/0.4 · 999) ≈ 7.313
-        let forward: DiffusionEngine.Forward = { windowIds, activeLen in
+        let forward: DiffusionEngine.Forward = { windowIds, activeLen, frozen in
             var logits = [Float](repeating: 0, count: activeLen * vocab)
             for i in 0 ..< activeLen { logits[i * vocab + 7] = 7.313 }
             return MLXArray(logits).reshaped(1, activeLen, vocab)
@@ -126,7 +126,7 @@ final class WP2bTests: XCTestCase {
     /// trim-identical ([eos]).
     private func syntheticEosForward(vocab: Int, eosId: Int, firstGenPos: Int)
         -> DiffusionEngine.Forward {
-        { windowIds, activeLen in
+        { windowIds, activeLen, frozen in
             let W = windowIds.dim(windowIds.ndim - 1)
             var logits = [Float](repeating: 0, count: activeLen * vocab)
             for i in 0 ..< activeLen {
