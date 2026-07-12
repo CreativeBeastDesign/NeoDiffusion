@@ -195,6 +195,11 @@ public final class DiffusionEngine {
         public let effectiveJotFaithful: Bool
         /// WP-3a §10: the static MoE capacity ratio actually applied (0 = Option-A mask path).
         public let effectiveMoeCapacityRatio: Float
+        // MARK: ICE effective echoes
+        public let effectiveIceEnabled: Bool
+        public let effectiveIceTau: Float
+        public let effectiveIceNt: Int
+        public let effectiveIceThinkingLength: Int
     }
 
     /// Mutable stats shared between the cached entry point's closures and `run` (the capture
@@ -230,6 +235,7 @@ public final class DiffusionEngine {
         prompt: [Int],
         params: GenerationParams,
         maskSemantics: BlockDiffusionMask.Semantics = .strict,
+        iceTemplate: [Int]? = nil,
         streamBlock: (([Int]) -> Void)? = nil
     ) -> Output {
         let forward: Forward = { [model] windowIds, activeLen, frozen in
@@ -239,7 +245,7 @@ public final class DiffusionEngine {
                 maskSemantics: maskSemantics)
             return logits[0..., (W - activeLen)..., 0...]
         }
-        return run(prompt: prompt, params: params, forward: forward, streamBlock: streamBlock)
+        return run(prompt: prompt, params: params, iceTemplate: iceTemplate, forward: forward, streamBlock: streamBlock)
     }
 
     // MARK: - Public entry point (ExactPrefixCache enabled)
@@ -256,6 +262,7 @@ public final class DiffusionEngine {
     public func generateCached(
         prompt: [Int],
         params: GenerationParams,
+        iceTemplate: [Int]? = nil,
         streamBlock: (([Int]) -> Void)? = nil
     ) -> Output {
         let B = params.blockLength
@@ -445,7 +452,7 @@ public final class DiffusionEngine {
             jotCache.dropPrefix(prefixIds.dim(1))
         }
 
-        return run(prompt: prompt, params: params, activeCache: activeCache, boundaryHolder: boundaryHolder,
+        return run(prompt: prompt, params: params, iceTemplate: iceTemplate, activeCache: activeCache, boundaryHolder: boundaryHolder,
                    forward: forward, verifierForward: verifierForward,
                    streamBlock: streamBlock, onBlockSettled: onSettled,
                    onPrefixSettled: onPrefixSettled, stats: stats)
@@ -491,6 +498,8 @@ public final class DiffusionEngine {
         var jotStableCount: MLXArray   // [1, B] Int32
         var prevPredictions: MLXArray  // [1, B] Int32
         var frozenMask: MLXArray       // [1, B] Bool
+        // ICE phase tracking
+        var isAnswerPhase: Bool = false
     }
 
     /// Whether this run's configuration speculates (WP-2a S2D2): policy on, single slot,
@@ -511,6 +520,7 @@ public final class DiffusionEngine {
     func run(
         prompt: [Int],
         params: GenerationParams,
+        iceTemplate: [Int]? = nil,
         activeCache: ActiveBlockCache? = nil,
         boundaryHolder: BoundaryHolder? = nil,
         forward: Forward,
@@ -591,15 +601,29 @@ public final class DiffusionEngine {
             let blockStart = numBlock * B
             var initialActive = [Int32](repeating: maskId, count: B)
             var promptMaskLocal = [Bool](repeating: false, count: B)
-            for i in 0 ..< B {
-                let global = blockStart + i
-                if global < promptLength {
-                    initialActive[i] = Int32(prompt[global])
-                    promptMaskLocal[i] = true
+            if let temp = iceTemplate, numBlock == prefillBlocks {
+                precondition(temp.count == B, "iceTemplate count must equal blockLength B")
+                for i in 0 ..< B {
+                    initialActive[i] = Int32(temp[i])
+                }
+            } else {
+                for i in 0 ..< B {
+                    let global = blockStart + i
+                    if global < promptLength {
+                        initialActive[i] = Int32(prompt[global])
+                        promptMaskLocal[i] = true
+                    }
                 }
             }
             let bufferSlot = buffer.activate(blockIndex: numBlock)
             let activeArray = MLXArray(initialActive).reshaped(1, B)
+            let frozenMaskArray: MLXArray
+            if iceTemplate != nil, numBlock == prefillBlocks {
+                let isFrozen = initialActive.map { $0 != maskId }
+                frozenMaskArray = MLXArray(isFrozen).reshaped(1, B)
+            } else {
+                frozenMaskArray = MLXArray.zeros([1, B], dtype: .bool)
+            }
             slots.append(SlotRun(
                 blockIndex: numBlock,
                 bufferSlot: bufferSlot,
@@ -609,7 +633,8 @@ public final class DiffusionEngine {
                 postSteps: MLXArray(Int32(0)),
                 jotStableCount: MLXArray.zeros([1, B], dtype: .int32),
                 prevPredictions: activeArray,
-                frozenMask: MLXArray.zeros([1, B], dtype: .bool)))
+                frozenMask: frozenMaskArray,
+                isAnswerPhase: false))
             nextBlockIndex += 1
         }
 
@@ -619,6 +644,10 @@ public final class DiffusionEngine {
         var dualActiveDenoiseSeconds = 0.0
 
         while !slots.isEmpty {
+            if logicalStepsTotal > 1000 {
+                print("WARNING: Guard triggered! Exceeded 1000 logical steps. Breaking loop to prevent infinite run.")
+                break
+            }
             let hasNextBlock = nextBlockIndex < numBlocks
             let phaseWidth = slots.count
             let denoiseStart = Date()
@@ -636,6 +665,8 @@ public final class DiffusionEngine {
             else { singleActiveDenoiseSeconds += phaseSeconds }
 
             switch phase.event {
+            case .iceEarlyExit:
+                break
             case .activation:
                 activationSteps.append(logicalStepsTotal - 1)
                 activateSlot()
@@ -801,7 +832,11 @@ public final class DiffusionEngine {
                 effectiveJotThreshold: params.jotThreshold,
                 effectiveJotFaithful: params.jotEnabled && params.jotFaithful,
                 effectiveMoeCapacityRatio: (params.jotEnabled && params.jotFaithful)
-                    ? params.moeCapacityRatio : 0),
+                    ? params.moeCapacityRatio : 0,
+                effectiveIceEnabled: params.iceEnabled,
+                effectiveIceTau: params.iceTau,
+                effectiveIceNt: params.iceNt,
+                effectiveIceThinkingLength: params.iceThinkingLength),
             trajectorySequences: params.temporalVotingEnabled ? trajectorySequences : nil)
     }
 
@@ -827,6 +862,8 @@ public final class DiffusionEngine {
         /// Option C (WP-3a §11): a contiguous frozen prefix of the front block reached the
         /// threshold — commit the prefix early and shrink the active window to the suffix.
         case prefixCommit
+        /// ICE early exit transition from reasoning to answer phase.
+        case iceEarlyExit
     }
 
     struct PhaseResult {
@@ -911,6 +948,9 @@ public final class DiffusionEngine {
             var frozenMasksPerStep: [MLXArray] = []
             var frozenPrefixLensPerStep: [MLXArray] = []   // Option C candidate prefix per step
 
+            var avgConfsPerStep: [MLXArray] = []
+            let isAnswerPhase = slots[0].isAnswerPhase
+
             for _ in 0 ..< K {
                 let s = windowStep(
                     prefix: prefix, prefixLen: prefixLen, windowActive: specWindow,
@@ -921,8 +961,10 @@ public final class DiffusionEngine {
                     tracing: tracing,
                     jotStableCount: specJotStableCount,
                     prevPredictions: specPrevPredictions,
-                    frozenMask: specFrozenMask)
+                    frozenMask: specFrozenMask,
+                    isAnswerPhase: isAnswerPhase)
                 snapshots.append(s.resultWindow)
+                avgConfsPerStep.append(s.avgConfAnswer)
                 nextWindows.append(s.nextWindow)
                 breakFlags.append(s.breakFlag)
                 activationFlags.append(s.activationFlag)
@@ -942,9 +984,11 @@ public final class DiffusionEngine {
                 specFrozenMask = s.nextFrozenMask
             }
 
-            // Single blocking readback of the 2K stacked event flags.
+            // Single blocking readback of the 2K stacked event flags + ICE confidences.
             let flags = concatenated(breakFlags + activationFlags, axis: 0)  // [2K] Bool
+            let confs = concatenated(avgConfsPerStep, axis: 0)              // [K] Float
             eval(flags)
+            eval(confs)
             eval(snapshots + nextWindows + postsPerStep.flatMap { $0 } + statsPerStep
                  + tracesPerStep + jotStableCountsPerStep + prevPredictionsPerStep + frozenMasksPerStep
                  + (params.subBlockCommit ? frozenPrefixLensPerStep : []))
@@ -965,6 +1009,20 @@ public final class DiffusionEngine {
 
             let firstBreak = flagVals[0 ..< K].firstIndex(of: true)
             let firstActivation = flagVals[K ..< 2 * K].firstIndex(of: true).map { $0 - K }
+
+            var firstEarlyExit: Int? = nil
+            if params.iceEnabled && !slots[0].isAnswerPhase {
+                let confVals = confs.asArray(Float.self)
+                for idx in 0 ..< K {
+                    let confVal = confVals[idx]
+                    let statVals = statsPerStep[idx].asArray(Float.self)
+                    let thinkingMasksLeft = statVals[3]
+                    if confVal >= params.iceTau || thinkingMasksLeft == 0 {
+                        firstEarlyExit = idx
+                        break
+                    }
+                }
+            }
 
             // Route the already-evaluated per-step stats of `count` logical steps to their slots.
             func applyStats(_ count: Int) {
@@ -1009,6 +1067,18 @@ public final class DiffusionEngine {
                 for s in slots.indices { slots[s].stepsTaken += n }
                 globalStep += n
                 if S == 2 { dualActiveSteps += n }
+            }
+
+            // Early exit transition
+            if let j = firstEarlyExit, j <= (firstBreak ?? Int.max) && j <= (firstActivation ?? Int.max) {
+                applyStats(j + 1)
+                applyWindow(nextWindows[j], posts: postsPerStep[j], jotStableCount: jotStableCountsPerStep[j], prevPredictions: prevPredictionsPerStep[j], frozenMask: frozenMasksPerStep[j])
+                addSteps(j + 1)
+                slots[0].isAnswerPhase = true
+                return PhaseResult(
+                    event: .iceEarlyExit, syncPoints: syncPoints,
+                    forwards: forwardsEvaluated, tokensProcessed: tokensProcessed,
+                    frontPostAtBreak: 0)
             }
 
             // Break wins a same-step tie: the commit re-derives activation from fresh state.
@@ -1095,6 +1165,7 @@ public final class DiffusionEngine {
         /// Length of the front slot's leading contiguous frozen run after this step (Option C,
         /// WP-3a §11) as a `[1]` Int32 — the candidate sub-block-commit prefix. `0` when JOT is off.
         let frozenPrefixLen: MLXArray
+        let avgConfAnswer: MLXArray  // [1] Float — ICE answer confidence
     }
 
     /// One denoising step over the concatenated active window, fully in-graph. Generalizes the
@@ -1109,7 +1180,8 @@ public final class DiffusionEngine {
         tracing: Bool = false,
         jotStableCount: MLXArray,
         prevPredictions: MLXArray,
-        frozenMask: MLXArray
+        frozenMask: MLXArray,
+        isAnswerPhase: Bool
     ) -> WindowStepResult {
         let B = params.blockLength
         let S = posts.count
@@ -1127,10 +1199,22 @@ public final class DiffusionEngine {
         // (reference semantics per block; the trailing block's budget only bites once promoted).
         var nextPosts: [MLXArray] = []
         for s in 0 ..< S {
-            let slotMaskAny = activeMask[0..., (s * slotLen) ..< ((s + 1) * slotLen)].any()
+            let slotMask = activeMask[0..., (s * slotLen) ..< ((s + 1) * slotLen)]
+            let slotMaskAny: MLXArray
+            if params.iceEnabled && !isAnswerPhase {
+                let thinkingMask = slotMask[0..., 0 ..< params.iceThinkingLength]
+                slotMaskAny = thinkingMask.any()
+            } else {
+                slotMaskAny = slotMask.any()
+            }
             nextPosts.append(posts[s] + which(slotMaskAny, MLXArray(Int32(0)), MLXArray(Int32(1))))
         }
-        let anyMaskFront = activeMask[0..., 0 ..< slotLen].any()
+        let anyMaskFront: MLXArray
+        if params.iceEnabled && !isAnswerPhase {
+            anyMaskFront = activeMask[0..., 0 ..< params.iceThinkingLength].any()
+        } else {
+            anyMaskFront = activeMask[0..., 0 ..< slotLen].any()
+        }
         let budgetBreak = nextPosts[0] .> MLXArray(Int32(params.maxPostSteps))  // scalar Bool
 
         // One forward over the full window, logits for the active columns only.
@@ -1140,6 +1224,19 @@ public final class DiffusionEngine {
         let x0 = argMax(logits, axis: -1).asType(.int32)    // [1, A]
         let x0p = probs.max(axis: -1)                       // [1, A]
 
+        let avgConfAnswer: MLXArray
+        if params.iceEnabled {
+            let answerStart = params.iceThinkingLength
+            if answerStart < A {
+                let answerConf = x0p[0..., answerStart...]
+                avgConfAnswer = answerConf.mean().reshaped([1])
+            } else {
+                avgConfAnswer = MLXArray([Float(0)])
+            }
+        } else {
+            avgConfAnswer = MLXArray([Float(0)])
+        }
+
         let negInf = MLXArray(-Float.infinity)
         let maskConf = which(activeMask, x0p, negInf)       // [1, A]
         let positionsB = MLXArray(0 ..< Int32(slotLen)).reshaped(1, slotLen)
@@ -1148,7 +1245,10 @@ public final class DiffusionEngine {
         let writeTok: MLXArray         // [1, A] token source (x0, or verifier correction)
         var specAcceptedCount = MLXArray(Float(0))
 
-        if let verifierForward, S == 1 {
+        if isAnswerPhase {
+            gamma = activeMask
+            writeTok = x0
+        } else if let verifierForward, S == 1 {
             // WP-2a S2D2 self-verification (arXiv:2603.25702 Alg. 3, temp-0 greedy): draft the
             // first contiguous masked span C_t from this forward's x0, verify with one 2B-wide
             // block-size-1-AR forward (M_ver), accept the matching prefix, and take the
@@ -1207,10 +1307,19 @@ public final class DiffusionEngine {
                 } else {
                     tauMask = MLXArray(params.threshold)
                 }
-                let highConf = (slotConf .> tauMask) .&& slotMask
+                
+                let slotConfRestricted: MLXArray
+                if params.iceEnabled {
+                    let thinkingMask = positionsB .< Int32(params.iceThinkingLength)
+                    slotConfRestricted = which(thinkingMask, slotConf, negInf)
+                } else {
+                    slotConfRestricted = slotConf
+                }
+                
+                let highConf = (slotConfRestricted .> tauMask) .&& slotMask
                 let numHigh = highConf.asType(.int32).sum()               // scalar
                 let forceTop1 = (numHigh .== MLXArray(Int32(0))) .&& precedingSemiComplete
-                let top1 = argMax(slotConf, axis: -1)                     // [1]
+                let top1 = argMax(slotConfRestricted, axis: -1)                     // [1]
                 let oneHotTop1 = positionsB .== top1.reshaped(1, 1)       // [1, B] Bool
                 let slotGamma = highConf .|| (forceTop1 .&& oneHotTop1 .&& slotMask)
                 slotGammas.append(slotGamma)
@@ -1336,7 +1445,12 @@ public final class DiffusionEngine {
             let writtenCount = written.sum()
             let meanConf = (x0p[0..., r].asType(.float32) * written).sum()
                 / MLX.maximum(writtenCount, MLXArray(Float(1)))
-            let masksRemaining = (nextWindow[0..., r] .== maskId).asType(.float32).sum()
+            let masksRemaining: MLXArray
+            if params.iceEnabled && !isAnswerPhase {
+                masksRemaining = (nextWindow[0..., r][0..., 0 ..< params.iceThinkingLength] .== maskId).asType(.float32).sum()
+            } else {
+                masksRemaining = (nextWindow[0..., r] .== maskId).asType(.float32).sum()
+            }
             statsParts.append(slotGamma.asType(.float32).sum().reshaped([1]))
             statsParts.append(slotDelta.asType(.float32).sum().reshaped([1]))
             statsParts.append(meanConf.reshaped([1]))
@@ -1363,6 +1477,7 @@ public final class DiffusionEngine {
             nextJotStableCount: nextJotStableCountFinal,
             nextPrevPredictions: nextPrevPredictions,
             nextFrozenMask: nextFrozenMaskFinal,
-            frozenPrefixLen: frozenPrefixLen)
+            frozenPrefixLen: frozenPrefixLen,
+            avgConfAnswer: avgConfAnswer)
     }
 }

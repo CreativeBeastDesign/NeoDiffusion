@@ -215,6 +215,11 @@ struct LLaDARunResult: Codable {
     let moeCapacityRatio: Float
     let subBlockCommit: Bool
     let subBlockMinPrefix: Int
+    // ICE fields
+    let iceEnabled: Bool
+    let iceTau: Float
+    let iceNt: Int
+    let iceThinkingLength: Int
     // Warmup / process / environment classification (m6-logbook Findings 1/2/7):
     // the process's first generation carries ~19 s one-off cost; cross-process
     // comparisons carry thermal drift; env fields + validity label per the frozen rule.
@@ -234,13 +239,22 @@ func runLLaDABench() async throws {
     let tokenizerDir = URL(fileURLWithPath: argValue("--tokenizer")
         ?? "\(repoRoot)/models/llada2-1-mini")
     let baselineCheck = hasFlag("--baseline-check")
-    let runs = baselineCheck ? 1 : (Int(argValue("--runs") ?? "3") ?? 3)
-    let cooldown = baselineCheck ? 2 : (Int(argValue("--cooldown") ?? "30") ?? 30)
+    let iceSweep = hasFlag("--ice-sweep")
+    let runs = (baselineCheck || iceSweep) ? 1 : (Int(argValue("--runs") ?? "3") ?? 3)
+    let cooldown = (baselineCheck || iceSweep) ? 2 : (Int(argValue("--cooldown") ?? "30") ?? 30)
     let jsonPath = argValue("--json") ?? "\(repoRoot)/scratch/llada_bench.jsonl"
     let genLength = Int(argValue("--gen-length") ?? "128") ?? 128
-    let blockLength = Int(argValue("--block-length") ?? "32") ?? 32
+    let iceEnabled = hasFlag("--ice") || iceSweep
+    let iceTau = Float(argValue("--ice-tau") ?? "0.9") ?? 0.9
+    let iceNt = Int(argValue("--ice-nt") ?? "3") ?? 3
+    let blockLength: Int
+    if iceEnabled {
+        blockLength = genLength
+    } else {
+        blockLength = Int(argValue("--block-length") ?? "32") ?? 32
+    }
     let speculationKInput = Int(argValue("--speculation-k") ?? "4") ?? 4
-    let speculationK = baselineCheck ? 1 : speculationKInput
+    let speculationK = (baselineCheck || iceSweep) ? 1 : speculationKInput
     let eosEarlyStop = !hasFlag("--no-early-stop")
     let instrument = !hasFlag("--no-instrument")
     let maskDiagnostic = hasFlag("--mask-diagnostic")
@@ -304,7 +318,7 @@ func runLLaDABench() async throws {
         suites = [LLaDAPromptSuite(
             name: "custom", prompts: [LLaDAPromptCase(id: "custom-0", user: text)])]
     } else {
-        let wantedSuites = baselineCheck ? (argValue("--suites") ?? "gsm8k_100") : (argValue("--suites") ?? "chat,reasoning,code")
+        let wantedSuites = (baselineCheck || iceSweep) ? (argValue("--suites") ?? "gsm8k_100") : (argValue("--suites") ?? "chat,reasoning,code")
         let wanted = wantedSuites.split(separator: ",").map(String.init)
         suites = try wanted.map { name in
             let url = URL(fileURLWithPath:
@@ -392,9 +406,22 @@ func runLLaDABench() async throws {
         }
     }
 
-    func params(for mode: GenerationParams.Mode) -> GenerationParams {
+    func params(
+        for mode: GenerationParams.Mode,
+        blockLengthOverride: Int? = nil,
+        temporalVotingOverride: Bool? = nil,
+        iceEnabledOverride: Bool? = nil,
+        iceTauOverride: Float? = nil,
+        iceNtOverride: Int? = nil,
+        promptLength: Int? = nil
+    ) -> GenerationParams {
+        let effIceEnabled = iceEnabledOverride ?? iceEnabled
+        let effIceNt = iceNtOverride ?? iceNt
+        let pLen = promptLength ?? 0
+        let effBlockLen = effIceEnabled ? (pLen + genLength) : (blockLengthOverride ?? blockLength)
+        
         var p = GenerationParams.mode(
-            mode, blockLength: blockLength, genLength: genLength,
+            mode, blockLength: effBlockLen, genLength: genLength,
             maskId: tokenizer.maskId, eosId: tokenizer.eosId, eosEarlyStop: eosEarlyStop,
             nBuf: nBuf, tauAdd: tauAdd, tauSemi: tauSemi,
             speculation: speculation, tauSpan: tauSpan,
@@ -404,16 +431,25 @@ func runLLaDABench() async throws {
             jotEnabled: jotEnabled, jotK: jotK, jotThreshold: jotThreshold,
             jotFaithful: jotFaithful, moeCapacityRatio: moeCapacityRatio,
             subBlockCommit: subBlockCommit, subBlockMinPrefix: subBlockMinPrefix,
-            temporalVotingEnabled: temporalVoting,
+            temporalVotingEnabled: temporalVotingOverride ?? temporalVoting,
             temporalVotingAlpha: votingAlpha,
-            temporalVotingCutoff: votingCutoff)
+            temporalVotingCutoff: votingCutoff,
+            iceEnabled: effIceEnabled,
+            iceTau: iceTauOverride ?? iceTau,
+            iceNt: effIceNt,
+            iceThinkingLength: pLen + effIceNt * 32)
         if let t = thresholdMaskOverride { p.threshold = t }
         if let t = thresholdEditOverride { p.editingThreshold = t }
         return p
     }
 
-    func generate(_ arm: LLaDAArm, promptIds: [Int])
-        -> (output: DiffusionEngine.Output, seconds: Double, peakGB: Double,
+    func generate(
+        _ arm: LLaDAArm, promptIds: [Int],
+        temporalVotingOverride: Bool? = nil,
+        iceEnabledOverride: Bool? = nil,
+        iceTauOverride: Float? = nil,
+        iceNtOverride: Int? = nil
+    ) -> (output: DiffusionEngine.Output, seconds: Double, peakGB: Double,
             env: EnvSnapshot, warmup: Bool) {
         let warmup = llaDAProcessFirstGeneration
         llaDAProcessFirstGeneration = false
@@ -422,8 +458,6 @@ func runLLaDABench() async throws {
         let thermalBefore = thermalStateName()
         GPU.resetPeakMemory()
         let start = Date()
-        // Per-block wall-clock (H1 diagnostic: first-block cost includes prefill + kernel
-        // compile; steady-state is the later blocks). streamBlock fires at each commit.
         var lastCommit = start
         var blockIndex = 0
         let logBlock: ([Int]) -> Void = { blockIds in
@@ -435,14 +469,63 @@ func runLLaDABench() async throws {
             blockIndex += 1
             currentCommittedTokens.append(contentsOf: blockIds)
         }
+        
+        let effIceEnabled = iceEnabledOverride ?? iceEnabled
+        let effIceNt = iceNtOverride ?? iceNt
+        let effTempVoting = temporalVotingOverride ?? temporalVoting
+        let pLen = promptIds.count
+        let effBlockLen = effIceEnabled ? (pLen + genLength) : blockLength
+        
+        var iceTemplate: [Int]? = nil
+        if effIceEnabled {
+            let t1 = tokenizer.encode(text: "Step 1: ")
+            let t2 = tokenizer.encode(text: "Step 2: ")
+            let t3 = tokenizer.encode(text: "Step 3: ")
+            let t4 = tokenizer.encode(text: "Step 4: ")
+            let tAns = tokenizer.encode(text: "Therefore, the answer is ")
+            
+            var template = Array(repeating: tokenizer.maskId, count: effBlockLen)
+            template.replaceSubrange(0 ..< pLen, with: promptIds)
+            
+            if effIceNt == 3 {
+                template.replaceSubrange(pLen ..< pLen + t1.count, with: t1)
+                template.replaceSubrange(pLen + 32 ..< pLen + 32 + t2.count, with: t2)
+                template.replaceSubrange(pLen + 64 ..< pLen + 64 + t3.count, with: t3)
+                template.replaceSubrange(pLen + 96 ..< pLen + 96 + tAns.count, with: tAns)
+            } else if effIceNt == 2 {
+                template.replaceSubrange(pLen ..< pLen + t1.count, with: t1)
+                template.replaceSubrange(pLen + 32 ..< pLen + 32 + t2.count, with: t2)
+                template.replaceSubrange(pLen + 64 ..< pLen + 64 + tAns.count, with: tAns)
+            } else if effIceNt == 4 {
+                template.replaceSubrange(pLen ..< pLen + t1.count, with: t1)
+                template.replaceSubrange(pLen + 25 ..< pLen + 25 + t2.count, with: t2)
+                template.replaceSubrange(pLen + 50 ..< pLen + 50 + t3.count, with: t3)
+                template.replaceSubrange(pLen + 75 ..< pLen + 75 + t4.count, with: t4)
+                template.replaceSubrange(pLen + 100 ..< pLen + 100 + tAns.count, with: tAns)
+            }
+            iceTemplate = template
+        }
+
+        let targetParams = params(
+            for: arm.mode,
+            temporalVotingOverride: effTempVoting,
+            iceEnabledOverride: effIceEnabled,
+            iceTauOverride: iceTauOverride,
+            iceNtOverride: effIceNt,
+            promptLength: pLen
+        )
+
         let output = arm.cached
-            ? engine.generateCached(prompt: promptIds, params: params(for: arm.mode),
+            ? engine.generateCached(prompt: promptIds, params: targetParams,
+                                    iceTemplate: iceTemplate,
                                     streamBlock: logBlock)
-            : engine.generate(prompt: promptIds, params: params(for: arm.mode),
-                              maskSemantics: arm.mask, streamBlock: logBlock)
+            : engine.generate(prompt: promptIds, params: targetParams,
+                              maskSemantics: arm.mask,
+                              iceTemplate: iceTemplate,
+                              streamBlock: logBlock)
         let seconds = Date().timeIntervalSince(start)
         var finalOutput = output
-        if temporalVoting, !baselineCheck, let trajectory = output.trajectorySequences, !trajectory.isEmpty {
+        if effTempVoting, !baselineCheck, let trajectory = output.trajectorySequences, !trajectory.isEmpty {
             let T = trajectory.count
             let startIdx = Int(Float(T) * votingCutoff)
             if startIdx < T {
@@ -590,6 +673,10 @@ func runLLaDABench() async throws {
             moeCapacityRatio: output.metrics.effectiveMoeCapacityRatio,
             subBlockCommit: output.metrics.effectiveJotFaithful && subBlockCommit,
             subBlockMinPrefix: subBlockMinPrefix,
+            iceEnabled: output.metrics.effectiveIceEnabled,
+            iceTau: output.metrics.effectiveIceTau,
+            iceNt: output.metrics.effectiveIceNt,
+            iceThinkingLength: output.metrics.effectiveIceThinkingLength,
             warmupIncluded: warmup,
             processId: Int(ProcessInfo.processInfo.processIdentifier),
             host: sysctlString("hw.model"),
@@ -781,6 +868,149 @@ func runLLaDABench() async throws {
         if let data = try? JSONSerialization.data(withJSONObject: resultsMeta, options: [.prettyPrinted, .sortedKeys]) {
             try? data.write(to: URL(fileURLWithPath: resultsJSONPath))
             print("Saved detailed results and parameter sweep to \(resultsJSONPath)")
+        }
+        return
+    }
+
+    // ICE parameter sweep execution path
+    if iceSweep {
+        print("---- starting GSM8K ICE Parameter Sweep & TSCV Joint Evaluation ----")
+        print("TIME ESTIMATE: This ICE parameter sweep evaluates 7 configurations on 100 prompts. Expected total runtime: ~12-15 minutes.")
+        
+        struct SweepArm {
+            let name: String
+            let iceEnabled: Bool
+            let iceTau: Float
+            let iceNt: Int
+            let temporalVoting: Bool
+            let votingAlpha: Float
+            let votingCutoff: Float
+        }
+        
+        let sweepArms = [
+            SweepArm(name: "Baseline (No ICE, No TSCV)", iceEnabled: false, iceTau: 0.9, iceNt: 3, temporalVoting: false, votingAlpha: 0.0, votingCutoff: 0.9),
+            SweepArm(name: "ICE-SP (tau=0.8, Nt=3)", iceEnabled: true, iceTau: 0.8, iceNt: 3, temporalVoting: false, votingAlpha: 0.0, votingCutoff: 0.9),
+            SweepArm(name: "ICE-PP (tau=0.9, Nt=3)", iceEnabled: true, iceTau: 0.9, iceNt: 3, temporalVoting: false, votingAlpha: 0.0, votingCutoff: 0.9),
+            SweepArm(name: "ICE-PP (tau=0.95, Nt=3)", iceEnabled: true, iceTau: 0.95, iceNt: 3, temporalVoting: false, votingAlpha: 0.0, votingCutoff: 0.9),
+            SweepArm(name: "ICE-PP (tau=0.9, Nt=2)", iceEnabled: true, iceTau: 0.9, iceNt: 2, temporalVoting: false, votingAlpha: 0.0, votingCutoff: 0.9),
+            SweepArm(name: "ICE-PP (tau=0.9, Nt=4)", iceEnabled: true, iceTau: 0.9, iceNt: 4, temporalVoting: false, votingAlpha: 0.0, votingCutoff: 0.9),
+            SweepArm(name: "ICE+TSCV (tau=0.9, Nt=3)", iceEnabled: true, iceTau: 0.9, iceNt: 3, temporalVoting: true, votingAlpha: 0.0, votingCutoff: 0.9)
+        ]
+        
+        var correctCounts = [String: Int]()
+        var totalSteps = [String: Int]()
+        var totalSeconds = [String: Double]()
+        var totalEvaluated = 0
+        var details = [[String: Any]]()
+        
+        for suite in suites {
+            for prompt in suite.prompts {
+                guard let expected = prompt.answer else {
+                    print("Warning: Prompt \(prompt.id) has no ground truth answer. Skipping.")
+                    continue
+                }
+                let promptIds = try encodePrompt(prompt.user)
+                totalEvaluated += 1
+                
+                print(String(format: "\n========================================\nPrompt %d/%d: '%@' | Expected: %@\n========================================",
+                             totalEvaluated, suite.prompts.count, prompt.id, expected))
+                
+                var promptDetails: [String: Any] = [
+                    "promptId": prompt.id,
+                    "expected": expected
+                ]
+                
+                var armResults = [String: Any]()
+                
+                for arm in sweepArms {
+                    if cooldown > 0 {
+                        try await Task.sleep(nanoseconds: UInt64(cooldown) * 1_000_000_000)
+                    }
+                    
+                    let lArm = LLaDAArm(name: arm.name, mode: .q, cached: true, mask: .strict)
+                    let pB = arm.iceEnabled ? genLength : blockLength
+                    let prefillBlocks = promptIds.count / pB
+                    currentCommittedTokens = Array(promptIds[0 ..< (prefillBlocks * pB)])
+                    
+                    let (output, seconds, _, env, warmup) = generate(
+                        lArm,
+                        promptIds: promptIds,
+                        temporalVotingOverride: arm.temporalVoting,
+                        iceEnabledOverride: arm.iceEnabled,
+                        iceTauOverride: arm.iceTau,
+                        iceNtOverride: arm.iceNt
+                    )
+                    
+                    let text = tokenizer.decode(tokens: output.tokens)
+                    let finalAnswer = extractLastNumber(from: text) ?? "N/A"
+                    let isCorrect = (finalAnswer == expected)
+                    let steps = output.metrics.logicalStepsTotal
+                    
+                    if isCorrect {
+                        correctCounts[arm.name, default: 0] += 1
+                    }
+                    totalSteps[arm.name, default: 0] += steps
+                    totalSeconds[arm.name, default: 0.0] += seconds
+                    
+                    print(String(format: "  [%-30@] Correct: %-3@ | Steps: %-3d | Time: %5.1fs | Answer: %@",
+                                 arm.name, isCorrect ? "Yes" : "No", steps, seconds, finalAnswer))
+                    
+                    armResults[arm.name] = [
+                        "answer": finalAnswer,
+                        "correct": isCorrect,
+                        "steps": steps,
+                        "time": seconds,
+                        "warmup": warmup,
+                        "envValid": env.isValid
+                    ]
+                }
+                
+                promptDetails["arms"] = armResults
+                details.append(promptDetails)
+            }
+        }
+        
+        print("\n====================================================")
+        print("          GSM8K ICE PARAMETER SWEEP RESULTS         ")
+        print("====================================================")
+        print("| Configuration                  | Accuracy | Steps/Prompt | Rel Speedup |")
+        print("|--------------------------------|----------|--------------|-------------|")
+        
+        let baselineSteps = Double(totalSteps["Baseline (No ICE, No TSCV)", default: 1]) / Double(totalEvaluated)
+        
+        for arm in sweepArms {
+            let count = correctCounts[arm.name, default: 0]
+            let acc = totalEvaluated > 0 ? Double(count) / Double(totalEvaluated) * 100.0 : 0.0
+            let steps = totalEvaluated > 0 ? Double(totalSteps[arm.name, default: 0]) / Double(totalEvaluated) : 0.0
+            let speedup = steps > 0 ? (baselineSteps - steps) / baselineSteps * 100.0 : 0.0
+            
+            print(String(format: "| %-30@ | %6.2f%% | %12.1f | %10.1f%% |",
+                         arm.name, acc, steps, speedup))
+        }
+        print("====================================================")
+        
+        var armFinalResults = [String: [String: Any]]()
+        for arm in sweepArms {
+            let count = correctCounts[arm.name, default: 0]
+            let acc = totalEvaluated > 0 ? Double(count) / Double(totalEvaluated) * 100.0 : 0.0
+            let steps = totalEvaluated > 0 ? Double(totalSteps[arm.name, default: 0]) / Double(totalEvaluated) : 0.0
+            armFinalResults[arm.name] = [
+                "accuracy": acc,
+                "meanSteps": steps,
+                "totalSeconds": totalSeconds[arm.name, default: 0.0]
+            ]
+        }
+        
+        let resultsMeta: [String: Any] = [
+            "totalEvaluated": totalEvaluated,
+            "armsSummary": armFinalResults,
+            "details": details
+        ]
+        
+        let resultsJSONPath = "\(repoRoot)/scratch/ice_sweep_results.json"
+        if let data = try? JSONSerialization.data(withJSONObject: resultsMeta, options: [.prettyPrinted, .sortedKeys]) {
+            try? data.write(to: URL(fileURLWithPath: resultsJSONPath))
+            print("Saved ICE parameter sweep results to \(resultsJSONPath)")
         }
         return
     }

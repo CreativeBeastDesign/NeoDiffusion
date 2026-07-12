@@ -131,6 +131,15 @@ public struct GenerationParams: Sendable, Equatable {
     /// Cutoff ratio (t_start) below which intermediate outputs are discarded.
     public var temporalVotingCutoff: Float
 
+    /// Whether In-Place Chain-of-Thought (ICE) is enabled.
+    public var iceEnabled: Bool
+    /// Confidence threshold above which ICE early exit is triggered.
+    public var iceTau: Float
+    /// Number of reasoning steps in the ICE template.
+    public var iceNt: Int
+    /// Length of the thinking section in ICE.
+    public var iceThinkingLength: Int
+
     public init(
         threshold: Float,
         editingThreshold: Float,
@@ -162,7 +171,11 @@ public struct GenerationParams: Sendable, Equatable {
         subBlockMinPrefix: Int = 8,
         temporalVotingEnabled: Bool = false,
         temporalVotingAlpha: Float = 0.0,
-        temporalVotingCutoff: Float = 0.9
+        temporalVotingCutoff: Float = 0.9,
+        iceEnabled: Bool = false,
+        iceTau: Float = 0.9,
+        iceNt: Int = 3,
+        iceThinkingLength: Int = 96
     ) {
         self.threshold = threshold
         self.editingThreshold = editingThreshold
@@ -195,6 +208,10 @@ public struct GenerationParams: Sendable, Equatable {
         self.temporalVotingEnabled = temporalVotingEnabled
         self.temporalVotingAlpha = temporalVotingAlpha
         self.temporalVotingCutoff = temporalVotingCutoff
+        self.iceEnabled = iceEnabled
+        self.iceTau = iceTau
+        self.iceNt = iceNt
+        self.iceThinkingLength = iceThinkingLength
     }
 
     /// The two served modes from the LLaDA2.1-mini model card (phase-2 §1, gotcha 10).
@@ -244,7 +261,11 @@ public struct GenerationParams: Sendable, Equatable {
         subBlockMinPrefix: Int = 8,
         temporalVotingEnabled: Bool = false,
         temporalVotingAlpha: Float = 0.0,
-        temporalVotingCutoff: Float = 0.9
+        temporalVotingCutoff: Float = 0.9,
+        iceEnabled: Bool = false,
+        iceTau: Float = 0.9,
+        iceNt: Int = 3,
+        iceThinkingLength: Int = 96
     ) -> GenerationParams {
         let (mask, edit) = mode.thresholds
         return GenerationParams(
@@ -278,6 +299,15 @@ public struct GenerationParams: Sendable, Equatable {
             subBlockMinPrefix: subBlockMinPrefix,
             temporalVotingEnabled: temporalVotingEnabled,
             temporalVotingAlpha: temporalVotingAlpha,
-            temporalVotingCutoff: temporalVotingCutoff)
+            temporalVotingCutoff: temporalVotingCutoff,
+            iceEnabled: iceEnabled,
+            iceTau: iceTau,
+            iceNt: iceNt,
+            iceThinkingLength: iceThinkingLength)
     }
+}
+
+public enum ICEPhase: Sendable {
+    case reasoning
+    case answer
 }
