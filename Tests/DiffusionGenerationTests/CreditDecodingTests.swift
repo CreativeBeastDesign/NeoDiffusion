@@ -115,4 +115,40 @@ final class CreditDecodingTests: XCTestCase {
         
         print("[CreditDecoding] liveness check: baseline \(base.stepsPerBlock[0]) steps -> credit decoding \(cred.stepsPerBlock[0]) steps")
     }
+
+    /// Verification that Credit Decoding combined with ICE and Temporal Voting operates correctly
+    /// and preserves cached/uncached parity.
+    func testCreditDecodingWithIceAndVoting() throws {
+        var failures: [String] = []
+        for c in traces.cases {
+            var p = c.params.toGenerationParams()
+            p.creditDecodingEnabled = true
+            p.creditAlpha = 0.5
+            p.creditBeta = 0.9
+            p.creditGamma = 0.5
+            p.iceEnabled = true
+            p.iceTau = 0.95
+            p.iceNt = 3
+            p.temporalVotingEnabled = true
+            p.temporalVotingAlpha = 0.0
+            p.temporalVotingCutoff = 0.9
+            
+            // To ensure ICE evaluates on a block boundary, set blockLength = genLength for this check
+            let promptLen = c.prompt.count
+            p.blockLength = promptLen + p.genLength
+            
+            let un = DiffusionEngine(model: model, speculationK: 2)
+                .generate(prompt: c.prompt, params: p)
+            let ca = DiffusionEngine(model: model, speculationK: 2)
+                .generateCached(prompt: c.prompt, params: p)
+                
+            if ca.finalSequence != un.finalSequence {
+                failures.append("\(c.name): cached != uncached when credit + ice + voting enabled")
+            }
+        }
+        XCTAssertTrue(failures.isEmpty,
+            "Joint credit+ice+voting cached/uncached identity failures (\(failures.count)):\n"
+            + failures.joined(separator: "\n"))
+        print("[CreditDecoding] joint credit+ice+voting identity verified on \(traces.cases.count) cases")
+    }
 }
