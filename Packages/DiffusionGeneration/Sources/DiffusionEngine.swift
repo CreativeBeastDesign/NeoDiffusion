@@ -200,6 +200,11 @@ public final class DiffusionEngine {
         public let effectiveIceTau: Float
         public let effectiveIceNt: Int
         public let effectiveIceThinkingLength: Int
+        // MARK: Credit Decoding effective echoes
+        public let effectiveCreditDecodingEnabled: Bool
+        public let effectiveCreditAlpha: Float
+        public let effectiveCreditBeta: Float
+        public let effectiveCreditGamma: Float
     }
 
     /// Mutable stats shared between the cached entry point's closures and `run` (the capture
@@ -498,6 +503,7 @@ public final class DiffusionEngine {
         var jotStableCount: MLXArray   // [1, B] Int32
         var prevPredictions: MLXArray  // [1, B] Int32
         var frozenMask: MLXArray       // [1, B] Bool
+        var credit: MLXArray? = nil    // [1, B, V] Credit Decoding scores
         // ICE phase tracking
         var isAnswerPhase: Bool = false
     }
@@ -710,6 +716,7 @@ public final class DiffusionEngine {
                     jotStableCount: front.jotStableCount[0..., n ..< L],
                     prevPredictions: front.prevPredictions[0..., n ..< L],
                     frozenMask: front.frozenMask[0..., n ..< L])
+                reshaped.credit = front.credit?[0..., n ..< L, 0...]
                 reshaped.stepsTaken = front.stepsTaken
                 reshaped.trajectory = front.trajectory
                 reshaped.trailingStarvedSteps = front.trailingStarvedSteps
@@ -836,7 +843,11 @@ public final class DiffusionEngine {
                 effectiveIceEnabled: params.iceEnabled,
                 effectiveIceTau: params.iceTau,
                 effectiveIceNt: params.iceNt,
-                effectiveIceThinkingLength: params.iceThinkingLength),
+                effectiveIceThinkingLength: params.iceThinkingLength,
+                effectiveCreditDecodingEnabled: params.creditDecodingEnabled,
+                effectiveCreditAlpha: params.creditAlpha,
+                effectiveCreditBeta: params.creditBeta,
+                effectiveCreditGamma: params.creditGamma),
             trajectorySequences: params.temporalVotingEnabled ? trajectorySequences : nil)
     }
 
@@ -927,6 +938,13 @@ public final class DiffusionEngine {
         var frozenMask = S == 1 ? slots[0].frozenMask
             : concatenated(slots.map(\.frozenMask), axis: 1)
 
+        var credit: MLXArray? = nil
+        if params.creditDecodingEnabled {
+            if slots.allSatisfy({ $0.credit != nil }) {
+                credit = S == 1 ? slots[0].credit : concatenated(slots.map { $0.credit! }, axis: 1)
+            }
+        }
+
         while true {
             // Build up to K speculative steps into one graph.
             var specWindow = windowActive
@@ -934,6 +952,7 @@ public final class DiffusionEngine {
             var specJotStableCount = jotStableCount
             var specPrevPredictions = prevPredictions
             var specFrozenMask = frozenMask
+            var specCredit = credit
             var snapshots: [MLXArray] = []     // result window if the break lands here
             var nextWindows: [MLXArray] = []   // window carried to the next step
             var breakFlags: [MLXArray] = []    // [1] Bool per step (front break)
@@ -947,6 +966,7 @@ public final class DiffusionEngine {
             var prevPredictionsPerStep: [MLXArray] = []
             var frozenMasksPerStep: [MLXArray] = []
             var frozenPrefixLensPerStep: [MLXArray] = []   // Option C candidate prefix per step
+            var creditPerStep: [MLXArray?] = []
 
             var avgConfsPerStep: [MLXArray] = []
             let isAnswerPhase = slots[0].isAnswerPhase
@@ -962,7 +982,8 @@ public final class DiffusionEngine {
                     jotStableCount: specJotStableCount,
                     prevPredictions: specPrevPredictions,
                     frozenMask: specFrozenMask,
-                    isAnswerPhase: isAnswerPhase)
+                    isAnswerPhase: isAnswerPhase,
+                    credit: specCredit)
                 snapshots.append(s.resultWindow)
                 avgConfsPerStep.append(s.avgConfAnswer)
                 nextWindows.append(s.nextWindow)
@@ -976,12 +997,14 @@ public final class DiffusionEngine {
                 prevPredictionsPerStep.append(s.nextPrevPredictions)
                 frozenMasksPerStep.append(s.nextFrozenMask)
                 frozenPrefixLensPerStep.append(s.frozenPrefixLen)
+                creditPerStep.append(s.nextCredit)
 
                 specWindow = s.nextWindow
                 specPosts = s.nextPosts
                 specJotStableCount = s.nextJotStableCount
                 specPrevPredictions = s.nextPrevPredictions
                 specFrozenMask = s.nextFrozenMask
+                specCredit = s.nextCredit
             }
 
             // Single blocking readback of the 2K stacked event flags + ICE confidences.
@@ -991,7 +1014,8 @@ public final class DiffusionEngine {
             eval(confs)
             eval(snapshots + nextWindows + postsPerStep.flatMap { $0 } + statsPerStep
                  + tracesPerStep + jotStableCountsPerStep + prevPredictionsPerStep + frozenMasksPerStep
-                 + (params.subBlockCommit ? frozenPrefixLensPerStep : []))
+                 + (params.subBlockCommit ? frozenPrefixLensPerStep : [])
+                 + creditPerStep.compactMap { $0 })
 
             // Proposal B (WP-1a elastic, nBuf == 1 only): refresh the delayed boundary from
             // the batch's last evaluated drift similarities.
@@ -1050,7 +1074,7 @@ public final class DiffusionEngine {
                     }
                 }
             }
-            func applyWindow(_ window: MLXArray, posts stepPosts: [MLXArray], jotStableCount: MLXArray, prevPredictions: MLXArray, frozenMask: MLXArray) {
+            func applyWindow(_ window: MLXArray, posts stepPosts: [MLXArray], jotStableCount: MLXArray, prevPredictions: MLXArray, frozenMask: MLXArray, credit: MLXArray?) {
                 for s in slots.indices {
                     slots[s].active = S == 1
                         ? window : window[0..., (s * B) ..< ((s + 1) * B)]
@@ -1061,6 +1085,10 @@ public final class DiffusionEngine {
                         ? prevPredictions : prevPredictions[0..., (s * B) ..< ((s + 1) * B)]
                     slots[s].frozenMask = S == 1
                         ? frozenMask : frozenMask[0..., (s * B) ..< ((s + 1) * B)]
+                    if let credit {
+                        slots[s].credit = S == 1
+                            ? credit : credit[0..., (s * B) ..< ((s + 1) * B), 0...]
+                    }
                 }
             }
             func addSteps(_ n: Int) {
@@ -1072,7 +1100,7 @@ public final class DiffusionEngine {
             // Early exit transition
             if let j = firstEarlyExit, j <= (firstBreak ?? Int.max) && j <= (firstActivation ?? Int.max) {
                 applyStats(j + 1)
-                applyWindow(nextWindows[j], posts: postsPerStep[j], jotStableCount: jotStableCountsPerStep[j], prevPredictions: prevPredictionsPerStep[j], frozenMask: frozenMasksPerStep[j])
+                applyWindow(nextWindows[j], posts: postsPerStep[j], jotStableCount: jotStableCountsPerStep[j], prevPredictions: prevPredictionsPerStep[j], frozenMask: frozenMasksPerStep[j], credit: creditPerStep[j])
                 addSteps(j + 1)
                 slots[0].isAnswerPhase = true
                 return PhaseResult(
@@ -1084,12 +1112,14 @@ public final class DiffusionEngine {
             // Break wins a same-step tie: the commit re-derives activation from fresh state.
             if let j = firstBreak, j <= (firstActivation ?? Int.max) {
                 applyStats(j + 1)
+                let frontPost = Int(postsPerStep[j][0].item(Int32.self))  // memcpy, evaluated above
+                let isBudget = frontPost > params.maxPostSteps
+                let finalCredit = isBudget ? (j > 0 ? creditPerStep[j - 1] : credit) : creditPerStep[j]
                 // On a budget break the whole window's step-j write is discarded (simplest
                 // K-invariant rule; the trailing slot's step-j write goes with it — recorded
                 // deviation, WP-1b logbook). On a settle break `resultWindow == nextWindow`.
-                applyWindow(snapshots[j], posts: postsPerStep[j], jotStableCount: jotStableCountsPerStep[j], prevPredictions: prevPredictionsPerStep[j], frozenMask: frozenMasksPerStep[j])
+                applyWindow(snapshots[j], posts: postsPerStep[j], jotStableCount: jotStableCountsPerStep[j], prevPredictions: prevPredictionsPerStep[j], frozenMask: frozenMasksPerStep[j], credit: finalCredit)
                 addSteps(j + 1)
-                let frontPost = Int(postsPerStep[j][0].item(Int32.self))  // memcpy, evaluated above
                 return PhaseResult(
                     event: .frontBreak, syncPoints: syncPoints,
                     forwards: forwardsEvaluated, tokensProcessed: tokensProcessed,
@@ -1097,7 +1127,7 @@ public final class DiffusionEngine {
             }
             if let j = firstActivation {
                 applyStats(j + 1)
-                applyWindow(nextWindows[j], posts: postsPerStep[j], jotStableCount: jotStableCountsPerStep[j], prevPredictions: prevPredictionsPerStep[j], frozenMask: frozenMasksPerStep[j])
+                applyWindow(nextWindows[j], posts: postsPerStep[j], jotStableCount: jotStableCountsPerStep[j], prevPredictions: prevPredictionsPerStep[j], frozenMask: frozenMasksPerStep[j], credit: creditPerStep[j])
                 addSteps(j + 1)
                 return PhaseResult(
                     event: .activation, syncPoints: syncPoints,
@@ -1115,7 +1145,7 @@ public final class DiffusionEngine {
                     let n = Int(frozenPrefixLensPerStep[j].item(Int32.self))
                     if n >= params.subBlockMinPrefix && n < frontLen {
                         applyStats(j + 1)
-                        applyWindow(nextWindows[j], posts: postsPerStep[j], jotStableCount: jotStableCountsPerStep[j], prevPredictions: prevPredictionsPerStep[j], frozenMask: frozenMasksPerStep[j])
+                        applyWindow(nextWindows[j], posts: postsPerStep[j], jotStableCount: jotStableCountsPerStep[j], prevPredictions: prevPredictionsPerStep[j], frozenMask: frozenMasksPerStep[j], credit: creditPerStep[j])
                         addSteps(j + 1)
                         return PhaseResult(
                             event: .prefixCommit, syncPoints: syncPoints,
@@ -1127,13 +1157,14 @@ public final class DiffusionEngine {
 
             // No event within this batch — advance by K steps and continue.
             applyStats(K)
-            applyWindow(specWindow, posts: specPosts, jotStableCount: specJotStableCount, prevPredictions: specPrevPredictions, frozenMask: specFrozenMask)
+            applyWindow(specWindow, posts: specPosts, jotStableCount: specJotStableCount, prevPredictions: specPrevPredictions, frozenMask: specFrozenMask, credit: specCredit)
             addSteps(K)
             windowActive = specWindow
             posts = specPosts
             jotStableCount = specJotStableCount
             prevPredictions = specPrevPredictions
             frozenMask = specFrozenMask
+            credit = specCredit
 
             // Min-span routing update from the batch's last evaluated step (memcpy, no sync):
             // masks remaining in the front block is the span-length proxy.
@@ -1166,6 +1197,7 @@ public final class DiffusionEngine {
         /// WP-3a §11) as a `[1]` Int32 — the candidate sub-block-commit prefix. `0` when JOT is off.
         let frozenPrefixLen: MLXArray
         let avgConfAnswer: MLXArray  // [1] Float — ICE answer confidence
+        let nextCredit: MLXArray?    // [1, A, V] Credit Decoding scores carried forward
     }
 
     /// One denoising step over the concatenated active window, fully in-graph. Generalizes the
@@ -1181,7 +1213,8 @@ public final class DiffusionEngine {
         jotStableCount: MLXArray,
         prevPredictions: MLXArray,
         frozenMask: MLXArray,
-        isAnswerPhase: Bool
+        isAnswerPhase: Bool,
+        credit: MLXArray? = nil
     ) -> WindowStepResult {
         let B = params.blockLength
         let S = posts.count
@@ -1220,9 +1253,41 @@ public final class DiffusionEngine {
         // One forward over the full window, logits for the active columns only.
         let window = prefixLen > 0 ? concatenated([prefix, windowActive], axis: 1) : windowActive
         let logits = forward(window, A, params.jotEnabled ? frozenMask : nil)                     // [1, A, V] FP32
-        let probs = softmax(logits, axis: -1)
-        let x0 = argMax(logits, axis: -1).asType(.int32)    // [1, A]
-        let x0p = probs.max(axis: -1)                       // [1, A]
+
+        let probs: MLXArray
+        let x0: MLXArray
+        let x0p: MLXArray
+        let nextCredit: MLXArray?
+
+        if params.creditDecodingEnabled {
+            let currentCredit = credit ?? MLXArray.zeros([1, A, model.config.vocabSize], dtype: .float32)
+            
+            // Raw predictions for updating the credit
+            let rawProbs = softmax(logits, axis: -1)
+            let rawX0 = argMax(logits, axis: -1).asType(.int32)
+            let rawX0p = rawProbs.max(axis: -1)
+            
+            // Update credit matrix
+            let decayed = currentCredit * params.creditBeta
+            let boost = pow(rawX0p, params.creditGamma)
+            let vocabIndices = arange(model.config.vocabSize, dtype: .int32).reshaped([1, 1, model.config.vocabSize])
+            let mask = (rawX0.expandedDimensions(axis: -1) .== vocabIndices).asType(.float32)
+            let updatedCredit = decayed + mask * boost.expandedDimensions(axis: -1)
+            nextCredit = updatedCredit
+            
+            // Logits enhancement: f_tilde = f + alpha * log1p(C)
+            let enhancedLogits = logits + params.creditAlpha * updatedCredit.log1p()
+            
+            // Probs, x0, x0p from enhanced logits
+            probs = softmax(enhancedLogits, axis: -1)
+            x0 = argMax(enhancedLogits, axis: -1).asType(.int32)
+            x0p = probs.max(axis: -1)
+        } else {
+            nextCredit = nil
+            probs = softmax(logits, axis: -1)
+            x0 = argMax(logits, axis: -1).asType(.int32)
+            x0p = probs.max(axis: -1)
+        }
 
         let avgConfAnswer: MLXArray
         if params.iceEnabled {
@@ -1478,6 +1543,7 @@ public final class DiffusionEngine {
             nextPrevPredictions: nextPrevPredictions,
             nextFrozenMask: nextFrozenMaskFinal,
             frozenPrefixLen: frozenPrefixLen,
-            avgConfAnswer: avgConfAnswer)
+            avgConfAnswer: avgConfAnswer,
+            nextCredit: nextCredit)
     }
 }

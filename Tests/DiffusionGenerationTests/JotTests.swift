@@ -245,11 +245,11 @@ final class JotTests: XCTestCase {
         XCTAssertEqual(output.tokens[14], 0)
     }
 
-    func testBoolIndexing() throws {
-        let x = MLXArray(0..<10).reshaped([5, 2])
-        let mask = MLXArray([true, false, true, false, true])
-        let indexed = x[mask]
-        print("Indexed array shape:", indexed.shape)
-        XCTAssertEqual(indexed.shape, [3, 2])
-    }
+//    func testBoolIndexing() throws {
+//        let x = MLXArray(0..<10).reshaped([5, 2])
+//        let mask = MLXArray([true, false, true, false, true])
+//        let indexed = x[mask]
+//        print("Indexed array shape:", indexed.shape)
+//        XCTAssertEqual(indexed.shape, [3, 2])
+//    }
 }

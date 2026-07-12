@@ -140,6 +140,15 @@ public struct GenerationParams: Sendable, Equatable {
     /// Length of the thinking section in ICE.
     public var iceThinkingLength: Int
 
+    /// Whether Credit Decoding is enabled.
+    public var creditDecodingEnabled: Bool
+    /// Boost scale α for Credit Decoding.
+    public var creditAlpha: Float
+    /// Decay discount factor β for Credit Decoding.
+    public var creditBeta: Float
+    /// Exponent γ for concave transform in Credit Decoding.
+    public var creditGamma: Float
+
     public init(
         threshold: Float,
         editingThreshold: Float,
@@ -175,7 +184,11 @@ public struct GenerationParams: Sendable, Equatable {
         iceEnabled: Bool = false,
         iceTau: Float = 0.9,
         iceNt: Int = 3,
-        iceThinkingLength: Int = 96
+        iceThinkingLength: Int = 96,
+        creditDecodingEnabled: Bool = false,
+        creditAlpha: Float = 0.5,
+        creditBeta: Float = 0.9,
+        creditGamma: Float = 0.5
     ) {
         self.threshold = threshold
         self.editingThreshold = editingThreshold
@@ -212,6 +225,10 @@ public struct GenerationParams: Sendable, Equatable {
         self.iceTau = iceTau
         self.iceNt = iceNt
         self.iceThinkingLength = iceThinkingLength
+        self.creditDecodingEnabled = creditDecodingEnabled
+        self.creditAlpha = creditAlpha
+        self.creditBeta = creditBeta
+        self.creditGamma = creditGamma
     }
 
     /// The two served modes from the LLaDA2.1-mini model card (phase-2 §1, gotcha 10).
@@ -265,7 +282,11 @@ public struct GenerationParams: Sendable, Equatable {
         iceEnabled: Bool = false,
         iceTau: Float = 0.9,
         iceNt: Int = 3,
-        iceThinkingLength: Int = 96
+        iceThinkingLength: Int = 96,
+        creditDecodingEnabled: Bool = false,
+        creditAlpha: Float = 0.5,
+        creditBeta: Float = 0.9,
+        creditGamma: Float = 0.5
     ) -> GenerationParams {
         let (mask, edit) = mode.thresholds
         return GenerationParams(
@@ -303,7 +324,11 @@ public struct GenerationParams: Sendable, Equatable {
             iceEnabled: iceEnabled,
             iceTau: iceTau,
             iceNt: iceNt,
-            iceThinkingLength: iceThinkingLength)
+            iceThinkingLength: iceThinkingLength,
+            creditDecodingEnabled: creditDecodingEnabled,
+            creditAlpha: creditAlpha,
+            creditBeta: creditBeta,
+            creditGamma: creditGamma)
     }
 }
 

@@ -220,6 +220,11 @@ struct LLaDARunResult: Codable {
     let iceTau: Float
     let iceNt: Int
     let iceThinkingLength: Int
+    // Credit Decoding fields
+    let creditDecodingEnabled: Bool
+    let creditAlpha: Float
+    let creditBeta: Float
+    let creditGamma: Float
     // Warmup / process / environment classification (m6-logbook Findings 1/2/7):
     // the process's first generation carries ~19 s one-off cost; cross-process
     // comparisons carry thermal drift; env fields + validity label per the frozen rule.
@@ -284,6 +289,12 @@ func runLLaDABench() async throws {
     // WP-2b: dynamic τ (2b-2) + EOS early exit (2b-3). Rows record engine echoes (rule F7).
     let dynTauAlpha = Float(argValue("--dyn-tau-alpha") ?? "0.0") ?? 0.0
     let eosEarlyExit = hasFlag("--eos-early-exit")
+
+    // Credit Decoding parsing
+    let creditDecodingEnabled = hasFlag("--credit")
+    let creditAlpha = Float(argValue("--credit-alpha") ?? "0.5") ?? 0.5
+    let creditBeta = Float(argValue("--credit-beta") ?? "0.9") ?? 0.9
+    let creditGamma = Float(argValue("--credit-gamma") ?? "0.5") ?? 0.5
     // Optional Γ/Δ threshold overrides (WP-2a conservative-baseline probe: the S2D2 papers
     // benchmark against τ_M2T=0.95-style decoding; the Q-mode default is 0.7).
     let thresholdMaskOverride = argValue("--threshold-mask").flatMap(Float.init)
@@ -437,7 +448,11 @@ func runLLaDABench() async throws {
             iceEnabled: effIceEnabled,
             iceTau: iceTauOverride ?? iceTau,
             iceNt: effIceNt,
-            iceThinkingLength: pLen + effIceNt * 32)
+            iceThinkingLength: pLen + effIceNt * 32,
+            creditDecodingEnabled: creditDecodingEnabled,
+            creditAlpha: creditAlpha,
+            creditBeta: creditBeta,
+            creditGamma: creditGamma)
         if let t = thresholdMaskOverride { p.threshold = t }
         if let t = thresholdEditOverride { p.editingThreshold = t }
         return p
@@ -677,6 +692,10 @@ func runLLaDABench() async throws {
             iceTau: output.metrics.effectiveIceTau,
             iceNt: output.metrics.effectiveIceNt,
             iceThinkingLength: output.metrics.effectiveIceThinkingLength,
+            creditDecodingEnabled: output.metrics.effectiveCreditDecodingEnabled,
+            creditAlpha: output.metrics.effectiveCreditAlpha,
+            creditBeta: output.metrics.effectiveCreditBeta,
+            creditGamma: output.metrics.effectiveCreditGamma,
             warmupIncluded: warmup,
             processId: Int(ProcessInfo.processInfo.processIdentifier),
             host: sysctlString("hw.model"),
