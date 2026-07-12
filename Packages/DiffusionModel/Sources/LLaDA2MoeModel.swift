@@ -57,11 +57,11 @@ public class LLaDA2MoeModel: Module {
     /// stack with per-layer frozen-K/V holds, then the FP32 output head. Returns `[1, A, vocab]`.
     public func callAsFunction(
         _ activeIds: MLXArray, positionIds: MLXArray, caches: [LayerKVCache],
-        jotCaches: [LayerJotCache], frozen: MLXArray, mask: MLXArray? = nil
+        jotCaches: [LayerJotCache], frozen: MLXArray, mask: MLXArray? = nil, capacity: Int? = nil
     ) -> MLXArray {
         let hidden = model(
             activeIds, positionIds: positionIds, caches: caches,
-            jotCaches: jotCaches, frozen: frozen, mask: mask)
+            jotCaches: jotCaches, frozen: frozen, mask: mask, capacity: capacity)
         return lmHead(hidden).asType(.float32)
     }
 
@@ -176,7 +176,7 @@ public class LLaDA2MoeInnerModel: Module {
     /// representation. `jotCaches` and `caches` are both aligned with `layers` and updated in place.
     public func callAsFunction(
         _ activeIds: MLXArray, positionIds: MLXArray, caches: [LayerKVCache],
-        jotCaches: [LayerJotCache], frozen: MLXArray, mask: MLXArray? = nil
+        jotCaches: [LayerJotCache], frozen: MLXArray, mask: MLXArray? = nil, capacity: Int? = nil
     ) -> MLXArray {
         precondition(caches.count == layers.count, "one cache per layer required")
         precondition(jotCaches.count == layers.count, "one jot cache per layer required")
@@ -185,7 +185,7 @@ public class LLaDA2MoeInnerModel: Module {
         for i in 0 ..< layers.count {
             hidden = layers[i](
                 hidden, cos: cos, sin: sin, cache: caches[i],
-                jot: jotCaches[i], frozen: frozen, mask: mask)
+                jot: jotCaches[i], frozen: frozen, mask: mask, capacity: capacity)
         }
         return norm(hidden)
     }

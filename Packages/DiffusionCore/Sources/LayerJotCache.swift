@@ -32,6 +32,16 @@ public final class LayerJotCache {
         keys = nil
         values = nil
     }
+
+    /// Drop the first `n` active-window columns (Option C sub-block prefix commit, WP-3a §11):
+    /// those tokens have left the active window into the ExactPrefixCache, so their held K/V are
+    /// removed and the remaining suffix columns keep theirs (absolute positions are unchanged, so
+    /// the RoPE'd K/V stay valid). No-op if the store is empty (first step captures fresh anyway).
+    public func dropPrefix(_ n: Int) {
+        if n <= 0 { return }
+        keys = keys.map { $0[0..., 0..., n..., 0...] }
+        values = values.map { $0[0..., 0..., n..., 0...] }
+    }
 }
 
 /// Model-level wrapper holding one ``LayerJotCache`` per decoder layer (faithful JOT, WP-3a v2).
@@ -45,5 +55,10 @@ public final class JotFreezeCache {
 
     public func clear() {
         for layer in layers { layer.clear() }
+    }
+
+    /// Drop the first `n` active-window columns on every layer (Option C sub-block commit).
+    public func dropPrefix(_ n: Int) {
+        for layer in layers { layer.dropPrefix(n) }
     }
 }

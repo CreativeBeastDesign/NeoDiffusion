@@ -70,6 +70,64 @@ final class JotTests: XCTestCase {
         }
     }
 
+    /// Option C (WP-3a §11) inert-parity: with an unreachable freeze threshold nothing freezes, so
+    /// no frozen prefix ever forms and `subBlockCommit` never fires — the run must be byte-identical
+    /// to the cached baseline. Proves the sub-block-commit plumbing is inert when it has no prefix.
+    func testSubBlockCommitInertWhenNothingFreezes() throws {
+        for c in traces.cases {
+            var p = c.params.toGenerationParams()
+            p.jotEnabled = true
+            p.jotFaithful = true
+            p.subBlockCommit = true
+            p.subBlockMinPrefix = 2
+            p.jotThreshold = 2.0   // unreachable → nothing freezes → no prefix commit
+
+            let pBase = c.params.toGenerationParams()
+
+            let out = DiffusionEngine(model: model, speculationK: 1)
+                .generateCached(prompt: c.prompt, params: p)
+            let base = DiffusionEngine(model: model, speculationK: 1)
+                .generateCached(prompt: c.prompt, params: pBase)
+
+            XCTAssertEqual(out.finalSequence, base.finalSequence,
+                "\(c.name): Option C must be inert when nothing freezes")
+        }
+    }
+
+    /// Option C end-to-end under freezing: with `jotK=1` + a low threshold, contiguous frozen
+    /// prefixes form and `subBlockCommit` fires mid-block. The run must still complete and commit
+    /// the full sequence, block-aligned and the same total length as the baseline (both fill every
+    /// block with `eosEarlyStop` off). Exercises the prefix capture + window-shrink + slot-reshape
+    /// path; a position/shape bug there would crash, hang, or change the length. Single case with a
+    /// short gen length — the point is machinery correctness, not a sweep (that's the bench's job).
+    func testSubBlockCommitCompletesUnderFreezing() throws {
+        let c = try XCTUnwrap(traces.cases.first)
+        var p = c.params.toGenerationParams()
+        p.jotEnabled = true
+        p.jotFaithful = true
+        p.subBlockCommit = true
+        p.subBlockMinPrefix = 4
+        p.jotK = 1
+        p.jotThreshold = 0.5
+        p.eosEarlyStop = false
+        p.genLength = 3 * p.blockLength   // a few blocks is enough to trigger + reassemble
+
+        var base = c.params.toGenerationParams()
+        base.eosEarlyStop = false
+        base.genLength = 3 * p.blockLength
+
+        let out = DiffusionEngine(model: model, speculationK: 1)
+            .generateCached(prompt: c.prompt, params: p)
+        let baseOut = DiffusionEngine(model: model, speculationK: 1)
+            .generateCached(prompt: c.prompt, params: base)
+
+        XCTAssertEqual(out.finalSequence.count, baseOut.finalSequence.count,
+            "\(c.name): Option C must still commit every block (same total length)")
+        // Sub-commits must reassemble into whole blocks, not ragged offsets.
+        XCTAssertEqual(out.finalSequence.count % p.blockLength, 0,
+            "\(c.name): committed length must stay block-aligned after sub-block commits")
+    }
+
     /// Liveness test: synthetic forward pass where positions predict stably.
     /// Verify that stable positions are frozen (added to frozen mask) and their predictions written.
     func testJotLivenessSynthetic() throws {
@@ -185,5 +243,13 @@ final class JotTests: XCTestCase {
         XCTAssertEqual(Array(output.tokens[5..<13]), Array(repeating: 7, count: 8))
         XCTAssertEqual(output.tokens[13], 0)
         XCTAssertEqual(output.tokens[14], 0)
+    }
+
+    func testBoolIndexing() throws {
+        let x = MLXArray(0..<10).reshaped([5, 2])
+        let mask = MLXArray([true, false, true, false, true])
+        let indexed = x[mask]
+        print("Indexed array shape:", indexed.shape)
+        XCTAssertEqual(indexed.shape, [3, 2])
     }
 }

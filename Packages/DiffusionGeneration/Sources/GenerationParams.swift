@@ -100,6 +100,29 @@ public struct GenerationParams: Sendable, Equatable {
     /// active block, Elastic-Cache off; requires `speculationK == 1` (the K/V hold is not
     /// snapshot/rolled-back across a K>1 batch). No effect unless `jotEnabled`.
     public var jotFaithful: Bool
+    /// WP-3a §11 "Option C": sub-block prefix commit. When a contiguous **frozen prefix** of the
+    /// front active block reaches `subBlockMinPrefix` tokens, commit it early into the
+    /// ExactPrefixCache and shrink the active window to the suffix — cutting attention-query *and*
+    /// MoE work for the block's remaining steps, with no new sync point (commit boundaries are
+    /// already the coarse readback). It is adaptive block sizing gated by the JOT convergence
+    /// signal; the within-block-bidirectional staleness gamble (a prefix committed before the
+    /// suffix settles) is the quality question. Requires `jotEnabled`; cached, nBuf=1,
+    /// `speculationK==1`, Elastic/speculation off. `false` = disabled.
+    public var subBlockCommit: Bool
+    /// Minimum contiguous frozen-prefix length that triggers a sub-block commit (Option C). Small
+    /// values commit aggressively (more, smaller segments); larger values only slide when a big
+    /// prefix has settled. Ignored unless `subBlockCommit`.
+    public var subBlockMinPrefix: Int
+    /// WP-3a §10: static fixed-capacity MoE gather (the sync-free FLOP-skip, "Option-B enabler").
+    /// When `> 0` **and** faithful JOT is on, each MoE layer gathers the `⌈ratio·T⌉` most-active
+    /// (non-frozen) tokens into a compile-time-sized buffer, runs the experts over just those, and
+    /// scatters back — actually skipping expert GEMMs for frozen tokens with **no GPU→CPU sync**
+    /// (the capacity is a Swift Int, not a device scalar). `0` disables (falls back to the Option-A
+    /// full-compute-then-mask path). Overflow semantics: if the active count exceeds the capacity,
+    /// surplus active tokens are dropped (FFN=0) — size the ratio ≥ the expected active fraction
+    /// (~0.56 at the measured 44% freeze rate). Marginal at `T=blockLength=32` (launch-bound);
+    /// meant to be swept at larger `blockLength` where expert arithmetic dominates.
+    public var moeCapacityRatio: Float
 
     public init(
         threshold: Float,
@@ -126,7 +149,10 @@ public struct GenerationParams: Sendable, Equatable {
         jotEnabled: Bool = false,
         jotK: Int = 2,
         jotThreshold: Float = 0.9,
-        jotFaithful: Bool = false
+        jotFaithful: Bool = false,
+        moeCapacityRatio: Float = 0,
+        subBlockCommit: Bool = false,
+        subBlockMinPrefix: Int = 8
     ) {
         self.threshold = threshold
         self.editingThreshold = editingThreshold
@@ -153,6 +179,9 @@ public struct GenerationParams: Sendable, Equatable {
         self.jotK = jotK
         self.jotThreshold = jotThreshold
         self.jotFaithful = jotFaithful
+        self.moeCapacityRatio = moeCapacityRatio
+        self.subBlockCommit = subBlockCommit
+        self.subBlockMinPrefix = subBlockMinPrefix
     }
 
     /// The two served modes from the LLaDA2.1-mini model card (phase-2 §1, gotcha 10).
@@ -196,7 +225,10 @@ public struct GenerationParams: Sendable, Equatable {
         jotEnabled: Bool = false,
         jotK: Int = 2,
         jotThreshold: Float = 0.9,
-        jotFaithful: Bool = false
+        jotFaithful: Bool = false,
+        moeCapacityRatio: Float = 0,
+        subBlockCommit: Bool = false,
+        subBlockMinPrefix: Int = 8
     ) -> GenerationParams {
         let (mask, edit) = mode.thresholds
         return GenerationParams(
@@ -224,6 +256,9 @@ public struct GenerationParams: Sendable, Equatable {
             jotEnabled: jotEnabled,
             jotK: jotK,
             jotThreshold: jotThreshold,
-            jotFaithful: jotFaithful)
+            jotFaithful: jotFaithful,
+            moeCapacityRatio: moeCapacityRatio,
+            subBlockCommit: subBlockCommit,
+            subBlockMinPrefix: subBlockMinPrefix)
     }
 }

@@ -173,6 +173,8 @@ public final class DiffusionEngine {
         /// WP-3a v2: whether the faithful (per-layer frozen-K/V hold) mechanism ran, vs the v1
         /// MoE-zeroing behaviour. Only meaningful when `effectiveJotEnabled`.
         public let effectiveJotFaithful: Bool
+        /// WP-3a §10: the static MoE capacity ratio actually applied (0 = Option-A mask path).
+        public let effectiveMoeCapacityRatio: Float
     }
 
     /// Mutable stats shared between the cached entry point's closures and `run` (the capture
@@ -260,6 +262,9 @@ public final class DiffusionEngine {
             precondition(params.speculation == .none,
                 "faithful JOT is not composed with S2D2 speculation (WP-3a v1 scope).")
         }
+        precondition(!params.subBlockCommit || (params.jotEnabled && params.jotFaithful),
+            "sub-block prefix commit (Option C) requires faithful JOT (it keys off the frozen "
+            + "mask and commits into the ExactPrefixCache); enable jotEnabled + jotFaithful.")
 
         // Capture forward over a full block of `ids` at absolute `startPos`, then commit its K/V.
         func captureAndCommit(_ ids: MLXArray, startPos: Int) {
@@ -307,8 +312,13 @@ public final class DiffusionEngine {
             // Faithful JOT (WP-3a v2): hold frozen columns' per-layer K/V so finalized tokens
             // contribute a constant representation. Single active block only (guarded above).
             if params.jotEnabled && params.jotFaithful, let frozen {
+                // Capacity-gather (WP-3a §10): ⌈ratio·activeLen⌉ static buffer for the MoE FLOP
+                // skip (nil ⇒ Option-A full-compute-then-mask). activeLen is a Swift Int here.
+                let capacity: Int? = params.moeCapacityRatio > 0
+                    ? Int((params.moeCapacityRatio * Float(activeLen)).rounded(.up))
+                    : nil
                 return model(activeIds, positionIds: positionIds, caches: cache.layers,
-                             jotCaches: jotCache.layers, frozen: frozen, mask: nil)
+                             jotCaches: jotCache.layers, frozen: frozen, mask: nil, capacity: capacity)
             }
 
             // Elastic off (the served default): plain cached forward. The elastic overload
@@ -395,8 +405,10 @@ public final class DiffusionEngine {
             : nil
 
         // On settle, run the capture forward over the committed tokens and commit clean K/V.
-        let onSettled: (Int, MLXArray) -> Void = { blockIndex, committedActive in
-            captureAndCommit(committedActive, startPos: blockIndex * B)
+        let onSettled: (Int, MLXArray) -> Void = { _, committedActive in
+            // Commit at the current committed length, not blockIndex*B — a block that already
+            // sub-committed a prefix (Option C) starts its suffix past the block-aligned offset.
+            captureAndCommit(committedActive, startPos: cache.committedLength)
             activeCache.clear()
             // Faithful JOT: the held K/V belong to the settled block's active window; the next
             // block starts with no frozen columns, so drop them (also avoids carrying a stale
@@ -406,9 +418,17 @@ public final class DiffusionEngine {
             boundaryHolder.value = 0
         }
 
+        // Option C (WP-3a §11): commit a settled frozen prefix mid-block. Captures the prefix's KV
+        // into the ExactPrefixCache at its absolute start and drops the held JOT columns for it.
+        let onPrefixSettled: (Int, MLXArray) -> Void = { startPos, prefixIds in
+            captureAndCommit(prefixIds, startPos: startPos)
+            jotCache.dropPrefix(prefixIds.dim(1))
+        }
+
         return run(prompt: prompt, params: params, activeCache: activeCache, boundaryHolder: boundaryHolder,
                    forward: forward, verifierForward: verifierForward,
-                   streamBlock: streamBlock, onBlockSettled: onSettled, stats: stats)
+                   streamBlock: streamBlock, onBlockSettled: onSettled,
+                   onPrefixSettled: onPrefixSettled, stats: stats)
     }
 
     private func readBoundary(activeCache: ActiveBlockCache, layerCount: Int, gamma: Float) -> Int {
@@ -477,9 +497,12 @@ public final class DiffusionEngine {
         verifierForward: VerifierForward? = nil,
         streamBlock: (([Int]) -> Void)?,
         onBlockSettled: ((_ blockIndex: Int, _ committedActive: MLXArray) -> Void)? = nil,
+        onPrefixSettled: ((_ startPos: Int, _ prefixIds: MLXArray) -> Void)? = nil,
         stats: RunStats? = nil
     ) -> Output {
         let B = params.blockLength
+        precondition(!params.subBlockCommit || onPrefixSettled != nil,
+            "subBlockCommit (Option C) requires the cached path's onPrefixSettled hook")
         precondition(params.nBuf >= 1 && params.nBuf <= 2, "WP-1b implements nBuf in 1...2")
         precondition(!(params.elasticCacheEnabled && params.nBuf > 1),
             "Elastic-Cache x MultiBD composability is untested (roadmap §5 cell open); "
@@ -587,6 +610,61 @@ public final class DiffusionEngine {
                 activationSteps.append(logicalStepsTotal - 1)
                 activateSlot()
 
+            case .prefixCommit:
+                // Option C (WP-3a §11): commit the settled frozen prefix [0, n) of the front block
+                // early and shrink the active window to the suffix [n, L). The block STAYS the
+                // front slot (same blockIndex, accumulating stepsTaken) — its per-block metrics
+                // emit only when it fully settles (`.frontBreak`), so a sub-committed block still
+                // counts as one block. Streaming emits the prefix now (in-order), the suffix later.
+                let n = phase.prefixCommitN
+                let front = slots[0]
+                let full = front.active                          // [1, L]
+                let L = full.dim(1)
+                let prefixIds = full[0..., 0 ..< n]              // [1, n]
+                let suffixIds = full[0..., n ..< L]              // [1, L-n]
+                let commitStart = Date()
+
+                // Commit the prefix KV into the ExactPrefixCache at its absolute start (== the
+                // current committed length) and drop the held JOT columns for those positions.
+                onPrefixSettled?(committedIds.count, prefixIds)
+
+                let prefixIdInts = prefixIds.asArray(Int32.self).map { Int($0) }  // memcpy (batch synced)
+                syncPoints += 1
+                committedIds.append(contentsOf: prefixIdInts)
+                prefixArray = concatenated([prefixArray, prefixIds], axis: 1)
+                streamBlock?(prefixIdInts)
+                commitSeconds += Date().timeIntervalSince(commitStart)
+
+                // Reshape the front slot to the suffix, preserving block identity and progress.
+                // A committed frozen prefix is never a prompt position (prompt tokens are never
+                // frozen), so the block carries no leading prompt once n > 0 — the suffix prompt
+                // count is whatever prompt remains after n (0 in every case a commit can fire).
+                var reshaped = SlotRun(
+                    blockIndex: front.blockIndex,
+                    bufferSlot: front.bufferSlot,
+                    active: suffixIds,
+                    promptMask: front.promptMask[0..., n ..< L],
+                    promptCount: max(0, front.promptCount - n),
+                    postSteps: front.postSteps,
+                    jotStableCount: front.jotStableCount[0..., n ..< L],
+                    prevPredictions: front.prevPredictions[0..., n ..< L],
+                    frozenMask: front.frozenMask[0..., n ..< L])
+                reshaped.stepsTaken = front.stepsTaken
+                reshaped.trajectory = front.trajectory
+                reshaped.trailingStarvedSteps = front.trailingStarvedSteps
+                slots[0] = reshaped
+
+                // eos_early_stop may fire off a prefix that already contains eos (the committed
+                // generated region now includes it). Mirror the frontBreak check.
+                if params.eosEarlyStop {
+                    let generated = committedIds[promptLength...]
+                    if generated.contains(params.eosId) {
+                        for slot in slots { buffer.cancel(slotIndex: slot.bufferSlot) }
+                        slots.removeAll()
+                        stopped = true
+                    }
+                }
+
             case .frontBreak:
                 // Commit the front block in order (streaming contract). The trailing slot,
                 // if any, is promoted and keeps its in-flight tokens and post-steps counter.
@@ -613,8 +691,10 @@ public final class DiffusionEngine {
                 trailingStarvedPerBlock.append(front.trailingStarvedSteps)
                 acceptedPerStep.append(front.trajectory.accepted)
 
-                // First generated block whose generated-region positions contain eos (E1).
-                let blockStart = front.blockIndex * B
+                // First generated block whose generated-region positions contain eos (E1). Use the
+                // committed-sequence offset of these ids (== blockIndex*B for a full block, but
+                // blockIndex*B + prefix for a block that already sub-committed a prefix — Option C).
+                let blockStart = committedIds.count - blockIds.count
                 if eosBlockIndex == nil {
                     let generatedInBlock = blockIds.enumerated().filter {
                         blockStart + $0.offset >= promptLength
@@ -685,7 +765,9 @@ public final class DiffusionEngine {
                 effectiveJotEnabled: params.jotEnabled,
                 effectiveJotK: params.jotK,
                 effectiveJotThreshold: params.jotThreshold,
-                effectiveJotFaithful: params.jotEnabled && params.jotFaithful))
+                effectiveJotFaithful: params.jotEnabled && params.jotFaithful,
+                effectiveMoeCapacityRatio: (params.jotEnabled && params.jotFaithful)
+                    ? params.moeCapacityRatio : 0))
     }
 
     // MARK: - Per-phase denoising with K-step speculative readback
@@ -707,6 +789,9 @@ public final class DiffusionEngine {
         case frontBreak
         /// τ_add fired — activate the next block.
         case activation
+        /// Option C (WP-3a §11): a contiguous frozen prefix of the front block reached the
+        /// threshold — commit the prefix early and shrink the active window to the suffix.
+        case prefixCommit
     }
 
     struct PhaseResult {
@@ -718,6 +803,8 @@ public final class DiffusionEngine {
         let tokensProcessed: Int
         /// The front slot's post-steps counter at the break step (valid on `.frontBreak`).
         let frontPostAtBreak: Int
+        /// The frozen-prefix length to commit early (valid on `.prefixCommit`; 0 otherwise).
+        var prefixCommitN: Int = 0
     }
 
     /// Run the current slot set until a scheduling event. Builds up to K speculative
@@ -787,6 +874,7 @@ public final class DiffusionEngine {
             var jotStableCountsPerStep: [MLXArray] = []
             var prevPredictionsPerStep: [MLXArray] = []
             var frozenMasksPerStep: [MLXArray] = []
+            var frozenPrefixLensPerStep: [MLXArray] = []   // Option C candidate prefix per step
 
             for _ in 0 ..< K {
                 let s = windowStep(
@@ -810,7 +898,8 @@ public final class DiffusionEngine {
                 jotStableCountsPerStep.append(s.nextJotStableCount)
                 prevPredictionsPerStep.append(s.nextPrevPredictions)
                 frozenMasksPerStep.append(s.nextFrozenMask)
-                
+                frozenPrefixLensPerStep.append(s.frozenPrefixLen)
+
                 specWindow = s.nextWindow
                 specPosts = s.nextPosts
                 specJotStableCount = s.nextJotStableCount
@@ -822,7 +911,8 @@ public final class DiffusionEngine {
             let flags = concatenated(breakFlags + activationFlags, axis: 0)  // [2K] Bool
             eval(flags)
             eval(snapshots + nextWindows + postsPerStep.flatMap { $0 } + statsPerStep
-                 + tracesPerStep + jotStableCountsPerStep + prevPredictionsPerStep + frozenMasksPerStep)
+                 + tracesPerStep + jotStableCountsPerStep + prevPredictionsPerStep + frozenMasksPerStep
+                 + (params.subBlockCommit ? frozenPrefixLensPerStep : []))
 
             // Proposal B (WP-1a elastic, nBuf == 1 only): refresh the delayed boundary from
             // the batch's last evaluated drift similarities.
@@ -910,6 +1000,26 @@ public final class DiffusionEngine {
                     frontPostAtBreak: 0)
             }
 
+            // Option C (WP-3a §11): sub-block prefix commit. Reached only when no break/activation
+            // fired this batch. Commit the first step whose frozen prefix reaches the threshold and
+            // is a *proper* prefix (n < front length; n == full length would have settled above).
+            // The prefix-length reads are memcpies of the already-evaluated batch — no new sync.
+            if params.subBlockCommit {
+                let frontLen = windowActive.dim(1)   // S == 1 under Option C
+                for j in 0 ..< K {
+                    let n = Int(frozenPrefixLensPerStep[j].item(Int32.self))
+                    if n >= params.subBlockMinPrefix && n < frontLen {
+                        applyStats(j + 1)
+                        applyWindow(nextWindows[j], posts: postsPerStep[j], jotStableCount: jotStableCountsPerStep[j], prevPredictions: prevPredictionsPerStep[j], frozenMask: frozenMasksPerStep[j])
+                        addSteps(j + 1)
+                        return PhaseResult(
+                            event: .prefixCommit, syncPoints: syncPoints,
+                            forwards: forwardsEvaluated, tokensProcessed: tokensProcessed,
+                            frontPostAtBreak: 0, prefixCommitN: n)
+                    }
+                }
+            }
+
             // No event within this batch — advance by K steps and continue.
             applyStats(K)
             applyWindow(specWindow, posts: specPosts, jotStableCount: specJotStableCount, prevPredictions: specPrevPredictions, frozenMask: specFrozenMask)
@@ -947,6 +1057,9 @@ public final class DiffusionEngine {
         let nextJotStableCount: MLXArray
         let nextPrevPredictions: MLXArray
         let nextFrozenMask: MLXArray
+        /// Length of the front slot's leading contiguous frozen run after this step (Option C,
+        /// WP-3a §11) as a `[1]` Int32 — the candidate sub-block-commit prefix. `0` when JOT is off.
+        let frozenPrefixLen: MLXArray
     }
 
     /// One denoising step over the concatenated active window, fully in-graph. Generalizes the
@@ -965,7 +1078,13 @@ public final class DiffusionEngine {
     ) -> WindowStepResult {
         let B = params.blockLength
         let S = posts.count
-        let A = S * B
+        // Active window length. Normally S*B, but a single slot may be SHORTER than B after an
+        // Option-C sub-block prefix commit — so read it from the window rather than assume S*B.
+        // `slotLen` is the per-slot length used for all front/slot indexing below: for S==1 it is
+        // the (possibly shrunk) window; for S==2 (MultiBD, never combined with Option C) each slot
+        // is a full block B. When A==B (no sub-block commit) every use is identical to before.
+        let A = windowActive.dim(1)
+        let slotLen = S == 1 ? A : B
         let maskId = Int32(params.maskId)
 
         let activeMask = windowActive .== maskId            // [1, A] Bool
@@ -973,10 +1092,10 @@ public final class DiffusionEngine {
         // (reference semantics per block; the trailing block's budget only bites once promoted).
         var nextPosts: [MLXArray] = []
         for s in 0 ..< S {
-            let slotMaskAny = activeMask[0..., (s * B) ..< ((s + 1) * B)].any()
+            let slotMaskAny = activeMask[0..., (s * slotLen) ..< ((s + 1) * slotLen)].any()
             nextPosts.append(posts[s] + which(slotMaskAny, MLXArray(Int32(0)), MLXArray(Int32(1))))
         }
-        let anyMaskFront = activeMask[0..., 0 ..< B].any()
+        let anyMaskFront = activeMask[0..., 0 ..< slotLen].any()
         let budgetBreak = nextPosts[0] .> MLXArray(Int32(params.maxPostSteps))  // scalar Bool
 
         // One forward over the full window, logits for the active columns only.
@@ -988,7 +1107,7 @@ public final class DiffusionEngine {
 
         let negInf = MLXArray(-Float.infinity)
         let maskConf = which(activeMask, x0p, negInf)       // [1, A]
-        let positionsB = MLXArray(0 ..< Int32(B)).reshaped(1, B)
+        let positionsB = MLXArray(0 ..< Int32(slotLen)).reshaped(1, slotLen)
 
         let gamma: MLXArray            // [1, A] positions written from writeTok this step
         let writeTok: MLXArray         // [1, A] token source (x0, or verifier correction)
@@ -1033,7 +1152,7 @@ public final class DiffusionEngine {
             var slotGammas: [MLXArray] = []
             var precedingSemiComplete = MLXArray(true)
             for s in 0 ..< S {
-                let r = (s * B) ..< ((s + 1) * B)
+                let r = (s * slotLen) ..< ((s + 1) * slotLen)
                 let slotMask = activeMask[0..., r]
                 let slotConf = maskConf[0..., r]
                 // WP-2b-2 dynamic τ (arXiv:2601.17917): τ(t) = τ0·(1 − α(1 − r_mask)), with
@@ -1045,7 +1164,7 @@ public final class DiffusionEngine {
                 // (logbook note, WP-2b).
                 let tauMask: MLXArray
                 if params.dynamicTauAlpha > 0 {
-                    let genCount = Float(B - slotPromptCounts[s])
+                    let genCount = Float(slotLen - slotPromptCounts[s])
                     let rMask = slotMask.asType(.float32).sum() / MLXArray(genCount)
                     tauMask = MLXArray(params.threshold)
                         * (MLXArray(Float(1)) - MLXArray(params.dynamicTauAlpha)
@@ -1062,7 +1181,7 @@ public final class DiffusionEngine {
                 slotGammas.append(slotGamma)
 
                 if s + 1 < S {
-                    let genCount = Float(B - slotPromptCounts[s])
+                    let genCount = Float(slotLen - slotPromptCounts[s])
                     let masksAfter = (slotMask .&& (.!slotGamma)).asType(.float32).sum()
                     let decodedAfter = (MLXArray(genCount) - masksAfter) / MLXArray(genCount)
                     precedingSemiComplete = decodedAfter .> MLXArray(params.tauSemi)
@@ -1080,7 +1199,7 @@ public final class DiffusionEngine {
         let highConfEdit = (editConf .> MLXArray(params.editingThreshold)) .&& editable
         let tokenChanged = x0 .!= windowActive
         let delta = highConfEdit .&& tokenChanged
-        let deltaAnyFront = delta[0..., 0 ..< B].any()
+        let deltaAnyFront = delta[0..., 0 ..< slotLen].any()
 
         // JOT evaluation (before update):
         let nextJotStableCount: MLXArray
@@ -1120,6 +1239,19 @@ public final class DiffusionEngine {
             nextFrozenMaskFinal = nextFrozenMask
         }
 
+        // Option C (WP-3a §11): length of the FRONT slot's leading contiguous frozen run — the
+        // candidate prefix to commit early. A position is in the run iff it and every position
+        // before it (within the front slot) are frozen; equivalently, the cumulative count of
+        // non-frozen positions up to it is still 0. Read back with the batch (no new sync).
+        let frozenPrefixLen: MLXArray
+        if params.jotEnabled {
+            let frontFrozen = nextFrozenMaskFinal[0..., 0 ..< slotLen]
+            let notFrozenCum = cumsum((.!frontFrozen).asType(.int32), axis: -1)
+            frozenPrefixLen = (notFrozenCum .== MLXArray(Int32(0))).asType(.int32).sum().reshaped([1])
+        } else {
+            frozenPrefixLen = MLXArray([Int32(0)])
+        }
+
         // WP-2b-3 EOS early exit (arXiv:2601.17917): once a settled, non-prompt EOS exists in
         // the FRONT block, fill every still-masked window position after the first EOS with
         // EOS in-graph — the block (and any trailing slot) then settles via the normal
@@ -1128,7 +1260,7 @@ public final class DiffusionEngine {
         if params.eosEarlyExit {
             let eosTok = MLXArray(Int32(params.eosId))
             let settledEos = (nextWindow .== eosTok) .&& (.!promptMasks)     // [1, A]
-            let frontHasEos = settledEos[0..., 0 ..< B].any()                // scalar Bool
+            let frontHasEos = settledEos[0..., 0 ..< slotLen].any()                // scalar Bool
             let afterFirstEos = cumsum(settledEos.asType(.int32), axis: -1) .>= MLXArray(Int32(1))
             let filled = which(afterFirstEos .&& (nextWindow .== maskId), eosTok, nextWindow)
             nextWindow = which(frontHasEos, filled, nextWindow)
@@ -1147,7 +1279,7 @@ public final class DiffusionEngine {
         let activationFlag: MLXArray
         if S == 1 && hasNextBlock {
             let nextMaskCount = (nextWindow .== maskId).asType(.float32).sum()
-            let genCount = Float(B - slotPromptCounts[0])
+            let genCount = Float(slotLen - slotPromptCounts[0])
             let decodedFrac = (MLXArray(genCount) - nextMaskCount) / MLXArray(genCount)
             var activation = decodedFrac .> MLXArray(params.tauAdd)
             if params.eosEarlyStop {
@@ -1162,7 +1294,7 @@ public final class DiffusionEngine {
         // Trajectory diagnostics per slot (M8 E1 + τ_semi starvation + WP-2a acceptance).
         var statsParts: [MLXArray] = []
         for s in 0 ..< S {
-            let r = (s * B) ..< ((s + 1) * B)
+            let r = (s * slotLen) ..< ((s + 1) * slotLen)
             let slotDelta = delta[0..., r]
             let slotGamma = gamma[0..., r]
             let written = (slotGamma .|| slotDelta).asType(.float32)
@@ -1181,11 +1313,11 @@ public final class DiffusionEngine {
         // Offline per-position trace (front slot; WP-2a calibration + JOT pre-experiment).
         let trace: MLXArray? = tracing
             ? concatenated([
-                x0p[0..., 0 ..< B].asType(.float32),
-                gamma[0..., 0 ..< B].asType(.float32),
-                delta[0..., 0 ..< B].asType(.float32),
-                x0[0..., 0 ..< B].asType(.float32),
-                activeMask[0..., 0 ..< B].asType(.float32),
+                x0p[0..., 0 ..< slotLen].asType(.float32),
+                gamma[0..., 0 ..< slotLen].asType(.float32),
+                delta[0..., 0 ..< slotLen].asType(.float32),
+                x0[0..., 0 ..< slotLen].asType(.float32),
+                activeMask[0..., 0 ..< slotLen].asType(.float32),
             ], axis: 0)
             : nil
 
@@ -1195,6 +1327,7 @@ public final class DiffusionEngine {
             nextPosts: nextPosts, stats: stats, trace: trace,
             nextJotStableCount: nextJotStableCountFinal,
             nextPrevPredictions: nextPrevPredictions,
-            nextFrozenMask: nextFrozenMaskFinal)
+            nextFrozenMask: nextFrozenMaskFinal,
+            frozenPrefixLen: frozenPrefixLen)
     }
 }

@@ -196,6 +196,9 @@ struct LLaDARunResult: Codable {
     let jotK: Int
     let jotThreshold: Float
     let jotFaithful: Bool
+    let moeCapacityRatio: Float
+    let subBlockCommit: Bool
+    let subBlockMinPrefix: Int
     // Warmup / process / environment classification (m6-logbook Findings 1/2/7):
     // the process's first generation carries ~19 s one-off cost; cross-process
     // comparisons carry thermal drift; env fields + validity label per the frozen rule.
@@ -262,6 +265,16 @@ func runLLaDABench() async throws {
     precondition(!jotFaithful || (jotEnabled && speculationK == 1),
         "--jot-faithful requires --jot and --speculation-k 1 "
         + "(the frozen-K/V hold is not rolled back across a K>1 speculative batch)")
+    // WP-3a §10: static MoE capacity ratio (sync-free FLOP skip). 0 = Option-A mask path.
+    // Sweep at larger --block-length where expert arithmetic dominates. e.g. --moe-capacity 0.6
+    let moeCapacityRatio = Float(argValue("--moe-capacity") ?? "0") ?? 0
+    precondition(moeCapacityRatio == 0 || jotFaithful,
+        "--moe-capacity requires --jot-faithful (the gather keys off the JOT frozen mask)")
+    // WP-3a §11 Option C: sub-block prefix commit. --sub-block-commit [--sub-block-min N]
+    let subBlockCommit = hasFlag("--sub-block-commit")
+    let subBlockMinPrefix = Int(argValue("--sub-block-min") ?? "8") ?? 8
+    precondition(!subBlockCommit || jotFaithful,
+        "--sub-block-commit requires --jot-faithful (Option C keys off the JOT frozen prefix)")
 
     // Prompt suites: fixed cases checked into Tools/diffusion-bench/PromptSuites (M6).
     // --prompt TEXT replaces them with a single ad-hoc case.
@@ -367,7 +380,8 @@ func runLLaDABench() async throws {
             elasticCacheEnabled: elasticCache, elasticGamma: elasticGamma, elasticBeta: elasticBeta,
             elasticStaticBoundary: elasticStaticBoundary,
             jotEnabled: jotEnabled, jotK: jotK, jotThreshold: jotThreshold,
-            jotFaithful: jotFaithful)
+            jotFaithful: jotFaithful, moeCapacityRatio: moeCapacityRatio,
+            subBlockCommit: subBlockCommit, subBlockMinPrefix: subBlockMinPrefix)
         if let t = thresholdMaskOverride { p.threshold = t }
         if let t = thresholdEditOverride { p.editingThreshold = t }
         return p
@@ -496,6 +510,9 @@ func runLLaDABench() async throws {
             jotK: output.metrics.effectiveJotK,
             jotThreshold: output.metrics.effectiveJotThreshold,
             jotFaithful: output.metrics.effectiveJotFaithful,
+            moeCapacityRatio: output.metrics.effectiveMoeCapacityRatio,
+            subBlockCommit: output.metrics.effectiveJotFaithful && subBlockCommit,
+            subBlockMinPrefix: subBlockMinPrefix,
             warmupIncluded: warmup,
             processId: Int(ProcessInfo.processInfo.processIdentifier),
             host: sysctlString("hw.model"),

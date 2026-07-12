@@ -93,6 +93,46 @@ The text prefixes generated under JOT v2 are clean and correct:
 ## 9. Final Verdict (v2)
 
 * **Algorithmic Verdict**: **ACCEPT**. The v2 per-layer K/V hold successfully implements the JOT paper's "finalize + reuse stable KV" mechanism and prevents representation drift/cascades.
-* **Wall-Clock Verdict**: **REJECT**. Gated to `speculationK == 1` due to speculative rollback limitations. Additionally, the CPU-GPU synchronization overhead (`numActive.item()`) in `LLaDA2SparseMoEBlock` is a bottleneck on Apple Silicon.
-* **Recommendation**: Keep the v2 code landed default-off under `--jot-faithful` for diagnostic reference, but do not promote to default-on since it does not stack with speculation ($K > 1$) and is compute-neutral/negative under current metal implementations.
+* **Wall-Clock Verdict**: **REJECT**. Gated to `speculationK == 1` due to speculative rollback limitations. The per-layer `numActive.item()` sync that dominated the first v2 measurement (15–75% overhead) is **removed in §10 (Option A)**; even so there is no wall-clock win, because Option A saves no FLOPs and JOT *adds* ~15% steps/block on most prompts (the residual premature-freeze cost, F4).
+* **Recommendation**: Keep the v2 code landed default-off under `--jot-faithful` for diagnostic reference, but do not promote to default-on: it does not stack with speculation ($K > 1$), is compute-neutral/negative at the T=blockLength operating point, and costs extra steps. The only lever that could still pay off is coarsening token-freezing to **sub-block prefix commit** (§11), which reduces the active-window token count instead of adding per-token freezing overhead.
+
+## 10. Option A — static-masked MoE (sync removed, 2026-07-12)
+
+The first v2 measurement (§8) used a **dynamic gather**: it sized an active-token buffer `[..<numActive]` from a device scalar, forcing a GPU→CPU sync *per MoE layer per step* (~20/step) — the 15–75% wall-clock overhead. **Option A** replaces it with a static full-shape compute: run the experts over all `T` tokens, then zero the frozen rows with a pure elementwise mask (`combined * (.!frozen)`), no dynamic shape, no readback (`LLaDA2SparseMoEBlock.callAsFunction`).
+
+**F6 — Option A is a bit-identical, sync-free refactor of the MoE skip.** Re-benched K=1 baseline vs `--jot --jot-faithful` on the chat suite: steps/block **12.4 / 20.8 / 12.4** (email/explain/recipe) — *identical* to the §8 gather numbers, as expected (the math is unchanged; only the dispatch differs). `JotTests` (4/4) green, incl. the no-freeze parity test.
+
+**F7 — The overhead-removal could not be measured on this host.** All 8 A/B rows are `envValid:false` (free RAM 63–124 MB; the 9.57 GB model leaves the M1 under paging pressure), so TPS is not a valid read here — no systematic per-step tax is visible (tps tracks steps/block + thermal/paging noise), but the honest overhead number needs a clean-env re-run (close other apps) or the Studio backfill. What *is* certain is structural: the `.item()` is gone from the code path.
+
+> **DEFERRED (2026-07-12):** the clean-env Option-A wall-clock A/B is postponed — the current M1 has too little free RAM to produce `envValid:true` rows. André to run on a less memory-pressured host (≥ clean env, or the Studio). Turnkey commands:
+> ```
+> diffusion-bench llada --runs 3 --suites chat --arms q-cached --speculation-k 1                    # baseline
+> diffusion-bench llada --runs 3 --suites chat --arms q-cached --speculation-k 1 --jot --jot-faithful
+> ```
+> Compare `tps` on `envValid:true` rows only. Expectation: JOT tps ≈ baseline minus the ~15% steps/block cost (F4), i.e. no per-step sync tax now that Option A landed. Algorithmic metrics (steps/block, tpf-logical) already settled above and need no re-run.
+
+**Net.** Option A converts faithful JOT from "regression from the sync" to "neutral-to-slightly-negative from the extra steps." It removes the false bottleneck so the true verdict is visible: at T=32, token-level freezing has no lever to pull — no FLOP win (launch/bandwidth-bound), and it *adds* steps. The two builds below (§10a, §11) target the *large-active-token* regime where an actual compute win is possible; both are implemented, default-off, and awaiting the clean-env / large-block sweep.
+
+### 10a. Capacity-gather MoE (static FLOP skip, implemented 2026-07-12)
+
+The "Option-B enabler." Option A computes all `T` experts then masks (no FLOP saving). Capacity-gather instead runs the experts over only the `⌈ratio·T⌉` most-active tokens (`GenerationParams.moeCapacityRatio`, `--moe-capacity`): `argSort(-active)` → gather a **compile-time-sized** `[C, H]` buffer → experts → scatter → mask. Because `C` is a Swift Int (not a device scalar) there is **no `.item()` and no sync**, and the expert GEMMs really skip the frozen tokens. Overflow (active > C) drops the surplus active tokens' FFN — the standard MoE-capacity tradeoff; size the ratio ≥ the active fraction (~0.56). Unit test `LLaDAJotCapacityTests`: gather ≡ Option-A mask when `C ≥ numActive`, drops exactly one active row on overflow. Marginal at T=32 (launch-bound); the point is to sweep at larger `--block-length` where expert arithmetic dominates. Composes with faithful JOT (KV-hold handles representation; capacity handles FLOPs).
+
+## 11. Sub-block prefix commit — Option C (implemented 2026-07-12)
+
+Token-level freezing is the wrong granularity for a block-causal T=32 window; **prefix-level** commit is the engine-friendly one. When a *contiguous frozen prefix* `[0..N)` of the front block reaches `subBlockMinPrefix` (`--sub-block-commit`, `--sub-block-min`), it is committed early into the `ExactPrefixCache` at its absolute position and the active window is shrunk to the suffix `[N..B)` — cutting attention-query *and* MoE work for the block's remaining steps. It adds **no new sync** (the prefix length is read from the batch's already-evaluated frozen mask; the commit piggybacks the existing readback) and is statically shaped. The block keeps its identity and accumulates `stepsTaken`; per-block metrics emit only on full settle, so a sub-committed block still counts as one block (streaming emits the prefix in order, the suffix on settle).
+
+**How it landed.** Required generalizing `windowStep` to a variable single-slot length (`slotLen`, §2 task) — behaviour-preserving when `A==B` (all 29 pre-existing loop/MultiBD/S2D2/WP2b tests still green). New `PhaseEvent.prefixCommit`, `JotFreezeCache.dropPrefix`, and an `onPrefixSettled` capture hook. Commit start-positions switched from `blockIndex*B` to the live committed length so a sub-committed block's suffix lands at the right offset. Gate: faithful JOT, cached, nBuf=1, `speculationK==1`, Elastic/speculation off. Tests: `testSubBlockCommitInertWhenNothingFreezes` (byte-identical to baseline when no prefix forms) and `testSubBlockCommitCompletesUnderFreezing` (fires mid-block, reassembles block-aligned).
+
+**Cost/benefit to measure (bench).** Each sub-commit adds one capture forward (the prefix's causal KV) — the trade is "fewer active tokens in the remaining denoising steps" vs "extra capture forwards." So `subBlockMinPrefix` matters: too small ⇒ many tiny commits whose capture overhead swamps the saving (observed: `--sub-block-min 2` under aggressive freezing is pathologically slow); moderate (≥8 at B=32) ⇒ occasional commits. Like §10a, the win only materializes when active-token compute dominates launch overhead → sweep at larger `--block-length`. Within-block bidirectionality means an early prefix commit freezes KV before the suffix settles (the WP-1a staleness gamble, gated by the convergence detector) — a quality question for the blind sheet, not a structural block.
+
+**Run recipes (deferred to a clean-env / large-block host — see §10 DEFERRED):**
+```
+# Capacity-gather sweep (find the arithmetic regime):
+diffusion-bench llada --runs 1 --suites chat --arms q-cached --speculation-k 1 --jot --jot-faithful \
+    --block-length 128 --moe-capacity 0.6
+# Option C sweep:
+diffusion-bench llada --runs 1 --suites chat --arms q-cached --speculation-k 1 --jot --jot-faithful \
+    --block-length 128 --sub-block-commit --sub-block-min 32
+```
+Hardware-independent metrics (steps/block, tpf-logical, forwardsEvaluated) decide the algorithmic tradeoff on any host; wall-clock needs `envValid:true` rows. Both echo their knobs in the JSONL (`moeCapacityRatio`, `subBlockCommit`, `subBlockMinPrefix`).
 

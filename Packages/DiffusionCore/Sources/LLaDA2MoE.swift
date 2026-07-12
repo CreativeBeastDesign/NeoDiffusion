@@ -257,68 +257,70 @@ public final class LLaDA2SparseMoEBlock: Module {
         super.init()
     }
 
-    public func callAsFunction(_ x: MLXArray, frozen: MLXArray? = nil) -> MLXArray {
+    public func callAsFunction(
+        _ x: MLXArray, frozen: MLXArray? = nil, capacity: Int? = nil
+    ) -> MLXArray {
         let shape = x.shape
         let flat = x.reshaped(-1, shape.last!)  // [T, H]
         let T = flat.dim(0)
 
-        guard let frozen = frozen else {
-            // Normal execution path
-            let (indices, weights, _) = gate(flat)
-            let expertOut = experts(flat, indices: indices)  // [T, k, H]
+        // Capacity-gather path (WP-3a §10, Option-B enabler). Only when we actually skip tokens
+        // (`capacity < T`). `capacity` is a Swift Int (⌈ratio·T⌉ from the caller), so the gather
+        // buffer has a **compile-time shape** — no `numActive.item()`, no GPU→CPU sync — and the
+        // expert GEMMs really run for only `capacity` tokens (unlike the Option-A mask path below,
+        // which computes all T and zeroes). Gather the `capacity` most-active tokens (non-frozen
+        // sort first), evaluate, scatter back, then hard-zero frozen rows (a frozen token can land
+        // in the buffer when the active count is below capacity). Overflow (active > capacity)
+        // drops the surplus active tokens' FFN — the standard MoE-capacity tradeoff.
+        if let frozen, let capacity, capacity < T {
+            let activeInt = (.!frozen.reshaped(-1)).asType(.int32)  // [T] 1 = active
+            let order = argSort(-activeInt)                         // active first (GPU-only)
+            let pick = order[..<capacity]                          // [capacity] static shape
+            let gathered = flat[pick]                              // [capacity, H]
 
-            var combined = (expertOut.asType(.float32) * weights.expandedDimensions(axis: -1))
+            let (gi, gw, _) = gate(gathered)
+            let gExpert = experts(gathered, indices: gi)
+            var gOut = (gExpert.asType(.float32) * gw.expandedDimensions(axis: -1))
                 .sum(axis: 1)
                 .asType(x.dtype)
+            if let sharedExperts { gOut = gOut + sharedExperts(gathered) }
 
-            if let sharedExperts {
-                combined = combined + sharedExperts(flat)
-            }
-            return combined.reshaped(shape)
+            var scattered = MLXArray.zeros([T, shape.last!], dtype: x.dtype)
+            scattered[pick] = gOut
+            let keep = (.!frozen.reshaped(-1)).asType(scattered.dtype).reshaped(-1, 1)
+            scattered = scattered * keep
+            return scattered.reshaped(shape)
         }
 
-        // JOT execution path: skip MoE for frozen tokens
-        let frozenFlat = frozen.reshaped(-1) // [T] Bool
-        let activeMask = .!frozenFlat // [T] Bool
-        
-        let numActive = activeMask.asType(.int32).sum().item(Int32.self)
-        if numActive == 0 {
-            return MLXArray.zeros(shape, dtype: x.dtype)
-        }
-        if numActive == T {
-            let (indices, weights, _) = gate(flat)
-            let expertOut = experts(flat, indices: indices)
+        // Routed experts + shared expert over the *full* window. Identical for both paths — JOT
+        // (below) does not change the shape or the dispatch, only zeroes selected outputs.
+        let (indices, weights, _) = gate(flat)
+        let expertOut = experts(flat, indices: indices)  // [T, k, H]
 
-            var combined = (expertOut.asType(.float32) * weights.expandedDimensions(axis: -1))
-                .sum(axis: 1)
-                .asType(x.dtype)
-
-            if let sharedExperts {
-                combined = combined + sharedExperts(flat)
-            }
-            return combined.reshaped(shape)
-        }
-
-        // Select only the active tokens
-        let activeInt = activeMask.asType(.int32)
-        let sortedIndices = argSort(-activeInt)
-        let activeIndices = sortedIndices[..<Int(numActive)]
-        let activeTokens = flat[activeIndices]
-
-        let (indices, weights, _) = gate(activeTokens)
-        let expertOut = experts(activeTokens, indices: indices)
-
-        var combinedActive = (expertOut.asType(.float32) * weights.expandedDimensions(axis: -1))
+        var combined = (expertOut.asType(.float32) * weights.expandedDimensions(axis: -1))
             .sum(axis: 1)
             .asType(x.dtype)
 
         if let sharedExperts {
-            combinedActive = combinedActive + sharedExperts(activeTokens)
+            combined = combined + sharedExperts(flat)
         }
 
-        // Scatter back to original token positions
-        var combined = MLXArray.zeros([T, shape.last!], dtype: x.dtype)
-        combined[activeIndices] = combinedActive
+        // JOT (WP-3a v2, "Option A" — static masked, no dynamic gather). Zero the FFN
+        // contribution of frozen tokens with a pure elementwise mask instead of gathering the
+        // active tokens into a runtime-sized buffer. The gather variant sized `[..<numActive]`
+        // from a device scalar, forcing a GPU→CPU sync *per MoE layer per step* (~20/step; the
+        // measured 15–75% overhead). This path has **no sync and a static shape**: the experts
+        // run for all T tokens (so it saves no FLOPs — worthless at T=blockLength anyway, where
+        // the step is launch/bandwidth-bound), and JOT's speedup, if any, must come from the
+        // attention KV-hold's downstream effects, not from skipping expert GEMMs here. The
+        // representation-consistency guarantee lives in ``LayerJotCache`` (held K/V); zeroing a
+        // frozen token's FFN output is harmless because its held K/V shield neighbours and its
+        // own skipped hidden feeds only its (unused) query.
+        if let frozen {
+            // keep = 1.0 for active, 0.0 for frozen; broadcast over the hidden axis.
+            let keep = (.!frozen.reshaped(-1)).asType(combined.dtype).reshaped(-1, 1)  // [T, 1]
+            combined = combined * keep
+        }
 
         return combined.reshaped(shape)
     }

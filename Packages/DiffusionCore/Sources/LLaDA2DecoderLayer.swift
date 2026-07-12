@@ -73,7 +73,7 @@ public final class LLaDA2DecoderLayer: Module {
     /// overload exactly but for the held-K/V attention path.
     public func callAsFunction(
         _ x: MLXArray, cos: MLXArray, sin: MLXArray, cache: LayerKVCache,
-        jot: LayerJotCache, frozen: MLXArray, mask: MLXArray? = nil
+        jot: LayerJotCache, frozen: MLXArray, mask: MLXArray? = nil, capacity: Int? = nil
     ) -> MLXArray {
         var hidden = x + attention(
             inputLayernorm(x), cos: cos, sin: sin, cache: cache, jot: jot, frozen: frozen, mask: mask)
@@ -81,7 +81,7 @@ public final class LLaDA2DecoderLayer: Module {
         let ffnOutput: MLXArray
         switch mlp {
         case let dense as LLaDA2MLP: ffnOutput = dense(ffnInput)
-        case let moe as LLaDA2SparseMoEBlock: ffnOutput = moe(ffnInput, frozen: frozen)
+        case let moe as LLaDA2SparseMoEBlock: ffnOutput = moe(ffnInput, frozen: frozen, capacity: capacity)
         default: fatalError("unsupported mlp module type \(type(of: mlp))")
         }
         hidden = hidden + ffnOutput
