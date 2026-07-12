@@ -93,6 +93,13 @@ public struct GenerationParams: Sendable, Equatable {
     public var jotK: Int
     /// Confidence threshold above which a token can be frozen.
     public var jotThreshold: Float
+    /// WP-3a v2: use the **faithful** JOT mechanism — hold each frozen token's per-layer K/V at
+    /// its pre-freeze (converged) value so neighbours attend to a constant representation, instead
+    /// of the v1 behaviour that only zeroed the frozen MoE output and let the K/V drift (the
+    /// perturbation-cascade misimplementation, `Plans/jot-logbook.md`). Cached path only, single
+    /// active block, Elastic-Cache off; requires `speculationK == 1` (the K/V hold is not
+    /// snapshot/rolled-back across a K>1 batch). No effect unless `jotEnabled`.
+    public var jotFaithful: Bool
 
     public init(
         threshold: Float,
@@ -118,7 +125,8 @@ public struct GenerationParams: Sendable, Equatable {
         elasticStaticBoundary: Int? = nil,
         jotEnabled: Bool = false,
         jotK: Int = 2,
-        jotThreshold: Float = 0.9
+        jotThreshold: Float = 0.9,
+        jotFaithful: Bool = false
     ) {
         self.threshold = threshold
         self.editingThreshold = editingThreshold
@@ -144,6 +152,7 @@ public struct GenerationParams: Sendable, Equatable {
         self.jotEnabled = jotEnabled
         self.jotK = jotK
         self.jotThreshold = jotThreshold
+        self.jotFaithful = jotFaithful
     }
 
     /// The two served modes from the LLaDA2.1-mini model card (phase-2 §1, gotcha 10).
@@ -186,7 +195,8 @@ public struct GenerationParams: Sendable, Equatable {
         elasticStaticBoundary: Int? = nil,
         jotEnabled: Bool = false,
         jotK: Int = 2,
-        jotThreshold: Float = 0.9
+        jotThreshold: Float = 0.9,
+        jotFaithful: Bool = false
     ) -> GenerationParams {
         let (mask, edit) = mode.thresholds
         return GenerationParams(
@@ -213,6 +223,7 @@ public struct GenerationParams: Sendable, Equatable {
             elasticStaticBoundary: elasticStaticBoundary,
             jotEnabled: jotEnabled,
             jotK: jotK,
-            jotThreshold: jotThreshold)
+            jotThreshold: jotThreshold,
+            jotFaithful: jotFaithful)
     }
 }

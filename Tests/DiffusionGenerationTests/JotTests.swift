@@ -42,6 +42,34 @@ final class JotTests: XCTestCase {
         }
     }
 
+    /// Faithful JOT (WP-3a v2) plumbing parity: with a freeze threshold no softmax probability
+    /// can ever reach (2.0 > 1.0), *nothing* freezes, so the per-layer K/V hold is inert and the
+    /// held-K/V forward must reproduce the cached baseline token-for-token. This proves the
+    /// faithful path is wired without changing the trajectory when it has nothing to hold — the
+    /// analogue of `testJotParityWhenDisabled` for the v2 mechanism. (A model-level check that
+    /// held K/V actually suppress the v1 cascade is a bench measurement, not a unit test.)
+    func testFaithfulJotParityWhenNothingFreezes() throws {
+        for c in traces.cases {
+            var pJot = c.params.toGenerationParams()
+            pJot.jotEnabled = true
+            pJot.jotFaithful = true
+            pJot.jotThreshold = 2.0   // unreachable → no position is ever frozen
+
+            var pBase = c.params.toGenerationParams()
+            pBase.jotEnabled = false
+
+            // Faithful JOT is gated to speculationK == 1.
+            let jot = DiffusionEngine(model: model, speculationK: 1)
+                .generateCached(prompt: c.prompt, params: pJot)
+            let base = DiffusionEngine(model: model, speculationK: 1)
+                .generateCached(prompt: c.prompt, params: pBase)
+
+            XCTAssertTrue(jot.metrics.effectiveJotFaithful, "\(c.name): faithful flag not echoed")
+            XCTAssertEqual(jot.finalSequence, base.finalSequence,
+                "\(c.name): faithful JOT with no freezing must match the cached baseline")
+        }
+    }
+
     /// Liveness test: synthetic forward pass where positions predict stably.
     /// Verify that stable positions are frozen (added to frozen mask) and their predictions written.
     func testJotLivenessSynthetic() throws {

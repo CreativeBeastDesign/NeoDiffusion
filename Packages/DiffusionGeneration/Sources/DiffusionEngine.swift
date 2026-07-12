@@ -170,6 +170,9 @@ public final class DiffusionEngine {
         public let effectiveJotEnabled: Bool
         public let effectiveJotK: Int
         public let effectiveJotThreshold: Float
+        /// WP-3a v2: whether the faithful (per-layer frozen-K/V hold) mechanism ran, vs the v1
+        /// MoE-zeroing behaviour. Only meaningful when `effectiveJotEnabled`.
+        public let effectiveJotFaithful: Bool
     }
 
     /// Mutable stats shared between the cached entry point's closures and `run` (the capture
@@ -236,7 +239,27 @@ public final class DiffusionEngine {
         let B = params.blockLength
         let cache = ExactPrefixCache(layerCount: model.layerCount)
         let activeCache = ActiveBlockCache(layerCount: model.layerCount)
+        // Faithful JOT (WP-3a v2): per-layer frozen-K/V hold. Only allocated/used when the
+        // faithful mechanism is on; otherwise it stays inert (the v1 path ignores it).
+        let jotCache = JotFreezeCache(layerCount: model.layerCount)
         let stats = RunStats()
+
+        // Faithful JOT preconditions (see LayerJotCache / GenerationParams.jotFaithful):
+        // the K/V hold mutates in-graph once per step and is not rolled back across a K>1
+        // speculative batch, and it manages the active window's K/V (mutually exclusive with
+        // Elastic-Cache and with a two-block window).
+        if params.jotEnabled && params.jotFaithful {
+            precondition(speculationK == 1,
+                "faithful JOT requires speculationK == 1 — the frozen-K/V hold is not "
+                + "snapshot/rolled-back across a K>1 speculative batch. K=1 measures the "
+                + "K-invariant logical trajectory (the WP-3a algorithmic quantity).")
+            precondition(!params.elasticCacheEnabled,
+                "faithful JOT and Elastic-Cache both manage the active-window K/V — enable at most one.")
+            precondition(params.nBuf == 1,
+                "faithful JOT v1 supports a single active block (nBuf == 1).")
+            precondition(params.speculation == .none,
+                "faithful JOT is not composed with S2D2 speculation (WP-3a v1 scope).")
+        }
 
         // Capture forward over a full block of `ids` at absolute `startPos`, then commit its K/V.
         func captureAndCommit(_ ids: MLXArray, startPos: Int) {
@@ -276,10 +299,17 @@ public final class DiffusionEngine {
 
         // Active-only forward: slice the active window out of the full window; positions are
         // absolute from the committed length (== window length − active length).
-        let forward: Forward = { [self, model, cache, activeCache, boundaryHolder] windowIds, activeLen, frozen in
+        let forward: Forward = { [self, model, cache, activeCache, jotCache, boundaryHolder] windowIds, activeLen, frozen in
             let W = windowIds.dim(windowIds.ndim - 1)
             let activeIds = windowIds[0..., (W - activeLen)...]
             let positionIds = MLXArray(Int32(W - activeLen) ..< Int32(W)).expandedDimensions(axis: 0)
+
+            // Faithful JOT (WP-3a v2): hold frozen columns' per-layer K/V so finalized tokens
+            // contribute a constant representation. Single active block only (guarded above).
+            if params.jotEnabled && params.jotFaithful, let frozen {
+                return model(activeIds, positionIds: positionIds, caches: cache.layers,
+                             jotCaches: jotCache.layers, frozen: frozen, mask: nil)
+            }
 
             // Elastic off (the served default): plain cached forward. The elastic overload
             // materializes full attention weights per layer for the drift test — that
@@ -368,6 +398,10 @@ public final class DiffusionEngine {
         let onSettled: (Int, MLXArray) -> Void = { blockIndex, committedActive in
             captureAndCommit(committedActive, startPos: blockIndex * B)
             activeCache.clear()
+            // Faithful JOT: the held K/V belong to the settled block's active window; the next
+            // block starts with no frozen columns, so drop them (also avoids carrying a stale
+            // window across a block boundary).
+            jotCache.clear()
             stepIndex = 0
             boundaryHolder.value = 0
         }
@@ -650,7 +684,8 @@ public final class DiffusionEngine {
                 effectiveEosEarlyExit: params.eosEarlyExit,
                 effectiveJotEnabled: params.jotEnabled,
                 effectiveJotK: params.jotK,
-                effectiveJotThreshold: params.jotThreshold))
+                effectiveJotThreshold: params.jotThreshold,
+                effectiveJotFaithful: params.jotEnabled && params.jotFaithful))
     }
 
     // MARK: - Per-phase denoising with K-step speculative readback

@@ -195,6 +195,7 @@ struct LLaDARunResult: Codable {
     let jotEnabled: Bool
     let jotK: Int
     let jotThreshold: Float
+    let jotFaithful: Bool
     // Warmup / process / environment classification (m6-logbook Findings 1/2/7):
     // the process's first generation carries ~19 s one-off cost; cross-process
     // comparisons carry thermal drift; env fields + validity label per the frozen rule.
@@ -254,6 +255,13 @@ func runLLaDABench() async throws {
     let jotEnabled = hasFlag("--jot")
     let jotK = Int(argValue("--jot-k") ?? "2") ?? 2
     let jotThreshold = Float(argValue("--jot-threshold") ?? "0.9") ?? 0.9
+    // WP-3a v2: --jot-faithful selects the faithful (frozen-K/V hold) mechanism over the v1
+    // MoE-zeroing behaviour. Requires --speculation-k 1 (enforced in the engine); cached, nBuf 1,
+    // Elastic-Cache off. Run e.g.: diffusion-bench llada --jot --jot-faithful --speculation-k 1 …
+    let jotFaithful = hasFlag("--jot-faithful")
+    precondition(!jotFaithful || (jotEnabled && speculationK == 1),
+        "--jot-faithful requires --jot and --speculation-k 1 "
+        + "(the frozen-K/V hold is not rolled back across a K>1 speculative batch)")
 
     // Prompt suites: fixed cases checked into Tools/diffusion-bench/PromptSuites (M6).
     // --prompt TEXT replaces them with a single ad-hoc case.
@@ -358,7 +366,8 @@ func runLLaDABench() async throws {
             dynamicTauAlpha: dynTauAlpha, eosEarlyExit: eosEarlyExit,
             elasticCacheEnabled: elasticCache, elasticGamma: elasticGamma, elasticBeta: elasticBeta,
             elasticStaticBoundary: elasticStaticBoundary,
-            jotEnabled: jotEnabled, jotK: jotK, jotThreshold: jotThreshold)
+            jotEnabled: jotEnabled, jotK: jotK, jotThreshold: jotThreshold,
+            jotFaithful: jotFaithful)
         if let t = thresholdMaskOverride { p.threshold = t }
         if let t = thresholdEditOverride { p.editingThreshold = t }
         return p
@@ -486,6 +495,7 @@ func runLLaDABench() async throws {
             jotEnabled: output.metrics.effectiveJotEnabled,
             jotK: output.metrics.effectiveJotK,
             jotThreshold: output.metrics.effectiveJotThreshold,
+            jotFaithful: output.metrics.effectiveJotFaithful,
             warmupIncluded: warmup,
             processId: Int(ProcessInfo.processInfo.processIdentifier),
             host: sysctlString("hw.model"),

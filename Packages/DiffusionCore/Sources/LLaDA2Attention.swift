@@ -129,6 +129,68 @@ public final class LLaDA2Attention: Module {
         return dense(output)
     }
 
+    /// Faithful-JOT cache-aware attention (WP-3a v2). Identical to the cached forward above,
+    /// except the active window's K/V for **frozen** columns are held at their pre-freeze value
+    /// (`jot`), so every other position attends to a *constant* contribution from finalized
+    /// tokens. This is the representation-consistency fix for the v1 FFN-zeroing cascade: v1 let a
+    /// frozen token's K/V drift every step; here they never change once frozen.
+    ///
+    /// Hold/capture rule (`frozen` is the *entering-step* mask, matching the value passed to the
+    /// forward): `activeKeys = which(frozen, jot.keys, freshKeys)`, then `jot.keys = activeKeys`.
+    /// A column that is still active (`frozen == false`) refreshes to its fresh K/V *and* is
+    /// captured; once it freezes (enters as `true` on the following step) the captured value is
+    /// held unchanged — i.e. exactly its last full-compute (converged) representation. A column
+    /// that later unfreezes resumes refreshing automatically. On the first step `jot` is empty and
+    /// every column takes the fresh value.
+    ///
+    /// The frozen column's *fresh* K/V (computed here from a hidden state whose MoE was skipped)
+    /// is never used — it is overwritten by the hold — so the MoE skip in
+    /// ``LLaDA2SparseMoEBlock`` stays harmless: the skipped hidden is invisible to neighbours.
+    ///
+    /// - Parameters:
+    ///   - jot: this layer's frozen-K/V hold, updated in place.
+    ///   - frozen: entering-step frozen mask `[1, L]` Bool over the active window.
+    public func callAsFunction(
+        _ x: MLXArray, cos: MLXArray, sin: MLXArray, cache: LayerKVCache,
+        jot: LayerJotCache, frozen: MLXArray, mask: MLXArray? = nil
+    ) -> MLXArray {
+        let B = x.dim(0)
+        let L = x.dim(1)
+
+        let qkv = queryKeyValue(x).reshaped(B, L, numHeads + 2 * numKVHeads, headDim)
+        let parts = split(qkv, indices: [numHeads, numHeads + numKVHeads], axis: 2)
+        var queries = parts[0].transposed(0, 2, 1, 3)
+        var freshKeys = parts[1].transposed(0, 2, 1, 3)   // [1, nKV, L, D]
+        let freshValues = parts[2].transposed(0, 2, 1, 3)
+
+        if let queryLayernorm { queries = queryLayernorm(queries) }
+        if let keyLayernorm { freshKeys = keyLayernorm(freshKeys) }
+
+        queries = PartialRotaryEmbedding.apply(queries, cos: cos, sin: sin)
+        freshKeys = PartialRotaryEmbedding.apply(freshKeys, cos: cos, sin: sin)
+
+        // Hold frozen columns at their captured value; refresh the rest. Broadcast `frozen`
+        // `[1, L]` over the head (nKV) and head-dim (D) axes → `[1, 1, L, 1]`.
+        let frozenKV = frozen.reshaped(1, 1, L, 1)
+        let activeKeys = jot.keys.map { which(frozenKV, $0, freshKeys) } ?? freshKeys
+        let activeValues = jot.values.map { which(frozenKV, $0, freshValues) } ?? freshValues
+        jot.keys = activeKeys
+        jot.values = activeValues
+
+        let keys = cache.keys.map { concatenated([$0, activeKeys], axis: 2) } ?? activeKeys
+        let values = cache.values.map { concatenated([$0, activeValues], axis: 2) } ?? activeValues
+
+        cache.pendingKeys = activeKeys
+        cache.pendingValues = activeValues
+
+        let attended = Self.attend(
+            queries: queries, keys: keys, values: values, scale: scale, mask: mask)
+        let output = attended
+            .transposed(0, 2, 1, 3)
+            .reshaped(B, L, numHeads * headDim)
+        return dense(output)
+    }
+
     /// Elastic-Cache aware attention forward pass (WP-1a).
     ///
     /// If `recomputeActive` is true, recomputes keys/values for the active window and updates `activeCache`.
