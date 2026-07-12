@@ -58,6 +58,7 @@ Internal & external references (fetch, don't trust memory):
 - **Provenance discipline** (house style, from the wiki): mark claims **sourced / inferred / speculative** in docs and non-trivial code comments; unsourced performance assumptions are bugs.
 - **Record negative results**: failed approaches go into the Plans docs (and the wiki via André), not into deletion.
 - **André's preferences**: Swift 6 / SwiftPM; hexagonal architecture (Generation = application core; kernels/model-IO/tokenizer/server = adapters behind ports — this mapping is phase-1 §4); ask questions rather than assume when information is missing; concise communication.
+- **Agent Rules & Benchmarking Methodology**: Adhere strictly to the workspace guidelines in [.agents/AGENTS.md](file:///Users/andrebarlocher/Documents/Swift/NeoDiffusion/.agents/AGENTS.md), specifically the "paranoid" benchmarking discipline (validating telemetry logs via `envValid` row labeling, logging engine-level effective echoes, excluding warmup, content sensitivity), hard optimization acceptance gates, and provenance requirements.
 - **When you deviate from the plans**: update the relevant Plans doc in the same change, and flag it to André. The Plans docs are the source of truth, not this summary — on conflict, phase-2 wins for implementation detail, phase-1 for architecture intent.
 
 ## Environment notes

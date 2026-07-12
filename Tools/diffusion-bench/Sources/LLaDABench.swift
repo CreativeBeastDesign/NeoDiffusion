@@ -108,11 +108,27 @@ nonisolated(unsafe) var llaDAProcessFirstGeneration = true
 struct LLaDAPromptCase: Codable {
     let id: String
     let user: String
+    let answer: String?
+
+    init(id: String, user: String, answer: String? = nil) {
+        self.id = id
+        self.user = user
+        self.answer = answer
+    }
 }
 
 struct LLaDAPromptSuite: Codable {
     let name: String
     let prompts: [LLaDAPromptCase]
+}
+
+func extractLastNumber(from text: String) -> String? {
+    let pattern = "-?\\d+"
+    guard let regex = try? NSRegularExpression(pattern: pattern) else { return nil }
+    let nsString = text as NSString
+    let results = regex.matches(in: text, range: NSRange(location: 0, length: nsString.length))
+    guard let lastResult = results.last else { return nil }
+    return nsString.substring(with: lastResult.range)
 }
 
 struct LLaDAArm {
@@ -217,12 +233,14 @@ func runLLaDABench() async throws {
         ?? "\(repoRoot)/models/llada2-1-mini-4bit")
     let tokenizerDir = URL(fileURLWithPath: argValue("--tokenizer")
         ?? "\(repoRoot)/models/llada2-1-mini")
-    let runs = Int(argValue("--runs") ?? "3") ?? 3
-    let cooldown = Int(argValue("--cooldown") ?? "30") ?? 30
+    let baselineCheck = hasFlag("--baseline-check")
+    let runs = baselineCheck ? 1 : (Int(argValue("--runs") ?? "3") ?? 3)
+    let cooldown = baselineCheck ? 2 : (Int(argValue("--cooldown") ?? "30") ?? 30)
     let jsonPath = argValue("--json") ?? "\(repoRoot)/scratch/llada_bench.jsonl"
     let genLength = Int(argValue("--gen-length") ?? "128") ?? 128
     let blockLength = Int(argValue("--block-length") ?? "32") ?? 32
-    let speculationK = Int(argValue("--speculation-k") ?? "4") ?? 4
+    let speculationKInput = Int(argValue("--speculation-k") ?? "4") ?? 4
+    let speculationK = baselineCheck ? 1 : speculationKInput
     let eosEarlyStop = !hasFlag("--no-early-stop")
     let instrument = !hasFlag("--no-instrument")
     let maskDiagnostic = hasFlag("--mask-diagnostic")
@@ -283,8 +301,8 @@ func runLLaDABench() async throws {
         suites = [LLaDAPromptSuite(
             name: "custom", prompts: [LLaDAPromptCase(id: "custom-0", user: text)])]
     } else {
-        let wanted = (argValue("--suites") ?? "chat,reasoning,code")
-            .split(separator: ",").map(String.init)
+        let wantedSuites = baselineCheck ? (argValue("--suites") ?? "gsm8k_100") : (argValue("--suites") ?? "chat,reasoning,code")
+        let wanted = wantedSuites.split(separator: ",").map(String.init)
         suites = try wanted.map { name in
             let url = URL(fileURLWithPath:
                 "\(repoRoot)/Tools/diffusion-bench/PromptSuites/\(name).json")
@@ -340,6 +358,7 @@ func runLLaDABench() async throws {
 
     let engine = DiffusionEngine(
         model: container.model, speculationK: speculationK, instrument: instrument)
+    var currentCommittedTokens: [Int] = []
     let isoFormatter = ISO8601DateFormatter()
     var jsonLines: [String] = []
 
@@ -401,13 +420,14 @@ func runLLaDABench() async throws {
         // compile; steady-state is the later blocks). streamBlock fires at each commit.
         var lastCommit = start
         var blockIndex = 0
-        let logBlock: ([Int]) -> Void = { _ in
+        let logBlock: ([Int]) -> Void = { blockIds in
             let now = Date()
             print(String(format: "    block %d committed at +%.1fs (Δ %.1fs)",
                          blockIndex, now.timeIntervalSince(start),
                          now.timeIntervalSince(lastCommit)))
             lastCommit = now
             blockIndex += 1
+            currentCommittedTokens.append(contentsOf: blockIds)
         }
         let output = arm.cached
             ? engine.generateCached(prompt: promptIds, params: params(for: arm.mode),
@@ -539,6 +559,114 @@ func runLLaDABench() async throws {
     func flushJSON() {
         guard !jsonLines.isEmpty else { return }
         print("JSONL appended to \(jsonPath) (\(jsonLines.count) lines)")
+    }
+
+    // Baseline check execution path
+    if baselineCheck {
+        print("---- starting GSM8K Temporal Oscillation Baseline Check ----")
+        var totalEvaluated = 0
+        var finalCorrectCount = 0
+        var everCorrectCount = 0
+        var details: [[String: Any]] = []
+
+        var currentExpectedAnswer = ""
+        var currentStepAnswers: [String] = []
+        var wasEverCorrect = false
+        var totalDenoisingSteps = 0
+
+        engine.onTrace = { t in
+            let activeTokens = t.argmaxToken
+            let fullSequence = currentCommittedTokens + activeTokens
+            let decoded = tokenizer.decode(tokens: fullSequence)
+            if let extracted = extractLastNumber(from: decoded) {
+                currentStepAnswers.append(extracted)
+                if extracted == currentExpectedAnswer {
+                    wasEverCorrect = true
+                }
+            } else {
+                currentStepAnswers.append("N/A")
+            }
+            totalDenoisingSteps += 1
+        }
+
+        for suite in suites {
+            for prompt in suite.prompts {
+                guard let expected = prompt.answer else {
+                    print("Warning: Prompt \(prompt.id) has no ground truth answer. Skipping.")
+                    continue
+                }
+                let promptIds = try encodePrompt(prompt.user)
+                let prefillBlocks = promptIds.count / blockLength
+                
+                // Initialize committed tokens with the prefilled prompt blocks
+                currentCommittedTokens = Array(promptIds[0 ..< prefillBlocks * blockLength])
+                currentExpectedAnswer = expected
+                currentStepAnswers = []
+                wasEverCorrect = false
+                totalDenoisingSteps = 0
+
+                let arm = LLaDAArm(name: "q-cached", mode: .q, cached: true, mask: .strict)
+                let (output, seconds, _, _, _) = generate(arm, promptIds: promptIds)
+                
+                let finalOutputText = tokenizer.decode(tokens: output.tokens)
+                let finalAnswer = extractLastNumber(from: finalOutputText) ?? "N/A"
+                let isFinalCorrect = (finalAnswer == expected)
+                if isFinalCorrect {
+                    wasEverCorrect = true
+                }
+
+                totalEvaluated += 1
+                if isFinalCorrect { finalCorrectCount += 1 }
+                if wasEverCorrect { everCorrectCount += 1 }
+
+                print(String(
+                    format: "[%@] Final: %@ | Expected: %@ | Correct: %@ | Ever Correct: %@ | Steps: %d | Time: %.1fs",
+                    prompt.id, finalAnswer, expected, isFinalCorrect ? "Yes" : "No", wasEverCorrect ? "Yes" : "No",
+                    totalDenoisingSteps, seconds))
+
+                details.append([
+                    "promptId": prompt.id,
+                    "question": prompt.user,
+                    "expected": expected,
+                    "finalAnswer": finalAnswer,
+                    "finalCorrect": isFinalCorrect,
+                    "everCorrect": wasEverCorrect,
+                    "steps": totalDenoisingSteps,
+                    "trajectory": currentStepAnswers
+                ])
+                
+                if cooldown > 0 {
+                    try await Task.sleep(nanoseconds: UInt64(cooldown) * 1_000_000_000)
+                }
+            }
+        }
+
+        let finalPass = totalEvaluated > 0 ? Double(finalCorrectCount) / Double(totalEvaluated) * 100.0 : 0.0
+        let everPass = totalEvaluated > 0 ? Double(everCorrectCount) / Double(totalEvaluated) * 100.0 : 0.0
+        let gap = everPass - finalPass
+
+        print("====================================================")
+        print("     GSM8K TEMPORAL OSCILLATION BASELINE CHECK      ")
+        print("====================================================")
+        print(String(format: "Total Prompts Evaluated: %d", totalEvaluated))
+        print(String(format: "Final-Pass@1 Accuracy:   %.2f%% (%d / %d)", finalPass, finalCorrectCount, totalEvaluated))
+        print(String(format: "Ever-Pass@1 Accuracy:    %.2f%% (%d / %d)", everPass, everCorrectCount, totalEvaluated))
+        print(String(format: "Temporal Oscillation Gap: +%.2f%%", gap))
+        print("====================================================")
+
+        let resultsMeta: [String: Any] = [
+            "totalEvaluated": totalEvaluated,
+            "finalPassAccuracy": finalPass,
+            "everPassAccuracy": everPass,
+            "oscillationGap": gap,
+            "details": details
+        ]
+        let resultsJSONPath = "\(repoRoot)/scratch/baseline_check_results.json"
+        if let data = try? JSONSerialization.data(withJSONObject: resultsMeta, options: [.prettyPrinted, .sortedKeys]) {
+            try? data.write(to: URL(fileURLWithPath: resultsJSONPath))
+            print("Saved detailed results to \(resultsJSONPath)")
+        }
+        return
     }
 
     // §6-item-4 quality diagnostic: same prompt, cache off, `.strict` vs `.referenceBias`;
