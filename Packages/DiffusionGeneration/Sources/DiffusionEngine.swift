@@ -611,6 +611,15 @@ public final class DiffusionEngine {
                 precondition(temp.count == B, "iceTemplate count must equal blockLength B")
                 for i in 0 ..< B {
                     initialActive[i] = Int32(temp[i])
+                    // Real prompt positions are prompt positions — not "frozen generated" tokens.
+                    // The scaffold template ids (e.g. "Step 1:") are the frozen ones (handled
+                    // below); keeping the two distinct makes `promptCount` — and therefore every
+                    // generated-position denominator (τ_add, τ_semi, dynamic τ) — correct if ICE
+                    // is ever composed past the single-block config.
+                    let global = blockStart + i
+                    if global < promptLength {
+                        promptMaskLocal[i] = true
+                    }
                 }
             } else {
                 for i in 0 ..< B {
@@ -625,7 +634,10 @@ public final class DiffusionEngine {
             let activeArray = MLXArray(initialActive).reshaped(1, B)
             let frozenMaskArray: MLXArray
             if iceTemplate != nil, numBlock == prefillBlocks {
-                let isFrozen = initialActive.map { $0 != maskId }
+                // Freeze the scaffold (non-mask, non-prompt template ids). Prompt positions are
+                // protected via `promptMask`; both are excluded from Δ-editing, but only the
+                // scaffold is a "frozen" slot for JOT / capacity-gather purposes.
+                let isFrozen = zip(initialActive, promptMaskLocal).map { $0 != maskId && !$1 }
                 frozenMaskArray = MLXArray(isFrozen).reshaped(1, B)
             } else {
                 frozenMaskArray = MLXArray.zeros([1, B], dtype: .bool)
@@ -1254,39 +1266,41 @@ public final class DiffusionEngine {
         let window = prefixLen > 0 ? concatenated([prefix, windowActive], axis: 1) : windowActive
         let logits = forward(window, A, params.jotEnabled ? frozenMask : nil)                     // [1, A, V] FP32
 
-        let probs: MLXArray
-        let x0: MLXArray
-        let x0p: MLXArray
-        let nextCredit: MLXArray?
+        // Raw model predictions. These govern EDITING (Δ), JOT freezing, the ICE answer-
+        // confidence signal, and every diagnostic — none of which credit is allowed to bias.
+        let probs = softmax(logits, axis: -1)
+        let x0 = argMax(logits, axis: -1).asType(.int32)
+        let x0p = probs.max(axis: -1)
 
+        // Credit Decoding (WP-4d, dInfer arXiv:2510.01239). Accumulate stability credit for each
+        // position's top candidate and boost that candidate's logit. Per the source, the boost
+        // governs the UNMASKING (Γ) pathway ONLY: `unmaskConf` sets a masked position's confidence
+        // for the τ_mask test and `unmaskTok` is the token written when it unmasks. Δ-editing,
+        // JOT freezing, the ICE answer signal, and diagnostics stay on the raw predictions above,
+        // so credit never re-biases an already-decoded position (a deliberate deviation from a
+        // naive all-logits boost — recorded in phase-4 §WP-4d).
+        let unmaskConf: MLXArray
+        let unmaskTok: MLXArray
+        let nextCredit: MLXArray?
         if params.creditDecodingEnabled {
             let currentCredit = credit ?? MLXArray.zeros([1, A, model.config.vocabSize], dtype: .float32)
-            
-            // Raw predictions for updating the credit
-            let rawProbs = softmax(logits, axis: -1)
-            let rawX0 = argMax(logits, axis: -1).asType(.int32)
-            let rawX0p = rawProbs.max(axis: -1)
-            
-            // Update credit matrix
             let decayed = currentCredit * params.creditBeta
-            let boost = pow(rawX0p, params.creditGamma)
+            let boost = pow(x0p, params.creditGamma)
             let vocabIndices = arange(model.config.vocabSize, dtype: .int32).reshaped([1, 1, model.config.vocabSize])
-            let mask = (rawX0.expandedDimensions(axis: -1) .== vocabIndices).asType(.float32)
-            let updatedCredit = decayed + mask * boost.expandedDimensions(axis: -1)
+            // Localized one-hot broadcast — never materialize a [V, V] identity (V ≈ 157k).
+            let oneHot = (x0.expandedDimensions(axis: -1) .== vocabIndices).asType(.float32)
+            let updatedCredit = decayed + oneHot * boost.expandedDimensions(axis: -1)
             nextCredit = updatedCredit
-            
-            // Logits enhancement: f_tilde = f + alpha * log1p(C)
+            // f_tilde = f + alpha * log1p(C). The enhanced argmax may flip to an earlier-consensus
+            // token (the point of credit), so unmaskTok is not necessarily the raw argmax.
             let enhancedLogits = logits + params.creditAlpha * updatedCredit.log1p()
-            
-            // Probs, x0, x0p from enhanced logits
-            probs = softmax(enhancedLogits, axis: -1)
-            x0 = argMax(enhancedLogits, axis: -1).asType(.int32)
-            x0p = probs.max(axis: -1)
+            let enhancedProbs = softmax(enhancedLogits, axis: -1)
+            unmaskTok = argMax(enhancedLogits, axis: -1).asType(.int32)
+            unmaskConf = enhancedProbs.max(axis: -1)
         } else {
             nextCredit = nil
-            probs = softmax(logits, axis: -1)
-            x0 = argMax(logits, axis: -1).asType(.int32)
-            x0p = probs.max(axis: -1)
+            unmaskConf = x0p
+            unmaskTok = x0
         }
 
         let avgConfAnswer: MLXArray
@@ -1303,16 +1317,23 @@ public final class DiffusionEngine {
         }
 
         let negInf = MLXArray(-Float.infinity)
-        let maskConf = which(activeMask, x0p, negInf)       // [1, A]
+        // Γ (masked-position) confidence uses the credit-enhanced value; every other consumer of
+        // confidence below uses raw x0p (unmaskConf == x0p when credit is disabled).
+        let maskConf = which(activeMask, unmaskConf, negInf)       // [1, A]
         let positionsB = MLXArray(0 ..< Int32(slotLen)).reshaped(1, slotLen)
 
         let gamma: MLXArray            // [1, A] positions written from writeTok this step
         let writeTok: MLXArray         // [1, A] token source (x0, or verifier correction)
         var specAcceptedCount = MLXArray(Float(0))
 
+        // Γ writes the (credit-enhanced) unmask token on masked positions; Δ/JOT writes on
+        // unmasked positions keep the raw x0 (the two sets are disjoint). Identity when credit
+        // is off, since unmaskTok == x0 there.
+        let gammaWriteTok = which(activeMask, unmaskTok, x0)
+
         if isAnswerPhase {
             gamma = activeMask
-            writeTok = x0
+            writeTok = gammaWriteTok
         } else if let verifierForward, S == 1 {
             // WP-2a S2D2 self-verification (arXiv:2603.25702 Alg. 3, temp-0 greedy): draft the
             // first contiguous masked span C_t from this forward's x0, verify with one 2B-wide
@@ -1397,7 +1418,7 @@ public final class DiffusionEngine {
                 }
             }
             gamma = S == 1 ? slotGammas[0] : concatenated(slotGammas, axis: -1)  // [1, A]
-            writeTok = x0
+            writeTok = gammaWriteTok
         }
 
         // Δ (T2T) over the whole window: unmasked, non-prompt positions clearing τ_edit whose
