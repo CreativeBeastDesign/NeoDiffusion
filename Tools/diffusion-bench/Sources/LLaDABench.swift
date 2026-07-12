@@ -433,26 +433,30 @@ func runLLaDABench() async throws {
         
         var p = GenerationParams.mode(
             mode, blockLength: effBlockLen, genLength: genLength,
-            maskId: tokenizer.maskId, eosId: tokenizer.eosId, eosEarlyStop: eosEarlyStop,
-            nBuf: nBuf, tauAdd: tauAdd, tauSemi: tauSemi,
-            speculation: speculation, tauSpan: tauSpan,
-            dynamicTauAlpha: dynTauAlpha, eosEarlyExit: eosEarlyExit,
-            elasticCacheEnabled: elasticCache, elasticGamma: elasticGamma, elasticBeta: elasticBeta,
-            elasticStaticBoundary: elasticStaticBoundary,
-            jotEnabled: jotEnabled, jotK: jotK, jotThreshold: jotThreshold,
-            jotFaithful: jotFaithful, moeCapacityRatio: moeCapacityRatio,
-            subBlockCommit: subBlockCommit, subBlockMinPrefix: subBlockMinPrefix,
-            temporalVotingEnabled: temporalVotingOverride ?? temporalVoting,
-            temporalVotingAlpha: votingAlpha,
-            temporalVotingCutoff: votingCutoff,
-            iceEnabled: effIceEnabled,
-            iceTau: iceTauOverride ?? iceTau,
-            iceNt: effIceNt,
-            iceThinkingLength: pLen + effIceNt * 32,
-            creditDecodingEnabled: creditDecodingEnabled,
-            creditAlpha: creditAlpha,
-            creditBeta: creditBeta,
-            creditGamma: creditGamma)
+            maskId: tokenizer.maskId, eosId: tokenizer.eosId, eosEarlyStop: eosEarlyStop)
+        // MultiBD (WP-1b)
+        p.nBuf = nBuf; p.tauAdd = tauAdd; p.tauSemi = tauSemi
+        // Speculation (WP-2a)
+        p.speculation = speculation; p.tauSpan = tauSpan
+        // Dynamic-τ / EOS early exit (WP-2b)
+        p.dynamicTauAlpha = dynTauAlpha; p.eosEarlyExit = eosEarlyExit
+        // Elastic-Cache (WP-1a)
+        p.elasticCacheEnabled = elasticCache; p.elasticGamma = elasticGamma
+        p.elasticBeta = elasticBeta; p.elasticStaticBoundary = elasticStaticBoundary
+        // JOT (WP-3a)
+        p.jotEnabled = jotEnabled; p.jotK = jotK; p.jotThreshold = jotThreshold
+        p.jotFaithful = jotFaithful; p.moeCapacityRatio = moeCapacityRatio
+        p.subBlockCommit = subBlockCommit; p.subBlockMinPrefix = subBlockMinPrefix
+        // Temporal voting (WP-4a)
+        p.temporalVotingEnabled = temporalVotingOverride ?? temporalVoting
+        p.temporalVotingAlpha = votingAlpha; p.temporalVotingCutoff = votingCutoff
+        // ICE (WP-4c)
+        p.iceEnabled = effIceEnabled; p.iceTau = iceTauOverride ?? iceTau
+        p.iceNt = effIceNt; p.iceThinkingLength = pLen + effIceNt * 32
+        // Credit decoding (WP-4d)
+        p.creditDecodingEnabled = creditDecodingEnabled; p.creditAlpha = creditAlpha
+        p.creditBeta = creditBeta; p.creditGamma = creditGamma
+        // Threshold overrides
         if let t = thresholdMaskOverride { p.threshold = t }
         if let t = thresholdEditOverride { p.editingThreshold = t }
         return p

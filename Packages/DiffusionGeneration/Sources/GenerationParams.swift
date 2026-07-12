@@ -246,8 +246,11 @@ public struct GenerationParams: Sendable, Equatable {
         }
     }
 
-    /// Build params for a served mode, filling the card thresholds and leaving the rest to
-    /// caller-supplied values (block length, gen length, special ids come from the model/config).
+    /// Build params for a served mode: fills the card thresholds and the core decoding knobs, and
+    /// leaves every optional feature (MultiBD / speculation / dynamic-τ / elastic / JOT / ICE /
+    /// credit / temporal voting) at its `init` default. Callers that want a feature set the
+    /// corresponding field on the returned value — e.g. `var p = .mode(.q, …); p.creditAlpha = 1`.
+    /// This keeps the factory small and means adding a WP touches only `init`, not this signature.
     public static func mode(
         _ mode: Mode,
         blockLength: Int,
@@ -257,36 +260,7 @@ public struct GenerationParams: Sendable, Equatable {
         maxPostSteps: Int = 16,
         numToTransfer: Int = 1,
         eosEarlyStop: Bool = false,
-        temperature: Float = 0.0,
-        nBuf: Int = 1,
-        tauAdd: Float = 2.0,
-        tauSemi: Float = 0.9,
-        speculation: SpeculationKind = .none,
-        tauSpan: Int = 1,
-        dynamicTauAlpha: Float = 0.0,
-        eosEarlyExit: Bool = false,
-        elasticCacheEnabled: Bool = false,
-        elasticGamma: Float = 0.9,
-        elasticBeta: Int = 16,
-        elasticStaticBoundary: Int? = nil,
-        jotEnabled: Bool = false,
-        jotK: Int = 2,
-        jotThreshold: Float = 0.9,
-        jotFaithful: Bool = false,
-        moeCapacityRatio: Float = 0,
-        subBlockCommit: Bool = false,
-        subBlockMinPrefix: Int = 8,
-        temporalVotingEnabled: Bool = false,
-        temporalVotingAlpha: Float = 0.0,
-        temporalVotingCutoff: Float = 0.9,
-        iceEnabled: Bool = false,
-        iceTau: Float = 0.9,
-        iceNt: Int = 3,
-        iceThinkingLength: Int = 96,
-        creditDecodingEnabled: Bool = false,
-        creditAlpha: Float = 0.5,
-        creditBeta: Float = 0.9,
-        creditGamma: Float = 0.5
+        temperature: Float = 0.0
     ) -> GenerationParams {
         let (mask, edit) = mode.thresholds
         return GenerationParams(
@@ -299,36 +273,7 @@ public struct GenerationParams: Sendable, Equatable {
             blockLength: blockLength,
             genLength: genLength,
             maskId: maskId,
-            eosId: eosId,
-            nBuf: nBuf,
-            tauAdd: tauAdd,
-            tauSemi: tauSemi,
-            speculation: speculation,
-            tauSpan: tauSpan,
-            dynamicTauAlpha: dynamicTauAlpha,
-            eosEarlyExit: eosEarlyExit,
-            elasticCacheEnabled: elasticCacheEnabled,
-            elasticGamma: elasticGamma,
-            elasticBeta: elasticBeta,
-            elasticStaticBoundary: elasticStaticBoundary,
-            jotEnabled: jotEnabled,
-            jotK: jotK,
-            jotThreshold: jotThreshold,
-            jotFaithful: jotFaithful,
-            moeCapacityRatio: moeCapacityRatio,
-            subBlockCommit: subBlockCommit,
-            subBlockMinPrefix: subBlockMinPrefix,
-            temporalVotingEnabled: temporalVotingEnabled,
-            temporalVotingAlpha: temporalVotingAlpha,
-            temporalVotingCutoff: temporalVotingCutoff,
-            iceEnabled: iceEnabled,
-            iceTau: iceTau,
-            iceNt: iceNt,
-            iceThinkingLength: iceThinkingLength,
-            creditDecodingEnabled: creditDecodingEnabled,
-            creditAlpha: creditAlpha,
-            creditBeta: creditBeta,
-            creditGamma: creditGamma)
+            eosId: eosId)
     }
 }
 
