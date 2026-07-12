@@ -124,6 +124,13 @@ public struct GenerationParams: Sendable, Equatable {
     /// meant to be swept at larger `blockLength` where expert arithmetic dominates.
     public var moeCapacityRatio: Float
 
+    /// Whether Temporal Self-Consistency Voting is enabled.
+    public var temporalVotingEnabled: Bool
+    /// Decay parameter α for exponential step-weighting in voting.
+    public var temporalVotingAlpha: Float
+    /// Cutoff ratio (t_start) below which intermediate outputs are discarded.
+    public var temporalVotingCutoff: Float
+
     public init(
         threshold: Float,
         editingThreshold: Float,
@@ -152,7 +159,10 @@ public struct GenerationParams: Sendable, Equatable {
         jotFaithful: Bool = false,
         moeCapacityRatio: Float = 0,
         subBlockCommit: Bool = false,
-        subBlockMinPrefix: Int = 8
+        subBlockMinPrefix: Int = 8,
+        temporalVotingEnabled: Bool = false,
+        temporalVotingAlpha: Float = 0.0,
+        temporalVotingCutoff: Float = 0.9
     ) {
         self.threshold = threshold
         self.editingThreshold = editingThreshold
@@ -182,6 +192,9 @@ public struct GenerationParams: Sendable, Equatable {
         self.moeCapacityRatio = moeCapacityRatio
         self.subBlockCommit = subBlockCommit
         self.subBlockMinPrefix = subBlockMinPrefix
+        self.temporalVotingEnabled = temporalVotingEnabled
+        self.temporalVotingAlpha = temporalVotingAlpha
+        self.temporalVotingCutoff = temporalVotingCutoff
     }
 
     /// The two served modes from the LLaDA2.1-mini model card (phase-2 §1, gotcha 10).
@@ -228,7 +241,10 @@ public struct GenerationParams: Sendable, Equatable {
         jotFaithful: Bool = false,
         moeCapacityRatio: Float = 0,
         subBlockCommit: Bool = false,
-        subBlockMinPrefix: Int = 8
+        subBlockMinPrefix: Int = 8,
+        temporalVotingEnabled: Bool = false,
+        temporalVotingAlpha: Float = 0.0,
+        temporalVotingCutoff: Float = 0.9
     ) -> GenerationParams {
         let (mask, edit) = mode.thresholds
         return GenerationParams(
@@ -259,6 +275,9 @@ public struct GenerationParams: Sendable, Equatable {
             jotFaithful: jotFaithful,
             moeCapacityRatio: moeCapacityRatio,
             subBlockCommit: subBlockCommit,
-            subBlockMinPrefix: subBlockMinPrefix)
+            subBlockMinPrefix: subBlockMinPrefix,
+            temporalVotingEnabled: temporalVotingEnabled,
+            temporalVotingAlpha: temporalVotingAlpha,
+            temporalVotingCutoff: temporalVotingCutoff)
     }
 }

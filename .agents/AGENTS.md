@@ -8,6 +8,7 @@ Any agent working on the NeoDiffusion codebase must strictly adhere to the follo
   - **Inferred**: Derived logically or mathematically from sourced facts (e.g. subtracting sub-module timings to find attention overhead).
   - **Speculative**: An educated guess or hypothesis that has not yet been measured or proven.
 - **Document Negative Results**: Never delete failed experiments or optimization paths from the planning/logbook history. Document them with the same structure and metric precision as successful arms. Record them in the appropriate logbooks (e.g., `Plans/elastic-cache-logbook.md`) as negative results.
+- **Write Wiki Drafts**: After completing any experiment or optimization work package (successful or negative), the agent must write a corresponding wiki draft document under `Plans/wiki-drafts/` (e.g. `wp-4a-temporal-self-consistency-voting.md`) summarizing what was built, the results, key findings, and recurring lessons learned.
 
 ## 2. "Paranoid" Benchmarking & Logging
 - **Environment Validity (`envValid`)**: On Apple Silicon, background processes, memory pressure, thermal throttling, and macOS paging inject severe timing anomalies (e.g., a ~50s/forward swap pathology on 16GB machines).

@@ -92,6 +92,26 @@ public final class DiffusionEngine {
         /// the per-phase wall-clocks are only *real* when the engine was built with
         /// `instrument: true` (otherwise lazy evaluation blurs phase attribution).
         public let metrics: Metrics
+        /// The sequence of tokens at each applied logical step (optional, collected if enabled).
+        public let trajectorySequences: [[Int]]?
+
+        public init(
+            tokens: [Int],
+            finalSequence: [Int],
+            blockCommits: [[Int]],
+            stepsPerBlock: [Int],
+            syncPoints: Int,
+            metrics: Metrics,
+            trajectorySequences: [[Int]]? = nil
+        ) {
+            self.tokens = tokens
+            self.finalSequence = finalSequence
+            self.blockCommits = blockCommits
+            self.stepsPerBlock = stepsPerBlock
+            self.syncPoints = syncPoints
+            self.metrics = metrics
+            self.trajectorySequences = trajectorySequences
+        }
     }
 
     /// Per-run diagnostics for the M6 metric set.
@@ -538,6 +558,16 @@ public final class DiffusionEngine {
         var postStepsPerBlock: [Int] = []
         var denoiseForwards = 0
         var denoiseSeconds = 0.0
+
+        var trajectorySequences: [[Int]] = []
+        let originalOnTrace = self.onTrace
+        if params.temporalVotingEnabled {
+            self.onTrace = { trace in
+                let active = trace.argmaxToken
+                trajectorySequences.append(committedIds + active)
+                originalOnTrace?(trace)
+            }
+        }
         var commitSeconds = 0.0
         var transfersPerStep: [[Int]] = []
         var editsPerStep: [[Int]] = []
@@ -730,6 +760,10 @@ public final class DiffusionEngine {
         let firstEos = generated.firstIndex(of: params.eosId) ?? params.genLength
         let tokens = Array(generated.prefix(firstEos + 1))
 
+        if params.temporalVotingEnabled {
+            self.onTrace = originalOnTrace
+        }
+
         return Output(
             tokens: tokens,
             finalSequence: committedIds,
@@ -767,7 +801,8 @@ public final class DiffusionEngine {
                 effectiveJotThreshold: params.jotThreshold,
                 effectiveJotFaithful: params.jotEnabled && params.jotFaithful,
                 effectiveMoeCapacityRatio: (params.jotEnabled && params.jotFaithful)
-                    ? params.moeCapacityRatio : 0))
+                    ? params.moeCapacityRatio : 0),
+            trajectorySequences: params.temporalVotingEnabled ? trajectorySequences : nil)
     }
 
     // MARK: - Per-phase denoising with K-step speculative readback

@@ -244,6 +244,9 @@ func runLLaDABench() async throws {
     let eosEarlyStop = !hasFlag("--no-early-stop")
     let instrument = !hasFlag("--no-instrument")
     let maskDiagnostic = hasFlag("--mask-diagnostic")
+    var temporalVoting = hasFlag("--temporal-voting")
+    let votingAlpha = Float(argValue("--voting-alpha") ?? "0.0") ?? 0.0
+    let votingCutoff = Float(argValue("--voting-cutoff") ?? "0.9") ?? 0.9
     
     let elasticCache = hasFlag("--elastic-cache")
     let elasticGamma = Float(argValue("--elastic-gamma") ?? "0.9") ?? 0.9
@@ -400,7 +403,10 @@ func runLLaDABench() async throws {
             elasticStaticBoundary: elasticStaticBoundary,
             jotEnabled: jotEnabled, jotK: jotK, jotThreshold: jotThreshold,
             jotFaithful: jotFaithful, moeCapacityRatio: moeCapacityRatio,
-            subBlockCommit: subBlockCommit, subBlockMinPrefix: subBlockMinPrefix)
+            subBlockCommit: subBlockCommit, subBlockMinPrefix: subBlockMinPrefix,
+            temporalVotingEnabled: temporalVoting,
+            temporalVotingAlpha: votingAlpha,
+            temporalVotingCutoff: votingCutoff)
         if let t = thresholdMaskOverride { p.threshold = t }
         if let t = thresholdEditOverride { p.editingThreshold = t }
         return p
@@ -435,13 +441,64 @@ func runLLaDABench() async throws {
             : engine.generate(prompt: promptIds, params: params(for: arm.mode),
                               maskSemantics: arm.mask, streamBlock: logBlock)
         let seconds = Date().timeIntervalSince(start)
+        var finalOutput = output
+        if temporalVoting, !baselineCheck, let trajectory = output.trajectorySequences, !trajectory.isEmpty {
+            let T = trajectory.count
+            let startIdx = Int(Float(T) * votingCutoff)
+            if startIdx < T {
+                var answerWeights: [String: Double] = [:]
+                var answerToStep: [String: Int] = [:]
+                for t in startIdx ..< T {
+                    let seq = trajectory[t]
+                    let decoded = tokenizer.decode(tokens: seq)
+                    if let answer = extractLastNumber(from: decoded) {
+                        let weight: Double
+                        if votingAlpha == 0.0 {
+                            weight = 1.0
+                        } else {
+                            let stepFraction = Float(t) / Float(T)
+                            weight = exp(Double(votingAlpha) * Double(1.0 - stepFraction))
+                        }
+                        answerWeights[answer, default: 0.0] += weight
+                        if answerToStep[answer] == nil {
+                            answerToStep[answer] = t
+                        }
+                    }
+                }
+                if let winningAnswer = answerWeights.max(by: { $0.value < $1.value })?.key,
+                   let winningStepIdx = answerToStep[winningAnswer] {
+                    let winningSeq = trajectory[winningStepIdx]
+                    let promptLength = promptIds.count
+                    if winningSeq.count > promptLength {
+                        let generated = Array(winningSeq[promptLength...])
+                        let genEnd = min(genLength, generated.count)
+                        let generatedSlice = Array(generated[0 ..< genEnd])
+                        let firstEos = generatedSlice.firstIndex(of: tokenizer.eosId) ?? genLength
+                        let votedTokens = Array(generatedSlice.prefix(firstEos + 1))
+                        
+                        finalOutput = DiffusionEngine.Output(
+                            tokens: votedTokens,
+                            finalSequence: winningSeq,
+                            blockCommits: output.blockCommits,
+                            stepsPerBlock: output.stepsPerBlock,
+                            syncPoints: output.syncPoints,
+                            metrics: output.metrics,
+                            trajectorySequences: output.trajectorySequences
+                        )
+                        print(String(format: "      [TSCV] Voted answer: '%@' (weight %.2f, step %d/%d) vs final: '%@'",
+                                     winningAnswer, answerWeights[winningAnswer] ?? 0.0, winningStepIdx, T,
+                                     extractLastNumber(from: tokenizer.decode(tokens: output.tokens)) ?? "N/A"))
+                    }
+                }
+            }
+        }
         let env = EnvSnapshot(
             swapUsedMBBefore: swapBefore,
             swapUsedMBAfter: swapUsedMB(),
             freeMemoryMBBefore: freeBefore,
             thermalBefore: thermalBefore,
             thermalAfter: thermalStateName())
-        return (output, seconds, Double(GPU.peakMemory) / 1_073_741_824, env, warmup)
+        return (finalOutput, seconds, Double(GPU.peakMemory) / 1_073_741_824, env, warmup)
     }
 
     func encodePrompt(_ user: String) throws -> [Int] {
@@ -563,11 +620,16 @@ func runLLaDABench() async throws {
 
     // Baseline check execution path
     if baselineCheck {
-        print("---- starting GSM8K Temporal Oscillation Baseline Check ----")
+        temporalVoting = true
+        print("---- starting GSM8K Temporal Oscillation Baseline Check & TSCV Param Sweep ----")
         var totalEvaluated = 0
         var finalCorrectCount = 0
         var everCorrectCount = 0
         var details: [[String: Any]] = []
+
+        let alphas: [Float] = [0.0, 0.2, 0.5, 1.0, 2.0]
+        let cutoffs: [Float] = [0.5, 0.6, 0.7, 0.8, 0.9]
+        var gridCorrectCounts: [String: Int] = [:]
 
         var currentExpectedAnswer = ""
         var currentStepAnswers: [String] = []
@@ -619,6 +681,33 @@ func runLLaDABench() async throws {
                 if isFinalCorrect { finalCorrectCount += 1 }
                 if wasEverCorrect { everCorrectCount += 1 }
 
+                // Evaluate all alpha/cutoff combinations post-hoc on the collected trajectory
+                if let trajectory = output.trajectorySequences, !trajectory.isEmpty {
+                    let T = trajectory.count
+                    for alpha in alphas {
+                        for cutoff in cutoffs {
+                            let startIdx = Int(Float(T) * cutoff)
+                            if startIdx < T {
+                                var answerWeights: [String: Double] = [:]
+                                for t in startIdx ..< T {
+                                    let seq = trajectory[t]
+                                    let decoded = tokenizer.decode(tokens: seq)
+                                    if let answer = extractLastNumber(from: decoded) {
+                                        let stepFraction = Float(t) / Float(T)
+                                        let weight = exp(Double(alpha) * Double(1.0 - stepFraction))
+                                        answerWeights[answer, default: 0.0] += weight
+                                    }
+                                }
+                                let votedAnswer = answerWeights.max(by: { $0.value < $1.value })?.key ?? "N/A"
+                                if votedAnswer == expected {
+                                    let key = String(format: "%.1f_%.1f", alpha, cutoff)
+                                    gridCorrectCounts[key, default: 0] += 1
+                                }
+                            }
+                        }
+                    }
+                }
+
                 print(String(
                     format: "[%@] Final: %@ | Expected: %@ | Correct: %@ | Ever Correct: %@ | Steps: %d | Time: %.1fs",
                     prompt.id, finalAnswer, expected, isFinalCorrect ? "Yes" : "No", wasEverCorrect ? "Yes" : "No",
@@ -653,18 +742,45 @@ func runLLaDABench() async throws {
         print(String(format: "Ever-Pass@1 Accuracy:    %.2f%% (%d / %d)", everPass, everCorrectCount, totalEvaluated))
         print(String(format: "Temporal Oscillation Gap: +%.2f%%", gap))
         print("====================================================")
+        print("")
+        print("====================================================")
+        print("     TSCV PARAMETER SWEEP ACCURACY GRID             ")
+        print("====================================================")
+        print("Alpha \\ Cutoff |  0.5  |  0.6  |  0.7  |  0.8  |  0.9  |")
+        print("------------------------------------------------------------")
+        for alpha in alphas {
+            var rowStr = String(format: "  alpha = %.1f   |", alpha)
+            for cutoff in cutoffs {
+                let key = String(format: "%.1f_%.1f", alpha, cutoff)
+                let count = gridCorrectCounts[key, default: 0]
+                let acc = totalEvaluated > 0 ? Double(count) / Double(totalEvaluated) * 100.0 : 0.0
+                rowStr += String(format: " %5.2f%% |", acc)
+            }
+            print(rowStr)
+        }
+        print("====================================================")
+
+        var gridResults: [String: Double] = [:]
+        for alpha in alphas {
+            for cutoff in cutoffs {
+                let key = String(format: "%.1f_%.1f", alpha, cutoff)
+                let count = gridCorrectCounts[key, default: 0]
+                gridResults[key] = totalEvaluated > 0 ? Double(count) / Double(totalEvaluated) * 100.0 : 0.0
+            }
+        }
 
         let resultsMeta: [String: Any] = [
             "totalEvaluated": totalEvaluated,
             "finalPassAccuracy": finalPass,
             "everPassAccuracy": everPass,
             "oscillationGap": gap,
+            "sweepGrid": gridResults,
             "details": details
         ]
         let resultsJSONPath = "\(repoRoot)/scratch/baseline_check_results.json"
         if let data = try? JSONSerialization.data(withJSONObject: resultsMeta, options: [.prettyPrinted, .sortedKeys]) {
             try? data.write(to: URL(fileURLWithPath: resultsJSONPath))
-            print("Saved detailed results to \(resultsJSONPath)")
+            print("Saved detailed results and parameter sweep to \(resultsJSONPath)")
         }
         return
     }
