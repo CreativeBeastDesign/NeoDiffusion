@@ -11,6 +11,7 @@ Any agent working on the NeoDiffusion codebase must strictly adhere to the follo
 - **Write Wiki Drafts**: After completing any experiment or optimization work package (successful or negative), the agent must write a corresponding wiki draft document under `Plans/wiki-drafts/` (e.g. `wp-4a-temporal-self-consistency-voting.md`) summarizing what was built, the results, key findings, and recurring lessons learned.
 
 ## 2. "Paranoid" Benchmarking & Logging
+- **Provide Time Estimates**: Before launching any long-running benchmark, test suite, or generation task (e.g., runs taking more than a few seconds), the agent must output a clear time estimate to inform the user how long the task is expected to run.
 - **Environment Validity (`envValid`)**: On Apple Silicon, background processes, memory pressure, thermal throttling, and macOS paging inject severe timing anomalies (e.g., a ~50s/forward swap pathology on 16GB machines).
   - Every benchmark run must capture system telemetry (swap used before/after, free memory pages, and OS thermal state).
   - A benchmark row is only considered valid if:
