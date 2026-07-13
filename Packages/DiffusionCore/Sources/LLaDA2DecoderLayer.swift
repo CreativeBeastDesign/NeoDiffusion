@@ -66,17 +66,21 @@ public final class LLaDA2DecoderLayer: Module {
         return hidden
     }
 
-    /// Faithful-JOT cache-aware layer forward (WP-3a v2): attention holds frozen columns' K/V
+    /// Faithful-JOT cache-aware layer forward (WP-3a v2) + FlashBlock (WP-3b): attention holds frozen columns' K/V
     /// (`jot`) so finalized tokens contribute a constant representation to their neighbours; the
     /// MoE still skips frozen tokens (their FFN output is unused — Δ never edits a frozen position
     /// and the held K/V make the skipped hidden invisible downstream). Mirrors the M5 cached
     /// overload exactly but for the held-K/V attention path.
     public func callAsFunction(
         _ x: MLXArray, cos: MLXArray, sin: MLXArray, cache: LayerKVCache,
-        jot: LayerJotCache, frozen: MLXArray, mask: MLXArray? = nil, capacity: Int? = nil
+        jot: LayerJotCache, frozen: MLXArray, mask: MLXArray? = nil, capacity: Int? = nil,
+        flashBlockEnabled: Bool = false, flashBlockTau: Int = 4,
+        isFirstStepOfBlock: Bool = false, dirtyPerSeq: [Int] = [0]
     ) -> MLXArray {
         var hidden = x + attention(
-            inputLayernorm(x), cos: cos, sin: sin, cache: cache, jot: jot, frozen: frozen, mask: mask)
+            inputLayernorm(x), cos: cos, sin: sin, cache: cache, jot: jot, frozen: frozen, mask: mask,
+            flashBlockEnabled: flashBlockEnabled, flashBlockTau: flashBlockTau,
+            isFirstStepOfBlock: isFirstStepOfBlock, dirtyPerSeq: dirtyPerSeq)
         let ffnInput = postAttentionLayernorm(hidden)
         let ffnOutput: MLXArray
         switch mlp {

@@ -322,6 +322,14 @@ func runLLaDABench() async throws {
     precondition(!subBlockCommit || jotFaithful,
         "--sub-block-commit requires --jot-faithful (Option C keys off the JOT frozen prefix)")
 
+    // FlashBlock attention caching (WP-3b)
+    let flashBlockEnabled = hasFlag("--flashblock")
+    let flashBlockTau = Int(argValue("--flashblock-tau") ?? "4") ?? 4
+    precondition(!flashBlockEnabled || speculationK == 1,
+        "--flashblock requires --speculation-k 1 (Metal command queue runs synchronously)")
+    precondition(!flashBlockEnabled || !elasticCache,
+        "--flashblock and --elastic are mutually exclusive")
+
     // Prompt suites: fixed cases checked into Tools/diffusion-bench/PromptSuites (M6).
     // --prompt TEXT replaces them with a single ad-hoc case.
     var suites: [LLaDAPromptSuite]
@@ -447,6 +455,9 @@ func runLLaDABench() async throws {
         p.jotEnabled = jotEnabled; p.jotK = jotK; p.jotThreshold = jotThreshold
         p.jotFaithful = jotFaithful; p.moeCapacityRatio = moeCapacityRatio
         p.subBlockCommit = subBlockCommit; p.subBlockMinPrefix = subBlockMinPrefix
+        // FlashBlock (WP-3b)
+        p.flashBlockEnabled = flashBlockEnabled
+        p.flashBlockTau = flashBlockTau
         // Temporal voting (WP-4a)
         p.temporalVotingEnabled = temporalVotingOverride ?? temporalVoting
         p.temporalVotingAlpha = votingAlpha; p.temporalVotingCutoff = votingCutoff

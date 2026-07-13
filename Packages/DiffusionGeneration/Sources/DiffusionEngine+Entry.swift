@@ -65,16 +65,25 @@ extension DiffusionEngine {
         // speculative batch, and it manages the active window's K/V (mutually exclusive with
         // Elastic-Cache and with a two-block window).
         if params.jotEnabled && params.jotFaithful {
-            precondition(speculationK == 1,
+            precondition(self.speculationK == 1,
                 "faithful JOT requires speculationK == 1 — the frozen-K/V hold is not "
-                + "snapshot/rolled-back across a K>1 speculative batch. K=1 measures the "
-                + "K-invariant logical trajectory (the WP-3a algorithmic quantity).")
+                + "snapshot/rolled-back across a speculative batch.")
             precondition(!params.elasticCacheEnabled,
                 "faithful JOT and Elastic-Cache both manage the active-window K/V — enable at most one.")
             precondition(params.nBuf == 1,
                 "faithful JOT v1 supports a single active block (nBuf == 1).")
             precondition(params.speculation == .none,
                 "faithful JOT is not composed with S2D2 speculation (WP-3a v1 scope).")
+        }
+        if params.flashBlockEnabled {
+            precondition(self.speculationK == 1,
+                "FlashBlock requires speculationK == 1 — execution is synchronous on the Metal queue.")
+            precondition(params.speculation == .none,
+                "FlashBlock is not composed with speculation.")
+            precondition(params.nBuf == 1,
+                "FlashBlock integration currently supports a single active block (nBuf == 1).")
+            precondition(!params.elasticCacheEnabled,
+                "FlashBlock and Elastic-Cache cannot be enabled together.")
         }
         precondition(!params.subBlockCommit || (params.jotEnabled && params.jotFaithful),
             "sub-block prefix commit (Option C) requires faithful JOT (it keys off the frozen "
@@ -123,16 +132,27 @@ extension DiffusionEngine {
             let activeIds = windowIds[0..., (W - activeLen)...]
             let positionIds = MLXArray(Int32(W - activeLen) ..< Int32(W)).expandedDimensions(axis: 0)
 
-            // Faithful JOT (WP-3a v2): hold frozen columns' per-layer K/V so finalized tokens
-            // contribute a constant representation. Single active block only (guarded above).
-            if params.jotEnabled && params.jotFaithful, let frozen {
-                // Capacity-gather (WP-3a §10): ⌈ratio·activeLen⌉ static buffer for the MoE FLOP
-                // skip (nil ⇒ Option-A full-compute-then-mask). activeLen is a Swift Int here.
-                let capacity: Int? = params.moeCapacityRatio > 0
+            // Faithful JOT (WP-3a v2) / FlashBlock (WP-3b)
+            if params.flashBlockEnabled || (params.jotEnabled && params.jotFaithful) {
+                let frozenMaskVal = frozen ?? MLXArray.zeros([1, activeLen], dtype: .bool)
+                let capacity: Int? = (params.moeCapacityRatio > 0 && params.jotEnabled)
                     ? Int((params.moeCapacityRatio * Float(activeLen)).rounded(.up))
                     : nil
+                
+                let isFirstStep = (stepIndex == 0)
+                
+                let dirtyCount: Int
+                if let frozen {
+                    let dirtyMask = (MLXArray.ones(like: frozen) - frozen.asType(.int32))
+                    dirtyCount = Int(dirtyMask.sum().item(Int32.self))
+                } else {
+                    dirtyCount = activeLen
+                }
+                
                 return model(activeIds, positionIds: positionIds, caches: cache.layers,
-                             jotCaches: jotCache.layers, frozen: frozen, mask: nil, capacity: capacity)
+                             jotCaches: jotCache.layers, frozen: frozenMaskVal, mask: nil, capacity: capacity,
+                             flashBlockEnabled: params.flashBlockEnabled, flashBlockTau: params.flashBlockTau,
+                             isFirstStepOfBlock: isFirstStep, dirtyPerSeq: [dirtyCount])
             }
 
             // Elastic off (the served default): plain cached forward. The elastic overload

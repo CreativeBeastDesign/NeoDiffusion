@@ -22,3 +22,9 @@ for cfg in debug release; do
         mkdir -p "$xctest" && cp -R "$D" "$xctest/" && echo "  -> $xctest/"
     fi
 done
+
+echo "compiling FlashBlock.metal..."
+xcrun -sdk macosx metal -c FlashBlock.metal -o FlashBlock.air
+xcrun -sdk macosx metallib FlashBlock.air -o FlashBlock.metallib
+rm FlashBlock.air
+echo "FlashBlock compiled successfully."

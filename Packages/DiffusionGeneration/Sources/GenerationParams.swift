@@ -124,6 +124,11 @@ public struct GenerationParams: Sendable, Equatable {
     /// meant to be swept at larger `blockLength` where expert arithmetic dominates.
     public var moeCapacityRatio: Float
 
+    /// Whether FlashBlock attention caching is enabled.
+    public var flashBlockEnabled: Bool
+    /// Dirty token threshold for FlashBlock cache refresh.
+    public var flashBlockTau: Int
+
     /// Whether Temporal Self-Consistency Voting is enabled.
     public var temporalVotingEnabled: Bool
     /// Decay parameter α for exponential step-weighting in voting.
@@ -178,6 +183,8 @@ public struct GenerationParams: Sendable, Equatable {
         moeCapacityRatio: Float = 0,
         subBlockCommit: Bool = false,
         subBlockMinPrefix: Int = 8,
+        flashBlockEnabled: Bool = false,
+        flashBlockTau: Int = 4,
         temporalVotingEnabled: Bool = false,
         temporalVotingAlpha: Float = 0.0,
         temporalVotingCutoff: Float = 0.9,
@@ -218,6 +225,8 @@ public struct GenerationParams: Sendable, Equatable {
         self.moeCapacityRatio = moeCapacityRatio
         self.subBlockCommit = subBlockCommit
         self.subBlockMinPrefix = subBlockMinPrefix
+        self.flashBlockEnabled = flashBlockEnabled
+        self.flashBlockTau = flashBlockTau
         self.temporalVotingEnabled = temporalVotingEnabled
         self.temporalVotingAlpha = temporalVotingAlpha
         self.temporalVotingCutoff = temporalVotingCutoff

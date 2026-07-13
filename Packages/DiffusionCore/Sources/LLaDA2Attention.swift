@@ -1,6 +1,7 @@
 import Foundation
 import MLX
 import MLXNN
+import Metal
 
 /// Self-attention block matching the reference `LLaDA2MoeAttention` (phase-2 §2.3):
 /// fused QKV (split order 16 Q / 4 K / 4 V on the head axis), optional per-head-dim
@@ -129,30 +130,12 @@ public final class LLaDA2Attention: Module {
         return dense(output)
     }
 
-    /// Faithful-JOT cache-aware attention (WP-3a v2). Identical to the cached forward above,
-    /// except the active window's K/V for **frozen** columns are held at their pre-freeze value
-    /// (`jot`), so every other position attends to a *constant* contribution from finalized
-    /// tokens. This is the representation-consistency fix for the v1 FFN-zeroing cascade: v1 let a
-    /// frozen token's K/V drift every step; here they never change once frozen.
-    ///
-    /// Hold/capture rule (`frozen` is the *entering-step* mask, matching the value passed to the
-    /// forward): `activeKeys = which(frozen, jot.keys, freshKeys)`, then `jot.keys = activeKeys`.
-    /// A column that is still active (`frozen == false`) refreshes to its fresh K/V *and* is
-    /// captured; once it freezes (enters as `true` on the following step) the captured value is
-    /// held unchanged — i.e. exactly its last full-compute (converged) representation. A column
-    /// that later unfreezes resumes refreshing automatically. On the first step `jot` is empty and
-    /// every column takes the fresh value.
-    ///
-    /// The frozen column's *fresh* K/V (computed here from a hidden state whose MoE was skipped)
-    /// is never used — it is overwritten by the hold — so the MoE skip in
-    /// ``LLaDA2SparseMoEBlock`` stays harmless: the skipped hidden is invisible to neighbours.
-    ///
-    /// - Parameters:
-    ///   - jot: this layer's frozen-K/V hold, updated in place.
-    ///   - frozen: entering-step frozen mask `[1, L]` Bool over the active window.
+    /// Faithful-JOT cache-aware attention (WP-3a v2) + FlashBlock (WP-3b).
     public func callAsFunction(
         _ x: MLXArray, cos: MLXArray, sin: MLXArray, cache: LayerKVCache,
-        jot: LayerJotCache, frozen: MLXArray, mask: MLXArray? = nil
+        jot: LayerJotCache, frozen: MLXArray, mask: MLXArray? = nil,
+        flashBlockEnabled: Bool = false, flashBlockTau: Int = 4,
+        isFirstStepOfBlock: Bool = false, dirtyPerSeq: [Int] = [0]
     ) -> MLXArray {
         let B = x.dim(0)
         let L = x.dim(1)
@@ -182,6 +165,128 @@ public final class LLaDA2Attention: Module {
 
         cache.pendingKeys = activeKeys
         cache.pendingValues = activeValues
+
+        if flashBlockEnabled {
+            let device = MTLCreateSystemDefaultDevice()!
+            
+            // Lazy init FlashBlockRunner on the cache
+            if cache.flashBlockRunner == nil {
+                let repoRoot = FileManager.default.currentDirectoryPath
+                let libraryURL = URL(fileURLWithPath: "\(repoRoot)/FlashBlock.metallib")
+                let config = FlashBlockConfig(
+                    numSeqs: B,
+                    blockLen: L,
+                    numQHeads: numHeads,
+                    numKVHeads: numKVHeads,
+                    headDim: headDim,
+                    pageSize: 256,
+                    maxPagesPerSeq: 64,
+                    tau: flashBlockTau
+                )
+                do {
+                    cache.flashBlockRunner = try FlashBlockRunner(
+                        device: device,
+                        libraryURL: libraryURL,
+                        config: config
+                    )
+                    
+                    let maxPages = 64
+                    cache.blockTablesBuffer = device.makeBuffer(length: maxPages * MemoryLayout<UInt32>.size, options: .storageModeShared)
+                    if let table = cache.blockTablesBuffer?.contents().bindMemory(to: UInt32.self, capacity: maxPages) {
+                        for i in 0..<maxPages {
+                            table[i] = UInt32(i)
+                        }
+                    }
+                    cache.ctxLensBuffer = device.makeBuffer(length: MemoryLayout<Int32>.size, options: .storageModeShared)
+                } catch {
+                    fatalError("Failed to initialize FlashBlockRunner: \(error)")
+                }
+            }
+            
+            guard let runner = cache.flashBlockRunner else {
+                fatalError("FlashBlockRunner is nil")
+            }
+            
+            // Transpose inputs to FlashBlock layout: [Nq, H, D] where Nq = B * L
+            let qContiguous = queries.transposed(0, 2, 1, 3).reshaped(B * L, numHeads, headDim).contiguous()
+            let kContiguous = activeKeys.transposed(0, 2, 1, 3).reshaped(B * L, numKVHeads, headDim).contiguous()
+            let vContiguous = activeValues.transposed(0, 2, 1, 3).reshaped(B * L, numKVHeads, headDim).contiguous()
+            
+            // Get MTLBuffers
+            guard let qBuf = qContiguous.asMTLBuffer(device: device, noCopy: true),
+                  let kBuf = kContiguous.asMTLBuffer(device: device, noCopy: true),
+                  let vBuf = vContiguous.asMTLBuffer(device: device, noCopy: true) else {
+                fatalError("Failed to get MTLBuffer for Q/K/V")
+            }
+            
+            // Get caches
+            let committedLen = cache.committedLength
+            guard committedLen > 0, let cacheKeys = cache.keys, let cacheValues = cache.values else {
+                fatalError("ExactPrefixCache keys/values are empty but we are in decoding loop")
+            }
+            
+            let cacheKeysContiguous = cacheKeys.transposed(0, 2, 1, 3).reshaped(committedLen, numKVHeads, headDim).contiguous()
+            let cacheValuesContiguous = cacheValues.transposed(0, 2, 1, 3).reshaped(committedLen, numKVHeads, headDim).contiguous()
+            
+            guard let cacheKBuf = cacheKeysContiguous.asMTLBuffer(device: device, noCopy: true),
+                  let cacheVBuf = cacheValuesContiguous.asMTLBuffer(device: device, noCopy: true) else {
+                fatalError("Failed to get MTLBuffer for cache K/V")
+            }
+            
+            // Bind references
+            runner.kCache = cacheKBuf
+            runner.vCache = cacheVBuf
+            runner.blockTables = cache.blockTablesBuffer
+            
+            // Write ctx lens
+            if let ctxLensPtr = cache.ctxLensBuffer?.contents().bindMemory(to: Int32.self, capacity: 1) {
+                ctxLensPtr[0] = Int32(committedLen)
+            }
+            runner.ctxLens = cache.ctxLensBuffer
+            
+            // Populate dirty mask: dirty_mask is uchar [numSeqs * blockLen]
+            // We set it to 1 - frozen Mask. frozen is shape [1, L] Bool
+            let dirtyMaskArray = (MLXArray.ones(like: frozen) - frozen.asType(.int32)).asType(.uint8)
+            let dirtyVals = dirtyMaskArray.asArray(UInt8.self)
+            let destPtr = runner.dirtyMask.contents().bindMemory(to: UInt8.self, capacity: L)
+            for i in 0..<L {
+                destPtr[i] = dirtyVals[i]
+            }
+            
+            // Allocate output array and get its buffer
+            let outputArray = MLXArray.zeros([B * L, numHeads, headDim], dtype: queries.dtype)
+            guard let outputBuf = outputArray.asMTLBuffer(device: device, noCopy: true) else {
+                fatalError("Failed to allocate output MTLBuffer")
+            }
+            
+            // Decide step kind
+            let stepKind = runner.chooseStepKind(dirtyPerSeq: dirtyPerSeq, isFirstStepOfBlock: isFirstStepOfBlock)
+            
+            // Create command buffer, encode, commit and wait
+            guard let cb = runner.queue.makeCommandBuffer() else {
+                fatalError("Failed to create MTLCommandBuffer")
+            }
+            
+            runner.encode(
+                commandBuffer: cb,
+                kind: stepKind,
+                Q: qBuf,
+                Kcur: kBuf,
+                Vcur: vBuf,
+                output: outputBuf,
+                useDirtyGate: true
+            )
+            
+            // Wait for GPU stream synchronization before we launch our command buffer
+            Stream.gpu.synchronize()
+            
+            cb.commit()
+            cb.waitUntilCompleted()
+            
+            // Wrap the output back into the expected MLX array shape [B, L, H * D]
+            let output = outputArray.reshaped(B, L, numHeads * headDim)
+            return dense(output)
+        }
 
         let attended = Self.attend(
             queries: queries, keys: keys, values: values, scale: scale, mask: mask)
