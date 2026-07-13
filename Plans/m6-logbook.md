@@ -223,3 +223,35 @@ steps/block at slightly higher post-step churn — a real but modest speed win a
    an immediate rerun (same process) is the cheap contamination check. Studio re-run is
    the definitive gate.
 
+## 6. Mac Studio M2 Ultra Baseline (Mac14,14) — Frozen 2026-07-13
+
+Following target hardware migration, the M6 baseline was re-frozen on the Mac Studio M2 Ultra (192 GB RAM).
+
+### Methods & Environment
+- **Command**: `.build/arm64-apple-macosx/release/diffusion-bench llada --runs 3 --cooldown 2`
+- **Host**: Mac Studio M2 Ultra (`Mac14,14`), macOS 15.0, 192 GB Unified Memory.
+- **Dtype**: 4-bit group-64 affine quantized model (lm_head 16-bit).
+- **Environment state**: `envValid: true` (stable swap at 3.19 MB, free memory ~120 GB, OS thermal `nominal`).
+
+### Frozen Target Baseline (totals across 12 prompts, warmup excluded)
+
+| Arm | Suite totals (12 prompts) | Within-proc dev | Cross-run gate (<5%) |
+|---|---|---|---|
+| q-cached | 20s / 20s / 20s | 0.6% | **PASS 0.6%** |
+| s-cached | 18s / 18s / 18s | 0.1% | **PASS 0.1%** |
+
+### Per-suite steady rates (clean runs, Mac Studio M2 Ultra)
+
+| Arm | Suite | tok/s (min–max) | TPF logical | TPF honest | steps/blk | post/blk |
+|---|---|---|---|---|---|---|
+| q-cached | chat | 32.4–69.2 | 1.95 | 1.62 | 13.3 | 1.2 |
+| q-cached | reasoning | 37.7–108.4 | 3.54 | 2.48 | 8.1 | 1.2 |
+| q-cached | code | 68.9–108.4 | 4.79 | 3.24 | 5.6 | 1.2 |
+| s-cached | chat | 32.1–69.1 | 2.04 | 1.70 | 12.7 | 2.0 |
+| s-cached | reasoning | 57.5–121.8 | 4.73 | 3.20 | 5.3 | 1.2 |
+| s-cached | code | 80.5–122.6 | 6.22 | 3.77 | 4.3 | 1.4 |
+
+### Findings & Comparison
+1. **TPS Speedup**: Serving throughput increased to **32.1–122.6 tok/s** (an average of **~5× to 8×** speedup compared to the M1 dev host). High-coherence reasoning and code generation now exceed **120 tok/s**.
+2. **Algorithmic Parity**: Hardware-independent metrics (TPF, steps/block) match the dev M1 numbers to minor stochastic deviations, confirming that scheduling properties and logical token distributions scale cleanly.
+3. **Variance Gate**: The Mac Studio completely eliminates the laptop thermal drift. Both arms clear the <5% variance gate with extremely tight repeatability (0.1% and 0.6% maximum deviation across runs).

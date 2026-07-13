@@ -177,7 +177,7 @@ def convert_and_quantize_streaming(src_dir, dest_dir, bits=4, group_size=64,
             if should_quantize(src_name):
                 # Run GPU-accelerated quantization (per-tensor params: expert override)
                 bits_k, group_k = quant_params(src_name)
-                w_q, scales, biases = mx.quantize(x, group_size=group_k, bits=bits_k, mode="affine")
+                w_q, scales, biases = mx.quantize(x, group_size=group_k, bits=bits_k)
 
                 # CRITICAL: mx.eval forces compilation/execution immediately
                 # so memory is not held by a growing lazy execution graph
