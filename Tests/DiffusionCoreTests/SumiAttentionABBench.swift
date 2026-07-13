@@ -33,7 +33,7 @@ final class SumiAttentionABBench: XCTestCase {
             let start = Date()
             for _ in 0 ..< reps { eval(body()) }
             let ms = Date().timeIntervalSince(start) * 1000 / Double(reps)
-            return (ms, Double(GPU.peakMemory) / 1_073_741_824)
+            return (ms, Double(Memory.peakMemory) / 1_073_741_824)
         }
 
         for S in [512, 1024, 1536] {

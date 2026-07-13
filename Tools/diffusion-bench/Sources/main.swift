@@ -245,7 +245,7 @@ for arm in arms {
             firstStepSeconds: stepTimes.first ?? 0,
             totalSeconds: total,
             effectiveTPS: Double(budget) / total,
-            peakMemoryGB: Double(GPU.peakMemory) / 1_073_741_824,
+            peakMemoryGB: Double(Memory.peakMemory) / 1_073_741_824,
             syncPoints: arm.pipelined ? 1 : output.stepsExecuted + 1,
             pipelined: arm.pipelined,
             stepsExecuted: output.stepsExecuted,
@@ -262,7 +262,7 @@ for arm in arms {
                 + "%.3f tok/s | peak %.2f GB",
             arm.name, run, mean, variance.squareRoot(),
             percentile(steady, 0.95), stepTimes.first ?? 0, total,
-            Double(budget) / total, Double(GPU.peakMemory) / 1_073_741_824))
+            Double(budget) / total, Double(Memory.peakMemory) / 1_073_741_824))
     }
 }
 

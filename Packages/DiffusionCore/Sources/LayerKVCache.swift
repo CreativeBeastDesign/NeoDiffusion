@@ -26,8 +26,12 @@ public final class LayerKVCache {
 
     // FlashBlock runner and auxiliary buffers (WP-3b)
     public var flashBlockRunner: FlashBlockRunner?
-    public var blockTablesBuffer: MTLBuffer?
-    public var ctxLensBuffer: MTLBuffer?
+    public var blockTables: MLXArray?
+    public var ctxLens: MLXArray?
+    
+    // Persistent FlashBlock cache tensors
+    public var attnOutPast: MLXArray?
+    public var logsumexp: MLXArray?
 
     public init() {}
 

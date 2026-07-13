@@ -106,7 +106,7 @@ final class SumiRealWeightSmokeTests: XCTestCase {
         XCTAssertEqual(canvasArr[P + budget], Int32(config.eosTokenId), "EOS anchor")
         XCTAssertTrue(canvasArr.allSatisfy { $0 >= 0 && $0 < Int32(config.vocabSize) })
 
-        let peakGB = Double(GPU.peakMemory) / 1_073_741_824
+        let peakGB = Double(Memory.peakMemory) / 1_073_741_824
         let avgStep = stepTimes.dropFirst().reduce(0, +) / Double(max(stepTimes.count - 1, 1))
         let tps = Double(budget) / stepTimes.reduce(0, +)
         print("""

@@ -59,7 +59,11 @@ final class LLaDAMoEDispatchBench: XCTestCase {
             wq, scales: scales, biases: biases, groupSize: 64, bits: 4)
         let x = MLXRandom.normal([Self.T, 1, 1, Self.H]).asType(.float16)
         let indices = MLXRandom.randInt(0 ..< Int32(Self.E), [Self.T, Self.K])
-        eval(wq, scales, biases, wDeq, x, indices)
+        if let biases {
+            eval(wq, scales, biases, wDeq, x, indices)
+        } else {
+            eval(wq, scales, wDeq, x, indices)
+        }
 
         let tGather = time("gatherQuantizedMM (production path)") {
             gatherQuantizedMM(
@@ -70,7 +74,7 @@ final class LLaDAMoEDispatchBench: XCTestCase {
             gatherMM(x.asType(wDeq.dtype), wDeq.swappedAxes(-1, -2), rhsIndices: indices)
         }
         let tFullQMM = time("dense qmm over ALL experts (upper bound)") {
-            quantizedMatmul(
+            quantizedMM(
                 x.reshaped(Self.T, Self.H),
                 wq.reshaped(Self.E * Self.I, Self.H / 8),
                 scales: scales.reshaped(Self.E * Self.I, Self.H / 64),

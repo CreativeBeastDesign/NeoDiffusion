@@ -65,7 +65,8 @@ func sysctlString(_ name: String) -> String {
     guard size > 0 else { return "unknown" }
     var buf = [CChar](repeating: 0, count: size)
     sysctlbyname(name, &buf, &size, nil, 0)
-    return String(cString: buf)
+    let bytes = buf.prefix(while: { $0 != 0 }).map(UInt8.init(bitPattern:))
+    return String(decoding: bytes, as: UTF8.self)
 }
 
 /// Snapshot of the environment around one generation.
@@ -611,7 +612,7 @@ func runLLaDABench() async throws {
             freeMemoryMBBefore: freeBefore,
             thermalBefore: thermalBefore,
             thermalAfter: thermalStateName())
-        return (finalOutput, seconds, Double(GPU.peakMemory) / 1_073_741_824, env, warmup)
+        return (finalOutput, seconds, Double(Memory.peakMemory) / 1_073_741_824, env, warmup)
     }
 
     func encodePrompt(_ user: String) throws -> [Int] {
