@@ -240,6 +240,7 @@
 				CC53CEB92EA51B740018DD50 /* XCRemoteSwiftPackageReference "mlx-swift" */,
 				CCF270F72EA9162900E2550A /* XCLocalSwiftPackageReference "." */,
 				CCF271052EABCBD200E2550A /* XCRemoteSwiftPackageReference "swift-transformers" */,
+				CCF271092EABCBD200E2550B /* XCRemoteSwiftPackageReference "swift-jinja" */,
 			);
 			preferredProjectObjectVersion = 77;
 			productRefGroup = CC53CE8D2EA51A790018DD50 /* Products */;
@@ -601,7 +602,7 @@
 			repositoryURL = "https://github.com/ml-explore/mlx-swift.git";
 			requirement = {
 				kind = upToNextMajorVersion;
-				minimumVersion = 0.29.1;
+				minimumVersion = 0.31.6;
 			};
 		};
 		CCF271052EABCBD200E2550A /* XCRemoteSwiftPackageReference "swift-transformers" */ = {
@@ -610,6 +611,14 @@
 			requirement = {
 				kind = upToNextMajorVersion;
 				minimumVersion = 1.1.1;
+			};
+		};
+		CCF271092EABCBD200E2550B /* XCRemoteSwiftPackageReference "swift-jinja" */ = {
+			isa = XCRemoteSwiftPackageReference;
+			repositoryURL = "https://github.com/huggingface/swift-jinja.git";
+			requirement = {
+				kind = exactVersion;
+				version = 2.3.6;
 			};
 		};
 /* End XCRemoteSwiftPackageReference section */

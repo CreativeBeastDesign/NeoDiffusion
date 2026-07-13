@@ -15,8 +15,10 @@ let package = Package(
     dependencies: [
         .package(url: "https://github.com/ml-explore/mlx-swift.git", from: "0.29.0"),
         .package(url: "https://github.com/huggingface/swift-transformers.git", from: "1.1.1"),
+        .package(url: "https://github.com/huggingface/swift-jinja.git", exact: "2.3.6"),
         .package(url: "https://github.com/apple/swift-numerics.git", from: "1.1.0"),
-        .package(url: "https://github.com/hummingbird-project/hummingbird.git", from: "2.0.0")
+        .package(url: "https://github.com/hummingbird-project/hummingbird.git", from: "2.0.0"),
+        .package(url: "https://github.com/tursodatabase/libsql-swift.git", exact: "0.1.1")
     ],
     targets: [
         .target(
@@ -52,7 +54,8 @@ let package = Package(
                 "DiffusionModel",
                 .product(name: "MLX", package: "mlx-swift"),
                 .product(name: "MLXNN", package: "mlx-swift"),
-                .product(name: "MLXRandom", package: "mlx-swift")
+                .product(name: "MLXRandom", package: "mlx-swift"),
+                .product(name: "Libsql", package: "libsql-swift")
             ],
             path: "Packages/DiffusionGeneration/Sources"
         ),
