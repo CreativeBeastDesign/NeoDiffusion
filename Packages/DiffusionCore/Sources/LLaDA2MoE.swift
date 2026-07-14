@@ -64,8 +64,8 @@ open class SwitchLinear: Module, Quantizable {
     ///   - x: `[..., 1, 1, inputDims]` (token batch dims, then two singleton dims)
     ///   - indices: expert indices `[..., k]` (flat over the expert axis)
     /// - Returns: `[..., k, 1, outputDims]`
-    open func callAsFunction(_ x: MLXArray, indices: MLXArray) -> MLXArray {
-        gatherMM(x, weight.swappedAxes(-1, -2), rhsIndices: indices)
+    open func callAsFunction(_ x: MLXArray, indices: MLXArray, sortedIndices: Bool = false) -> MLXArray {
+        gatherMM(x, weight.swappedAxes(-1, -2), rhsIndices: indices, sortedIndices: sortedIndices)
     }
 
     public func toQuantized(groupSize: Int, bits: Int, mode: QuantizationMode) -> Module {
@@ -97,11 +97,12 @@ public final class QuantizedSwitchLinear: SwitchLinear, Quantized {
         self.freeze()
     }
 
-    override public func callAsFunction(_ x: MLXArray, indices: MLXArray) -> MLXArray {
+    override public func callAsFunction(_ x: MLXArray, indices: MLXArray, sortedIndices: Bool = false) -> MLXArray {
         gatherQuantizedMM(
             x, weight, scales: scales, biases: biases,
             rhsIndices: indices, transpose: true,
-            groupSize: groupSize, bits: bits, mode: mode)
+            groupSize: groupSize, bits: bits, mode: mode,
+            sortedIndices: sortedIndices)
     }
 }
 
@@ -132,11 +133,11 @@ public final class SwitchGLU: Module {
     ///   - x: token hidden states `[T, hiddenSize]`
     ///   - indices: top-k expert indices `[T, k]`
     /// - Returns: per-expert outputs `[T, k, hiddenSize]`
-    public func callAsFunction(_ x: MLXArray, indices: MLXArray) -> MLXArray {
+    public func callAsFunction(_ x: MLXArray, indices: MLXArray, sortedIndices: Bool = false) -> MLXArray {
         let expanded = x.expandedDimensions(axes: [-2, -3])  // [T, 1, 1, H]
-        let gate = gateProj(expanded, indices: indices)
-        let up = upProj(expanded, indices: indices)
-        let down = downProj(silu(gate) * up, indices: indices)  // [T, k, 1, H]
+        let gate = gateProj(expanded, indices: indices, sortedIndices: sortedIndices)
+        let up = upProj(expanded, indices: indices, sortedIndices: sortedIndices)
+        let down = downProj(silu(gate) * up, indices: indices, sortedIndices: sortedIndices)  // [T, k, 1, H]
         return down.squeezed(axis: -2)
     }
 }
@@ -203,7 +204,8 @@ public final class LLaDA2MoEGate: Module {
         ).reshaped(tokens, numExperts)
 
         let maskedScores = which(scoreMask, scoresForRouting, MLXArray(-Float.infinity))
-        let indices = argSort(-maskedScores, axis: -1)[0..., ..<topK]  // [T, topK] descending
+        let indicesRaw = argSort(-maskedScores, axis: -1)[0..., ..<topK]  // [T, topK] descending
+        let indices = indicesRaw.asType(.int32)
 
         // Combination weights from the *unbiased* scores, normalized, then scaled.
         var weights = takeAlong(scores, indices, axis: -1)
@@ -295,11 +297,38 @@ public final class LLaDA2SparseMoEBlock: Module {
         // Routed experts + shared expert over the *full* window. Identical for both paths — JOT
         // (below) does not change the shape or the dispatch, only zeroes selected outputs.
         let (indices, weights, _) = gate(flat)
-        let expertOut = experts(flat, indices: indices)  // [T, k, H]
-
-        var combined = (expertOut.asType(.float32) * weights.expandedDimensions(axis: -1))
-            .sum(axis: 1)
-            .asType(x.dtype)
+        
+        var combined: MLXArray
+        // Adaptive Dispatcher (WP-6a):
+        // Resolves SIMD divergence on routed experts by sorting indices flat on the GPU.
+        // Crossover break-even point is shape-dependent (Mini: 192, Flash: 128) due to GEMM sizes.
+        // At low T (e.g. single-request decode/prefill chunked at B=32/64), we bypass sorting to
+        // avoid sorting overhead. At larger T (e.g. future batch serving, speculative loops, or
+        // increased blockLength configuration), we automatically trigger the globally-sorted GPU path.
+        let crossover = flat.dim(1) >= 4096 ? 128 : 192
+        if T >= crossover {
+            let K_size = indices.dim(1)
+            let indicesFlat = indices.flattened()
+            let weightsFlat = weights.flattened()
+            let sortOrder = argSort(indicesFlat, axis: -1).asType(.int32)
+            let indicesSorted = indicesFlat[sortOrder].reshaped(-1, 1)
+            let tokenIndices = (sortOrder / Int32(K_size)).asType(.int32)
+            
+            let flatSorted = flat[tokenIndices]
+            let expertOutSorted = experts(flatSorted, indices: indicesSorted, sortedIndices: true)
+            let expertOutSortedSqueezed = expertOutSorted.squeezed(axis: 1)
+            let weightsSorted = weightsFlat[sortOrder].reshaped(-1, 1)
+            let weightedOut = expertOutSortedSqueezed.asType(.float32) * weightsSorted
+            
+            var sumOut = MLXArray.zeros([T, flat.dim(1)], dtype: .float32)
+            sumOut = sumOut.at[tokenIndices].add(weightedOut)
+            combined = sumOut.asType(x.dtype)
+        } else {
+            let expertOut = experts(flat, indices: indices)  // [T, k, H]
+            combined = (expertOut.asType(.float32) * weights.expandedDimensions(axis: -1))
+                .sum(axis: 1)
+                .asType(x.dtype)
+        }
 
         if let sharedExperts {
             combined = combined + sharedExperts(flat)
