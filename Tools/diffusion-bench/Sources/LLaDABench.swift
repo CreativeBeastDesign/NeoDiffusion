@@ -32,6 +32,11 @@ func swapUsedMB() -> Double {
 
 /// Host free-page memory in MB (the "Pages free" figure — deliberately conservative:
 /// macOS keeps this low under healthy load too, hence the 1 GB validity threshold).
+/// Physical RAM in MB. Anchors the host-relative free-memory floor in `EnvSnapshot.isValid`.
+func totalMemoryMB() -> Double {
+    Double(ProcessInfo.processInfo.physicalMemory) / 1_048_576
+}
+
 func freeMemoryMB() -> Double {
     var stats = vm_statistics64()
     var count = mach_msg_type_number_t(
@@ -74,14 +79,31 @@ struct EnvSnapshot: Codable {
     let swapUsedMBBefore: Double
     let swapUsedMBAfter: Double
     let freeMemoryMBBefore: Double
+    let totalMemoryMB: Double
     let thermalBefore: String
     let thermalAfter: String
 
-    /// Frozen validity rule (m6-logbook §5 rule 5): a timed row is environment-valid iff
-    /// swap growth ≤ 256 MB, ≥ 1 GB free pages at start, and thermal ≤ fair at start.
+    /// Fraction of physical RAM that must be free at row start. The original rule (m6-logbook
+    /// §5 rule 5) used an absolute 1 GB floor, set on the 16 GB dev M1 — i.e. 1/16 of that
+    /// host's RAM. Expressing it as the ratio it always implicitly was keeps the M1 threshold
+    /// bit-identical (16384/16 = 1024 MB) while making it meaningful on the 192 GB Studio
+    /// (12 GB), where an absolute 1 GB floor is unreachable noise.
+    static let minFreeMemoryFraction = 1.0 / 16.0
+
+    var minFreeMemoryMB: Double { totalMemoryMB * Self.minFreeMemoryFraction }
+
+    /// Validity rule (m6-logbook §5 rule 5, **amended 2026-07-14** — see that logbook entry for
+    /// the failure that forced it): a timed row is environment-valid iff swap growth ≤ 256 MB,
+    /// free pages at start ≥ 1/16 of physical RAM, and thermal ≤ fair at start.
+    ///
+    /// The free floor is host-relative because the absolute one silently passed paged-out rows.
+    /// On the Studio, 7 rows ran at ~1 TPS against an arm mean of ~38 (the CLAUDE.md §gotcha
+    /// paging pathology) yet scored valid: the host sat at a *flat* 3791 MB swap, so growth was
+    /// 0, and 4.4 GB free cleared a 1 GB floor 4× over. Swap growth cannot see a machine that
+    /// was already saturated before the row started; only the free-page level can.
     var isValid: Bool {
         swapUsedMBAfter - swapUsedMBBefore <= 256
-            && freeMemoryMBBefore >= 1024
+            && freeMemoryMBBefore >= minFreeMemoryMB
             && (thermalBefore == "nominal" || thermalBefore == "fair")
     }
 
@@ -90,8 +112,9 @@ struct EnvSnapshot: Codable {
         if swapUsedMBAfter - swapUsedMBBefore > 256 {
             parts.append(String(format: "swap +%.0f MB", swapUsedMBAfter - swapUsedMBBefore))
         }
-        if freeMemoryMBBefore < 1024 {
-            parts.append(String(format: "free %.0f MB", freeMemoryMBBefore))
+        if freeMemoryMBBefore < minFreeMemoryMB {
+            parts.append(String(format: "free %.0f MB < %.0f MB floor (1/16 of %.0f MB RAM)",
+                                freeMemoryMBBefore, minFreeMemoryMB, totalMemoryMB))
         }
         if thermalBefore != "nominal" && thermalBefore != "fair" {
             parts.append("thermal \(thermalBefore)")
@@ -610,6 +633,7 @@ func runLLaDABench() async throws {
             swapUsedMBBefore: swapBefore,
             swapUsedMBAfter: swapUsedMB(),
             freeMemoryMBBefore: freeBefore,
+            totalMemoryMB: totalMemoryMB(),
             thermalBefore: thermalBefore,
             thermalAfter: thermalStateName())
         return (finalOutput, seconds, Double(Memory.peakMemory) / 1_073_741_824, env, warmup)

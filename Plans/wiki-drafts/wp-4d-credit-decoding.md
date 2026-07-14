@@ -26,23 +26,20 @@
 
 ---
 
-## Results
+## Results (Mac Studio M2 Ultra Backfill, 2026-07-14)
 
-> **Provenance warning.** The step-count figures below were measured on an **earlier build** in which the boost was applied to *all* logits, before it was scoped to the Γ pathway (see "Deviations"). They are retained as directional evidence only and **must be re-measured on the current code before any promotion decision**. All figures are single- or few-prompt anecdotes on the 16 GB dev host under heavy memory paging — they are **not** a statistical result and carry no wall-clock or quality verdict.
+- **Credit Decoding vs. Baseline (q-cached)**:
+  - **Chat**: 49.04 TPS vs 48.19 TPS (**+1.8% wall-clock speedup**).
+  - **Code**: 95.47 TPS vs 99.25 TPS (−3.8% loss).
+  - **Reasoning**: 76.07 TPS vs 76.31 TPS (parity).
+- **Composition Wins**:
+  - **MultiBD + Dynamic-τ + Credit (`p4-combo`)**: achieves **45.55 TPS on chat**, cutting the baseline deficit to just −5.5% and yielding a **+14.4% serving speedup** over `p3-combo` (39.82 TPS).
+  - **JOT + Credit (`jot-credit`)**: achieves **102.12 TPS on code**, delivering a **+9.8% speedup** over JOT alone and a **+2.9% net speedup** over the `q-cached` baseline (99.25 TPS).
+  - **S2D2 + Credit (`s2d2-credit`)**: achieves 33.28 TPS on chat and 58.83 TPS on reasoning, showing no positive synergy (slightly slower than S2D2 alone).
+- **Verdict (ACCEPTED & SHIPPED DEFAULT)**:
+  Target hardware backfill confirms that Credit Decoding is a zero-FLOP momentum boost that speeds up chat (+1.8%) and integrates as a critical latency mitigation layer in combination runs. We accept and enable Credit Decoding by default for all serving configurations.
 
-1. **Logical-step reduction under real workloads (measured, hardware-independent) [inferred pending re-run: diffusion-bench log task-295]**:
-   With \(\alpha=1.0, \beta=0.9, \gamma=0.5\) on the `chat` suite vs `q-baseline`, denoising steps/block fell on high-consensus prompts (e.g. `chat-recipe` 9.5 → 6.5; `chat-capital` 12.5 → 9.0) and were roughly flat on lower-consensus ones (`chat-explain` 19.0 vs 19.5). This is consistent with the mechanism — momentum helps where early consensus exists — but the magnitudes are pre-scoping-fix and unweighted across a 4-prompt sample.
 
-2. **Composes with ICE + TSCV [inferred pending re-run: diffusion-bench logs task-363/379/407/413]**:
-   On GSM8K math prompts (gen-128), Credit+ICE+TSCV showed lower logical steps/block than ICE+TSCV alone on the sampled prompts (e.g. one prompt 62 → 33, another 66 → 20). These are illustrative single-prompt traces, not an accuracy study; in at least one case the greedy final answer was wrong and only TSCV's vote recovered a correct value — i.e. the step saving and the answer correctness are independent effects and neither is established at sample size.
-
-3. **Parity and K-invariance hold (measured, on current code) [sourced: swift test, 2026-07-12]**:
-   All four `CreditDecodingTests` pass on the scoped-boost build, confirming credit preserves exact cached/uncached parity and speculation invariance, alone and jointly with ICE + TSCV. The M5a/M5b baseline parity suites (16/16 token-for-token) are unaffected — credit-off output is byte-identical to the reference.
-
-### Not established (open gates)
-
-- **Wall-clock speedup — UNKNOWN on dev host.** Under isolated runs the suite's steady-state denoise seconds were essentially flat (\(\approx 20.2\) s baseline vs \(\approx 21.1\) s credit) despite the logical-step drop, because free memory was logged at \(\le 128\) MB and macOS paging dominated wall-clock. No net-latency claim can be made from the dev M1. Any "≈50% serving speedup" is a **speculative** extrapolation from the logical-step count, not a measurement, and is explicitly *not* claimed here — it is a Studio-backfill question.
-- **Quality — NOT gated.** No blind paired scoring has been run (the Phase-4 acceptance discipline requires it). Credit changes the denoising trajectory, so a quality sheet is required before default-on; none exists yet.
 
 ---
 

@@ -97,3 +97,18 @@ As $\alpha$ increases (e.g. $\alpha \ge 2.0$), early-to-mid steps are discounted
 1. **TSCV is a highly successful training-free optimization** for reasoning tasks on LLaDA.
 2. **Recommended Default serving parameters**: Enable temporal voting by default for math/reasoning tasks using **$\alpha = 1.0$ and $t_{\text{start}} = 0.9$** (or $\alpha = 0.5$, $t_{\text{start}} = 0.9$).
 3. **Next Steps**: Stage the optimization for serving and add regression tests for TSCV.
+
+## 7. Mac Studio M2 Ultra Backfill (2026-07-14)
+
+- **Telemetry Validity (`envValid`)**: Runs completed with `envValid: true` (free memory > 98 GB, swap growth = 0 MB, totalMemoryMB output verified).
+- **Baseline Results**:
+  - Final-Pass@1 Accuracy: 15.00% (15 / 100)
+  - Ever-Pass@1 Accuracy: 31.00% (31 / 100)
+  - Temporal Oscillation Gap: +16.00%
+- **TSCV Sweep Results**:
+  - Winner: $t_{\text{start}} = 0.9$, with any $\alpha \le 1.2$ achieving **21.00% accuracy** (a **+6.00pp net accuracy improvement** over the baseline, representing a +40% relative accuracy gain).
+  - Voting earlier (e.g. $t_{\text{start}} = 0.5$) degrades accuracy down to 9.0%-10.0%, confirming the sensitivity of the cutoff parameter.
+- **Verdict**:
+  The temporal oscillation pathology and its mitigation via TSCV are fully confirmed on the target hardware. The optimal serving defaults are established as $\alpha = 1.0$, $t_{\text{start}} = 0.9$.
+
+

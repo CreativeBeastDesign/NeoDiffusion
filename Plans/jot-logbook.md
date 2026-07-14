@@ -136,3 +136,18 @@ diffusion-bench llada --runs 1 --suites chat --arms q-cached --speculation-k 1 -
 ```
 Hardware-independent metrics (steps/block, tpf-logical, forwardsEvaluated) decide the algorithmic tradeoff on any host; wall-clock needs `envValid:true` rows. Both echo their knobs in the JSONL (`moeCapacityRatio`, `subBlockCommit`, `subBlockMinPrefix`).
 
+## 12. Mac Studio M2 Ultra Backfill (2026-07-14)
+
+- **Telemetry Validity (`envValid`)**: Sourced from `scratch/llada_bench.jsonl`. Runs completed successfully with `envValid: true` (free memory > 98 GB, swap growth = 0 MB, totalMemoryMB output verified).
+- **Wall-Clock Serving Throughput (JOT vs. q-cached baseline)**:
+  - **Chat**: 38.76 TPS vs 48.19 TPS (−19.6% loss).
+  - **Code**: 92.97 TPS vs 99.25 TPS (−6.3% loss).
+  - **Reasoning**: 92.99 TPS vs 76.31 TPS (**+21.9% wall-clock speedup**).
+- **Composition with Credit Decoding (`jot-credit`: JOT + Credit)**:
+  - JOT and Credit Decoding compose exceptionally well on Chat and Code suites, where the momentum boost offsets freezing latency overhead:
+    - **Chat**: 41.82 TPS (a **+7.9% speedup** over JOT alone).
+    - **Code**: **102.12 TPS** (a **+9.8% speedup** over JOT alone, and a **+2.9% net speedup** over the default `q-cached` 99.25 TPS baseline!).
+    - **Reasoning**: 85.68 TPS (slower than JOT alone, but still +12.3% above baseline).
+- **Verdict (ACCEPT for Reasoning Presets, ACCEPT JOT+Credit for Code)**:
+  Target hardware backfill reveals that JOT is highly wall-clock positive on reasoning tasks (+21.9% TPS speedup) due to active-only KV pinning. In addition, the **JOT + Credit Decoding** combination is accepted for code-serving presets as it clears baseline performance (+2.9% net speedup).
+

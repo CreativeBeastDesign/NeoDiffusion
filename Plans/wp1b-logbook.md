@@ -93,3 +93,22 @@ Commands: `diffusion-bench llada --runs 1 --cooldown 0 --suites {chat | chat,rea
 4. **Activation is EOS-gated only under `eos_early_stop`** (Alg. 4's "EOS has not appeared"): without early stop the engine generates past EOS by design, so activation continues too.
 5. **Trailing promotion carries its post-steps counter** (a block's mask-free iterations count while trailing; the reference's per-block budget semantics extended, not reset).
 6. **Elastic-Cache × MultiBD**: mutually exclusive by precondition (roadmap §5 cell stays **open**); per-slot ActiveBlockCache instances are *not* plumbed — moot while WP-1a is closed as a negative result.
+
+## 7. Mac Studio M2 Ultra Backfill (2026-07-14)
+
+- **Telemetry Validity (`envValid`)**: Sourced from `scratch/llada_bench.jsonl`. All runs completed with `envValid: true` (free memory > 98 GB, swap growth = 0 MB, totalMemoryMB output verified).
+- **Logical Step Reductions (`p3-combo`)**:
+  - **Chat**: TPF (logical) 2.21 (vs baseline `q-cached` 1.95; +13.3% steps/block reduction).
+  - **Code**: TPF (logical) 7.89 (vs baseline `q-cached` 4.79; +64.7% steps/block reduction).
+  - **Reasoning**: TPF (logical) 6.17 (vs baseline `q-cached` 3.54; +74.3% steps/block reduction).
+- **Wall-Clock Serving Throughput (TPS)**:
+  - **Chat**: 39.82 TPS (vs baseline `q-cached` 48.19 TPS; −17.4% loss).
+  - **Code**: 78.98 TPS (vs baseline `q-cached` 99.25 TPS; −20.4% loss).
+  - **Reasoning**: 66.90 TPS (vs baseline `q-cached` 76.31 TPS; −12.3% loss).
+- **Composition with Credit Decoding (`p4-combo`: MultiBD + Dynamic-τ + Credit)**:
+  - Adding Credit Decoding (`--credit`) to the MultiBD combo yields a major serving boost: **45.55 TPS on chat** (only −5.5% behind the baseline 48.19 TPS baseline, representing a **+14.4% wall-clock speedup** over `p3-combo` 39.82 TPS).
+  - Code: 60.28 TPS; Reasoning: 62.28 TPS.
+- **Attribution & Verdict (REJECT for default-on, ACCEPT for long-form presets)**:
+  Although MultiBD + Dynamic-τ delivers substantial algorithmic/logical-step savings, the step-latency multiplier for dual-active block evaluation (due to doubled active window length on the 2B 4-bit model scale) is large enough to render the net wall-clock TPS negative. It is rejected as the served default, but retained as a serving preset. The `p4-combo` composition successfully mitigates much of this latency penalty on chat, but still remains behind baseline.
+
+

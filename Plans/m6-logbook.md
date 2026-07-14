@@ -204,13 +204,45 @@ steps/block at slightly higher post-step churn — a real but modest speed win a
 
 ### Operational rules frozen with the baseline
 
-1. **Benchmark-environment validity rule** (automated since timeline 11): every JSONL row
-   carries swap before/after, free-memory-at-start, and thermal state before/after; a row
-   is `envValid` iff swap growth ≤ 256 MB AND free-at-start ≥ 1 GB AND thermal ≤ fair.
+1. **Benchmark-environment validity rule** (automated since timeline 11; **free-memory floor
+   amended 2026-07-14 — see rule 1a**): every JSONL row carries swap before/after,
+   free-memory-at-start, physical RAM, and thermal state before/after; a row is `envValid`
+   iff swap growth ≤ 256 MB AND free-at-start ≥ **1/16 of physical RAM** AND thermal ≤ fair.
    **Label, never reject** — contaminated rows stay in the record, marked. The rule is
    deliberately conservative (timeline 12: it flags some healthy-speed runs under
    page-cache pressure; false-invalid is the safe error). M8 quality/perf conclusions
    must be drawn from `envValid` rows only.
+
+1a. **Amendment (2026-07-14): the free floor is host-relative, because the absolute one
+   silently passed paged-out rows on the Studio.** The original floor was an absolute 1 GB,
+   calibrated on the 16 GB dev M1. On the 192 GB Studio it was unreachable noise, and the
+   rule failed exactly where it was most needed: in the WP-3/WP-4 Studio backfill
+   (`scratch/llada_bench.jsonl`), **7 rows ran at 0.46–1.02 TPS against arm means of ~38 —
+   the CLAUDE.md paging pathology — and every one was labelled `envValid: true`.** Two
+   independent reasons, both now fixed by the same change:
+   - *Swap growth cannot see a saturated host.* The machine sat at a **flat** 3791 MB swap
+     for the whole row, so growth was 0 and the swap clause passed. Growth only detects
+     paging that *starts* during the row.
+   - *An absolute floor does not scale.* 4.4 GB free cleared the 1 GB floor 4× over while
+     representing catastrophic pressure on a 192 GB box.
+   The 1 GB floor on a 16 GB host **is** 1/16 of RAM, so expressing it as the ratio it always
+   implicitly was leaves the M1 threshold bit-identical (1024 MB — the M6 dev baseline's
+   semantics are unchanged and need no re-freeze) while giving the Studio a meaningful
+   12 GB floor. Verified by replay over the 330 steady rows: rejects exactly the 7
+   pathological rows (all ≤ 1.02 TPS), keeps all 323 healthy rows (19.8–122.6 TPS). The
+   telemetry separates cleanly with no judgement call in the gap — healthy rows never drop
+   below 56.6 GB free or exceed 3 MB swap. Implemented in `EnvSnapshot.isValid`
+   (`Tools/diffusion-bench/Sources/LLaDABench.swift`); rows now also carry `totalMemoryMB`
+   so the floor is auditable post-hoc.
+   - **Bias direction matters**: all 7 bad rows fell in *baseline* arms (`q-cached`,
+     `s-cached`), all chat. They depressed the baseline and inflated every treatment's chat
+     delta — e.g. credit decoding reads +28.4% chat on raw `envValid` rows vs +6.2% once they
+     are excluded. Contaminated rows are not symmetric noise; do not assume they average out.
+   - **Open calibration item** (*speculative*, deliberately not gated): absolute swap *level*
+     is recorded but not part of the rule. The observed pathology is fully caught by the free
+     floor, and a swap-level threshold calibrated on 7 points risks invalidating M1 rows where
+     background swap is routine. Revisit only with data showing a contaminated row that the
+     free floor passes.
 2. First generation of each process = warmup (~19 s), flagged `warmupIncluded` in the
    row, excluded from steady-state rates (Finding 2). Cold-start is reported as its own
    first-class number, never averaged in.
