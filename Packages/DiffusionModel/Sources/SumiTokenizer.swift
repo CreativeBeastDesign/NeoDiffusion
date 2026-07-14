@@ -8,7 +8,7 @@ import Tokenizers
 /// Sumi has **no mask token** (uniform-state diffusion) and no chat template (base model);
 /// the special ids that matter at inference are bos/eos (the mid-canvas `[EOS, BOS]` anchor)
 /// and pad (used as trim filler).
-public class SumiTokenizer {
+public final class SumiTokenizer: @unchecked Sendable {
     public let tokenizer: any Tokenizer
 
     /// Special token IDs from config.json / tokenizer.json (verified 2026-07-08):

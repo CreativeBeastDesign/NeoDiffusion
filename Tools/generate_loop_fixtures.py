@@ -46,17 +46,25 @@ REFERENCE_FILES = ["configuration_llada2_moe.py", "modeling_llada2_moe.py"]
 
 
 def import_reference_package():
-    """Fetch the reference .py files from the HF hub cache and import them as a package
+    """Fetch the reference .py files from the HF hub cache or use local files, and import them as a package
     (the modeling file uses a relative import, so a real package dir is required)."""
-    from huggingface_hub import hf_hub_download
-
     pkg_dir = tempfile.mkdtemp(prefix="llada2_ref_")
     pkg_name = "llada2_reference"
     dest = os.path.join(pkg_dir, pkg_name)
     os.makedirs(dest)
     open(os.path.join(dest, "__init__.py"), "w").close()
+    
+    repo_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    local_dir = os.path.join(repo_root, "models", "llada2-1-mini")
+    has_local = all(os.path.exists(os.path.join(local_dir, fname)) for fname in REFERENCE_FILES)
+    
     for fname in REFERENCE_FILES:
-        shutil.copy(hf_hub_download(REPO_ID, fname), os.path.join(dest, fname))
+        if has_local:
+            shutil.copy(os.path.join(local_dir, fname), os.path.join(dest, fname))
+        else:
+            from huggingface_hub import hf_hub_download
+            shutil.copy(hf_hub_download(REPO_ID, fname), os.path.join(dest, fname))
+            
     sys.path.insert(0, pkg_dir)
     cfg_mod = importlib.import_module(f"{pkg_name}.configuration_llada2_moe")
     model_mod = importlib.import_module(f"{pkg_name}.modeling_llada2_moe")
