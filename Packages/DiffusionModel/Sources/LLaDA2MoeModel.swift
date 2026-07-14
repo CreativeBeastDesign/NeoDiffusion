@@ -47,9 +47,10 @@ public class LLaDA2MoeModel: Module {
     ///     block, the block-causal active-window mask for a two-block window (WP-1b)
     public func callAsFunction(
         _ activeIds: MLXArray, positionIds: MLXArray, caches: [LayerKVCache],
-        mask: MLXArray? = nil, frozen: MLXArray? = nil
+        mask: MLXArray? = nil, frozen: MLXArray? = nil, ablation: ModuleAblation = .none
     ) -> MLXArray {
-        let hidden = model(activeIds, positionIds: positionIds, caches: caches, mask: mask, frozen: frozen)
+        let hidden = model(activeIds, positionIds: positionIds, caches: caches, mask: mask,
+                           frozen: frozen, ablation: ablation)
         return lmHead(hidden).asType(.float32)
     }
 
@@ -59,13 +60,14 @@ public class LLaDA2MoeModel: Module {
         _ activeIds: MLXArray, positionIds: MLXArray, caches: [LayerKVCache],
         jotCaches: [LayerJotCache], frozen: MLXArray, mask: MLXArray? = nil, capacity: Int? = nil,
         flashBlockEnabled: Bool = false, flashBlockTau: Int = 4, isFirstStepOfBlock: Bool = false,
-        dirtyPerSeq: [Int] = [0]
+        dirtyPerSeq: [Int] = [0], ablation: ModuleAblation = .none
     ) -> MLXArray {
         let hidden = model(
             activeIds, positionIds: positionIds, caches: caches,
             jotCaches: jotCaches, frozen: frozen, mask: mask, capacity: capacity,
             flashBlockEnabled: flashBlockEnabled, flashBlockTau: flashBlockTau,
-            isFirstStepOfBlock: isFirstStepOfBlock, dirtyPerSeq: dirtyPerSeq)
+            isFirstStepOfBlock: isFirstStepOfBlock, dirtyPerSeq: dirtyPerSeq,
+            ablation: ablation)
         return lmHead(hidden).asType(.float32)
     }
 
@@ -164,13 +166,14 @@ public class LLaDA2MoeInnerModel: Module {
     /// (its `pending*` set to this window's K/V) for a later commit.
     public func callAsFunction(
         _ activeIds: MLXArray, positionIds: MLXArray, caches: [LayerKVCache],
-        mask: MLXArray? = nil, frozen: MLXArray? = nil
+        mask: MLXArray? = nil, frozen: MLXArray? = nil, ablation: ModuleAblation = .none
     ) -> MLXArray {
         precondition(caches.count == layers.count, "one cache per layer required")
         var hidden = wordEmbeddings(activeIds)
         let (cos, sin) = rotaryEmbedding.cosSin(positionIds: positionIds)
         for (layer, cache) in zip(layers, caches) {
-            hidden = layer(hidden, cos: cos, sin: sin, cache: cache, mask: mask, frozen: frozen)
+            hidden = layer(hidden, cos: cos, sin: sin, cache: cache, mask: mask, frozen: frozen,
+                           ablation: ablation)
         }
         return norm(hidden)
     }
@@ -182,7 +185,7 @@ public class LLaDA2MoeInnerModel: Module {
         _ activeIds: MLXArray, positionIds: MLXArray, caches: [LayerKVCache],
         jotCaches: [LayerJotCache], frozen: MLXArray, mask: MLXArray? = nil, capacity: Int? = nil,
         flashBlockEnabled: Bool = false, flashBlockTau: Int = 4, isFirstStepOfBlock: Bool = false,
-        dirtyPerSeq: [Int] = [0]
+        dirtyPerSeq: [Int] = [0], ablation: ModuleAblation = .none
     ) -> MLXArray {
         precondition(caches.count == layers.count, "one cache per layer required")
         precondition(jotCaches.count == layers.count, "one jot cache per layer required")
@@ -193,7 +196,8 @@ public class LLaDA2MoeInnerModel: Module {
                 hidden, cos: cos, sin: sin, cache: caches[i],
                 jot: jotCaches[i], frozen: frozen, mask: mask, capacity: capacity,
                 flashBlockEnabled: flashBlockEnabled, flashBlockTau: flashBlockTau,
-                isFirstStepOfBlock: isFirstStepOfBlock, dirtyPerSeq: dirtyPerSeq)
+                isFirstStepOfBlock: isFirstStepOfBlock, dirtyPerSeq: dirtyPerSeq,
+                ablation: ablation)
         }
         return norm(hidden)
     }

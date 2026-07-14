@@ -50,16 +50,28 @@ public final class LLaDA2DecoderLayer: Module {
     /// over the active window; the feed-forward is unchanged (per-position). Mirrors
     /// ``callAsFunction(_:mask:cos:sin:)`` exactly but for the cached attention path. `mask` is
     /// nil for a single active block; WP-1b passes the block-causal active-window mask.
+    /// - Parameter ablation: in-situ attribution switch (**diagnostic only**, default `.none`).
+    ///   This overload is the **served default's** path (`DiffusionEngine+Entry.swift:166` —
+    ///   elastic/JOT/FlashBlock all off), which is why it carries the switch.
     public func callAsFunction(
         _ x: MLXArray, cos: MLXArray, sin: MLXArray, cache: LayerKVCache,
-        mask: MLXArray? = nil, frozen: MLXArray? = nil
+        mask: MLXArray? = nil, frozen: MLXArray? = nil, ablation: ModuleAblation = .none
     ) -> MLXArray {
-        var hidden = x + attention(inputLayernorm(x), cos: cos, sin: sin, cache: cache, mask: mask)
+        // `.attention` skips the attention residual add. The KV cache therefore never grows in
+        // that arm, so the delta measures attention's *total* cost including cache growth — not
+        // attention math in isolation. Intended; see ModuleAblation.
+        var hidden: MLXArray
+        if ablation == .attention {
+            hidden = x
+        } else {
+            hidden = x + attention(inputLayernorm(x), cos: cos, sin: sin, cache: cache, mask: mask)
+        }
         let ffnInput = postAttentionLayernorm(hidden)
         let ffnOutput: MLXArray
         switch mlp {
         case let dense as LLaDA2MLP: ffnOutput = dense(ffnInput)
-        case let moe as LLaDA2SparseMoEBlock: ffnOutput = moe(ffnInput, frozen: frozen)
+        case let moe as LLaDA2SparseMoEBlock:
+            ffnOutput = moe(ffnInput, frozen: frozen, ablation: ablation)
         default: fatalError("unsupported mlp module type \(type(of: mlp))")
         }
         hidden = hidden + ffnOutput
@@ -71,21 +83,36 @@ public final class LLaDA2DecoderLayer: Module {
     /// MoE still skips frozen tokens (their FFN output is unused — Δ never edits a frozen position
     /// and the held K/V make the skipped hidden invisible downstream). Mirrors the M5 cached
     /// overload exactly but for the held-K/V attention path.
+    /// - Parameter ablation: in-situ attribution switch (**diagnostic only**, default `.none`).
+    ///   This overload serves the JOT/FlashBlock configs (`DiffusionEngine+Entry.swift:152`),
+    ///   *not* the served default — that one takes the plain cached overload above. Both carry the
+    ///   switch so attribution can be run against either config; the M5 cached one is the path the
+    ///   `attr-*` bench arms actually exercise.
     public func callAsFunction(
         _ x: MLXArray, cos: MLXArray, sin: MLXArray, cache: LayerKVCache,
         jot: LayerJotCache, frozen: MLXArray, mask: MLXArray? = nil, capacity: Int? = nil,
         flashBlockEnabled: Bool = false, flashBlockTau: Int = 4,
-        isFirstStepOfBlock: Bool = false, dirtyPerSeq: [Int] = [0]
+        isFirstStepOfBlock: Bool = false, dirtyPerSeq: [Int] = [0],
+        ablation: ModuleAblation = .none
     ) -> MLXArray {
-        var hidden = x + attention(
-            inputLayernorm(x), cos: cos, sin: sin, cache: cache, jot: jot, frozen: frozen, mask: mask,
-            flashBlockEnabled: flashBlockEnabled, flashBlockTau: flashBlockTau,
-            isFirstStepOfBlock: isFirstStepOfBlock, dirtyPerSeq: dirtyPerSeq)
+        // `.attention` skips the attention residual add entirely. Note this also means the KV
+        // cache never grows in that arm, so the measured delta is attention's *total* cost
+        // including cache growth — not attention math in isolation. Intended; see ModuleAblation.
+        var hidden: MLXArray
+        if ablation == .attention {
+            hidden = x
+        } else {
+            hidden = x + attention(
+                inputLayernorm(x), cos: cos, sin: sin, cache: cache, jot: jot, frozen: frozen, mask: mask,
+                flashBlockEnabled: flashBlockEnabled, flashBlockTau: flashBlockTau,
+                isFirstStepOfBlock: isFirstStepOfBlock, dirtyPerSeq: dirtyPerSeq)
+        }
         let ffnInput = postAttentionLayernorm(hidden)
         let ffnOutput: MLXArray
         switch mlp {
         case let dense as LLaDA2MLP: ffnOutput = dense(ffnInput)
-        case let moe as LLaDA2SparseMoEBlock: ffnOutput = moe(ffnInput, frozen: frozen, capacity: capacity)
+        case let moe as LLaDA2SparseMoEBlock:
+            ffnOutput = moe(ffnInput, frozen: frozen, capacity: capacity, ablation: ablation)
         default: fatalError("unsupported mlp module type \(type(of: mlp))")
         }
         hidden = hidden + ffnOutput

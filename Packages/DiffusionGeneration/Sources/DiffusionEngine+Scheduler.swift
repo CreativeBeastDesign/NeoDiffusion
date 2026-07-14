@@ -388,7 +388,8 @@ extension DiffusionEngine {
                 effectiveCreditDecodingEnabled: params.creditDecodingEnabled,
                 effectiveCreditAlpha: params.creditAlpha,
                 effectiveCreditBeta: params.creditBeta,
-                effectiveCreditGamma: params.creditGamma),
+                effectiveCreditGamma: params.creditGamma,
+                effectiveModuleAblation: params.moduleAblation),
             trajectorySequences: params.temporalVotingEnabled ? trajectorySequences : nil)
     }
 }

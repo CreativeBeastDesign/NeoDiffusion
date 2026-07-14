@@ -1,3 +1,4 @@
+import DiffusionCore
 import Foundation
 
 /// Decoding parameters for the block-diffusion denoising loop (phase-2 §1 / gotcha 10).
@@ -153,6 +154,10 @@ public struct GenerationParams: Sendable, Equatable {
     public var creditBeta: Float
     /// Exponent γ for concave transform in Credit Decoding.
     public var creditGamma: Float
+
+    /// Module ablation for in-situ attribution. **Diagnostic only — always `.none` in serving.**
+    /// Defined in DiffusionCore (the modules it switches live there); see ``ModuleAblation``.
+    public var moduleAblation: ModuleAblation = .none
 
     public init(
         threshold: Float,

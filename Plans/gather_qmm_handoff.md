@@ -3,7 +3,10 @@
 **From**: Andre Bärlocher (via Perplexity research session)
 **To**: Claude Opus / Claude Code
 **Date**: 2026-07-14
-**Target hardware**: Mac Studio M2 Ultra (76-core GPU, 800 GB/s unified memory)
+**Target hardware**: Mac Studio M2 Ultra (**60-core GPU** — corrected 2026-07-14 from `system_profiler`
+on the actual machine; this doc and the WP-6a/WP-6b drafts all said 76-core, which is the *other*
+M2 Ultra bin. Memory bandwidth is 800 GB/s on both, so bandwidth-efficiency figures are unaffected;
+any *compute*-peak or occupancy claim keyed to core count is overstated by ~27%.)
 **Target models**: llada2.1-mini (H=2048, I=512, E=256, K=8), llada2.1-flash (H=4096, I=1024, E=256, K=8)
 **Repo context**: LLaDA2SparseMoEBlock.callAsFunction, DiffusionEngine+Entry.swift
 
@@ -24,16 +27,32 @@ whether a custom kernel was actually necessary, and if so, which bottleneck it s
 **Conclusion: a from-scratch kernel targeting Case A (divergence/tiling) is NOT justified.
 Case B (dequantization overhead) remains open and is the correct next target.**
 
-> **Status as of 2026-07-14 — read §5 before acting on this document.** Case A is closed and
-> now measured (§2.7). Case B is *open in the sense that it is unmeasured, not in the sense
-> that it is promising*: its prize has never been sized. Two attempts to size it from the
-> dispatch microbench have now failed for the same reason — extrapolated to a full forward,
-> its numbers exceed the entire measured forward (§5.2: 38.9 ms; §5.3, after a real Studio H4
-> run: 44.3 ms; the forward is 27.5 ms). **No microbench-derived number can size Case B on the
-> Studio.** Case C (§4) is open and decides *how* any kernel ships, not *whether*.
-> **Do not start kernel work from this document's §3, and do not quote Studio magnitudes from
-> `LLaDAMoEDispatchBench` (WP-6a/WP-6b) — they are ordinal at best (§5.3).** The next action is
-> an in-situ measurement (§5.5 rung 1).
+> **Status as of 2026-07-14 — SIZED, and the recommendation has changed. Read §5.6 then §5.7.**
+>
+> **`gather_qmm` is 42.5% of the served forward** (11.75 ms of 27.63 ms), router a further 13.8%,
+> MoE total 60.6%. Measured by in-situ causal ablation on the Studio across two independent runs
+> (routed-MoE 56.2% then 56.3%), sanity gate PASS at exactly 100%, control reproducing the served
+> baseline to within +0.5%.
+>
+> **But `gather_qmm` is memory-bound (40–58% of the 800 GB/s peak), so a *perfect* kernel caps out
+> at 17.9% end-to-end — and dequant (pure ALU) cannot help directly under a memory bound.** The
+> only surviving Case B mechanism is indirect: register pressure capping occupancy and hence
+> memory-level parallelism. §3 step 1 must therefore measure **bandwidth and occupancy**, not ALU.
+>
+> **The bigger lever is `blockLength`** (§5.7): expert bytes *per token* fall ~32% at B=64 and ~61%
+> at B=128, against a MoE that is 60.6% of the forward — dwarfing the kernel ceiling, and costing a
+> config sweep rather than an mlx-swift fork. **Sweep that first.**
+>
+> Case A is closed and measured (§2.7). Case C (§4) is open and decides *how* any kernel ships,
+> not *whether*. Two attempts to size Case B from the dispatch microbench failed identically —
+> extrapolated to a forward, their numbers exceed the whole forward (§5.2: 38.9 ms; §5.3: 44.3 ms;
+> the forward is 27.53 ms). **Do not quote Studio magnitudes from `LLaDAMoEDispatchBench`
+> (WP-6a/WP-6b) — they are ordinal at best (§5.3).** The M1-era figures from that harness, by
+> contrast, are corroborated: it put MoE at ~63% of the M1 forward, and the in-situ Studio
+> measurement says 60.6%.
+>
+> **Before profiling, read §5.6's last section**: 56.2% bounds *router + expert GEMMs together*.
+> Case B is a fraction of the GEMM part alone, and one extra ablation arm splits them cheaply.
 
 ---
 
@@ -357,11 +376,12 @@ Case B on this host**, because the harness's per-op timing is inflated past the 
 arithmetic possibility. Only in-situ measurement remains:
 
 1. **Size MoE's share in situ.** Two candidates, either sound:
-   - *(a) Causal ablation, cheapest — reuses the existing bench.* Time a real forward with the
-     MoE block swapped for a cheap passthrough that keeps the residual stream alive; the forward
-     delta is MoE's true in-situ share. Output correctness is irrelevant — this is a timing
-     experiment. Immune to §5.2/§5.3's artifact because both arms time a **whole forward**, so
-     any fixed harness cost is common-mode and cancels.
+   - *(a) Causal ablation, cheapest — reuses the existing bench.* **BUILT 2026-07-14, awaiting a
+     Studio run** (see §5.6). Time a real forward with the MoE block swapped for a cheap
+     passthrough that keeps the residual stream alive; the forward delta is MoE's true in-situ
+     share. Output correctness is irrelevant — this is a timing experiment. Immune to §5.2/§5.3's
+     artifact because both arms time a **whole forward**, so any fixed harness cost is
+     common-mode and cancels.
    - *(b) Metal System Trace / Instruments on a real forward* → per-kernel GPU attribution
      directly. This is §3 step 1 and was always the principled first move.
 2. Only if MoE's real share is material: the §3 step 1 ALU/register/stall profile, in-situ.
@@ -381,3 +401,223 @@ cross-process (±6–10% thermal drift, m6-logbook Finding 7), which is why seve
 sub-10% band. Bench it **arms-in-one-process** (`--arms` takes a list) or it will not be
 resolvable from drift, and do not let the microbench's flattering ±0.3% within-process
 repeatability be mistaken for the precision of a cross-process comparison.
+
+### 5.6 In-situ attribution: RUN. **Case B is ALIVE — S = 56.2%** (2026-07-14)
+
+Implements §5.5 rung 1(a). Run on the Studio (`Mac14,14`, 60-core M2 Ultra), release build,
+144 rows, **all `envValid`, one process** (`31453`), thermal nominal throughout, 93 GB free,
+T = 32.0 on every row. Record: `scratch/attribution.jsonl`.
+
+#### The measured forward budget (sourced)
+
+| component | ms | share of the 27.53 ms forward |
+|---|---|---|
+| **routed MoE** (router + 57× `gatherQuantizedMM`) | **15.48** | **56.2%** |
+| shared expert | 1.21 | 4.4% |
+| *MoE total* | *16.69* | *60.6%* |
+| attention (incl. KV-cache growth) | 3.79 | 13.8% |
+| remainder (lm_head + norms + loop) — *by subtraction, inferred* | 7.06 | 25.6% |
+| **sum** | **27.53** | **100.0%** |
+
+**Sanity gate: PASS** — every term positive, sum exactly 100%. This is the gate WP-6b's
+attribution failed at 161%, and it is why this budget is usable and that one was not.
+
+**Control: PASS, decisively.** `attr-full` = **27.53 ms** vs the served `q-cached` baseline's
+**27.50 ms** — **+0.10%**, measured in a *different process on a different day*. The refactor did
+not perturb the served path, and the whole measurement chain reproduces an independent number.
+
+**Independent corroboration**: the M1 microbench put MoE at ~63% of its forward (m6-logbook
+Finding 4); this in-situ Studio measurement says **60.6%**. Two different hosts, two different
+methods, ~3pp apart. Note this *rehabilitates* the M1-era figure specifically (§5.3 predicted the
+M1 numbers were probably sound while the Studio ones were not — that prediction now has evidence).
+
+**Robustness** (all three checks pass):
+- *Arm-major ordering* (the §5.6 known limitation): per-arm run0→run2 drift is +0.2%/+0.1%/−0.4%/−0.1%
+  — no session ramp. And the control pins `attr-full`, which ran **first**, to an independent
+  cross-process value; had ordering inflated it, it would read high. It does not.
+- *Content sensitivity* (AGENTS.md): paired per-prompt S over 12 prompts — median **56.4%**,
+  range [52.4, 59.9], **every single prompt clears the 40% gate**.
+- *Memory-locality bias* (pre-registered, deliberately uncorrected): makes S an **over**-estimate.
+  At 56.2% against a 40% gate it would have to be enormous to flip the verdict.
+
+#### Verdict against the pre-registered rule
+
+`S = 56.2% > 40%` ⇒ **PROFILE JUSTIFIED.** Proceed to §3 step 1 (Instruments/Metal-counter
+profile), **in situ, not on the microbench**. Case B is not merely alive: routed MoE is the single
+largest item in the forward, larger than everything else combined.
+
+**Prediction failed, recorded per house rule.** Before the run, Claude expected S < 15% ("a cheap,
+decisive negative — the best outcome available"). It was wrong by ~4×, and in the direction that
+costs more work. The lesson is the session's own thesis turned on itself: *the microbench was not
+merely imprecise on the Studio, it was actively misleading about where the time goes*, and no
+amount of reasoning about it substituted for one in-situ measurement.
+
+### 5.7 The split: `gather_qmm` = 42.5% of the forward (2026-07-14, run 2)
+
+`.moeExpertGEMMs` added (keeps the router, skips only `experts(...)`) and re-run with 5 arms,
+180 rows, all `envValid`, one process, thermal nominal. Record: `scratch/attribution2.jsonl`.
+
+**Replication first**: routed-MoE `S` = **56.3%**, against run 1's **56.2%**. Independent run,
+0.1pp apart. Control `attr-full` = 27.63 ms vs the served baseline's 27.50 ms (+0.49%).
+
+| component | ms | share of 27.63 ms forward |
+|---|---|---|
+| **`gather_qmm` expert GEMMs (57×)** | **11.75** | **42.5%** |
+| router (incl. combine arithmetic) | 3.81 | 13.8% |
+| shared expert | 1.17 | 4.2% |
+| attention (incl. KV growth) | 3.93 | 14.2% |
+| remainder (lm_head + norms + loop) — *inferred by subtraction* | 6.97 | 25.2% |
+| **sum** | **27.63** | **100.0%** |
+
+Sanity gate: **PASS** (all positive, exactly 100%). The DCE hazard specific to this arm — MLX
+eliding the router once its consumer is gone — is excluded behaviourally, not by argument:
+`ModuleAblationTests.testExpertGEMMsAblationStillRunsTheRouter`. Timing alone could never have
+caught it (an elided router and a free router look identical).
+
+#### What this budget explains, retroactively
+
+- **FlashBlock's "algorithmic accept / wall-clock reject" (WP-3b) is now explained.** It optimises
+  attention — **14.2%** of the forward. Deleting attention *entirely* buys 14.2%. There was never
+  room for the win it was chasing.
+- **The router is ~as expensive as all of attention** (13.8% vs 14.2%) — an FP32 matmul plus two
+  `argSort`s per layer. Nobody has looked at it, because the microbench's inflated numbers made
+  every module look overhead-dominated. Possible target; unexamined.
+- **The microbench overstated the router ~5×**: 1.02 ms/call × 19 = 19.4 ms, which exceeds the
+  entire 15.56 ms routed-MoE budget. Another instance of §5.2/§5.3.
+
+#### Roofline: `gather_qmm` is bandwidth-bound, and that undercuts Case B's *mechanism*
+
+*Inferred — arithmetic from `config.json`, not a profile.* Per forward the experts cost
+~1.77 MB each (3 × [2048×512] at 4-bit + fp16 scales/biases), ~162 distinct experts touched per
+layer (32 tokens × 8 experts over 256), × 19 layers ≈ **5.45 GB read per forward**. At 800 GB/s
+that is a **6.81 ms floor** against the measured 11.75 ms ⇒ **~464 GB/s achieved, ~58% of peak**.
+
+**Therefore: a perfect 100%-bandwidth kernel saves 4.94 ms = 17.9% end-to-end. That is the hard
+ceiling on *all* `gather_qmm` kernel work, dequant included.** Case B is a fraction of that.
+
+**Critical caveat, and it cuts against me**: the distinct-expert count assumes uniform routing. The
+real router is group-limited (top-4 of 8 groups ⇒ ~128 reachable per token), which *concentrates*
+routing ⇒ **fewer** distinct experts ⇒ fewer bytes ⇒ **lower** achieved bandwidth (~317 GB/s, ~40%
+of peak under a concentrated model). So the uncertainty makes `gather_qmm` look **less**
+memory-bound and leaves **more** headroom — it does not license "memory-bound, so Case B is dead".
+
+The honest state: `gather_qmm` runs at **40–58% of peak bandwidth**, so it is memory-bound *with
+real headroom*. Dequant is pure ALU (weights are read 4-bit and expanded after), so it cannot
+matter *directly* under a memory bound — but it can matter **indirectly**, if register pressure
+from the dequant chain caps occupancy and hence memory-level parallelism. **That is the only
+surviving Case B mechanism, and it is exactly what §3 step 1 must test**: measure achieved
+bandwidth and occupancy on the `gather_qmm` kernel, not ALU time.
+
+#### The lever this measurement actually points at: `blockLength`
+
+A memory-bound MoE is beaten by **reading less**, not by a faster kernel. Experts are fetched
+*per forward*; more tokens per forward amortises them over more tokens:
+
+| blockLength | distinct experts/layer | experts read **per token** | vs T=32 |
+|---|---|---|---|
+| 32 (current) | 162 | 5.06 | 100% |
+| 64 | 221 | 3.46 | **68%** |
+| 128 | 251 | 1.96 | **39%** |
+| 256 | 256 | 1.00 | 20% |
+
+Expert bytes per token fall **~32% at B=64** and **~61% at B=128**, against a MoE that is 60.6% of
+the forward. **That dwarfs the 17.9% ceiling on all kernel work — and costs a config change rather
+than an mlx-swift fork (§4's Case C).** It is not free: `blockLength` is a real quality/throughput
+knob in block diffusion, and at B≥128/192 §2.7's dormant sorted-dispatch path auto-activates
+(§2.5's crossover — note T=192 was never measured directly). It needs its own sweep with a quality
+gate, exactly like WP-1b's τ_add.
+
+**Recommended order (revised by this data):**
+1. **Sweep `blockLength` ∈ {32, 64, 128}** with the §0 quality floor. Biggest lever, no Case C, and
+   the ablation arms now make its MoE effect directly measurable. *This is the new first move.*
+2. Only then §3 step 1's profile, scoped to **bandwidth/occupancy on `gather_qmm`** — and only to
+   test the register-pressure-caps-MLP mechanism, since the direct ALU story is dead.
+3. Kernel work (§4's route decision) only if (2) indicts occupancy **and** (1) has been banked.
+
+#### Superseded: S bounds (router + experts), not `gather_qmm` alone
+
+`.moeRoutedExperts` skips the router **and** the expert GEMMs, so **56.2% is a ceiling on both
+together**, not on `gatherQuantizedMM` by itself — and Case B (dequant overhead) is a fraction of
+the GEMM part only. The microbench cannot split them (its router figure, 1.02 ms, × 19 layers =
+19.4 ms, already exceeds the whole 15.48 ms routed-MoE budget — another instance of §5.2/§5.3).
+
+**Cheapest next refinement, before Instruments**: add a `.moeExpertsOnly` ablation that keeps the
+router and skips only the expert GEMMs. `no-routed − no-expertsOnly` then splits the 15.48 ms into
+router vs `gather_qmm`. One enum case, one branch, one re-run — and it sharpens the profiling
+target from "56.2% of the forward" to the actual op under investigation.
+
+---
+
+#### Original pre-registration (retained — the rule was fixed before any data was seen)
+
+**Pre-registered decision rule.** Let `S = (attr-full − attr-no-routed) / attr-full`, the
+routed-MoE share of the forward:
+
+| `S` | verdict |
+|---|---|
+| **< 15%** | **Case B is DEAD.** Close §3. Even a heroic 30% dequant recovery of *part* of that op yields <5% end-to-end — under the serving bench's resolvable floor. |
+| **15–40%** | Marginal. No kernel work until §3 step 1's profile *specifically indicts dequant* (vs. gather / occupancy / router). |
+| **> 40%** | Profile justified; proceed to §3 step 1, in-situ. |
+
+**How to run** (Studio; all four arms in **one process** — that is the point):
+```
+diffusion-bench llada --arms attr-full,attr-no-routed,attr-no-moe,attr-no-attn \
+  --runs 3 --gen-length 128 --no-early-stop --json scratch/attribution.jsonl
+```
+
+**Read `ms/forward` = `denoiseSeconds / forwardsEvaluated`. Never TPS.** Ablated arms emit
+garbage by design, so their trajectories diverge (different steps/block, different token counts) —
+but every forward is the same graph at T=32 regardless, which is what makes a garbage-output arm
+a valid timing probe. A TPS comparison across these arms is meaningless.
+
+| arm | delta yields |
+|---|---|
+| `attr-full` | **control** — must reproduce `q-cached` ms/forward (≈27.5 ms). If it does not, the harness changed the served path: stop, do not read any delta. |
+| `attr-no-routed` | `full − no-routed` = router + 57× `gatherQuantizedMM` = **Case B ceiling** |
+| `attr-no-moe` | `no-routed − no-moe` = shared-expert share |
+| `attr-no-attn` | `full − no-attn` = attention share (**incl. KV-cache growth** — the cache never fills in this arm; not "attention math only") |
+
+Remainder (`full − attention − MoE`) = lm_head + norms + loop overhead, **by subtraction —
+inferred, not measured** (same honesty as m6-logbook Finding 4). **Sanity gate: every term must be
+positive and the sum must not exceed 100%. If it does, the ablation is wrong — report it, do not
+massage it.** That is precisely the failure mode that discredited WP-6b.
+
+**Two non-obvious things found while building it**, both worth knowing before anyone touches this:
+
+1. **The served default does *not* use the JOT/capacity forward overload.** `DiffusionEngine+Entry`
+   branches: JOT/FlashBlock configs take the `jotCaches:` overload (`:152`), but the served default
+   (elastic/JOT/FlashBlock all off) falls through to the plain **M5 cached** overload (`:166`).
+   Wiring the ablation only into the former — as this doc's §5.5 originally implied — yields a
+   switch that never fires on the default path, producing a **fake null** indistinguishable from
+   "the module is free". `Tests/DiffusionGenerationTests/ModuleAblationTests.swift:testAblationActuallyBitesOnDefaultPath`
+   exists specifically to catch that class of error, and the JSONL now carries an engine-level
+   `moduleAblation` **effective echo** so it is checkable from the data rather than by inspection.
+2. **Per-arm params now exist, and this is the real fix for the cross-process drift problem.**
+   `LLaDAArm` previously carried only `(name, mode, cached, mask)`; every lever (`jotEnabled`,
+   `creditDecodingEnabled`, `nBuf`, …) was a **process-global CLI flag**. *That is the structural
+   reason every arm in the WP-3/WP-4 backfill ran in its own process* — it was forced by the bench,
+   not an oversight, and it is why sub-10% effects were unresolvable (±6–10% cross-process drift vs
+   ~0.33% within-process CV). `LLaDAArm.overrides` fixes it generally.
+
+**Known limitation — arm-major ordering** *(found 2026-07-14; not fixed, deliberately)*. The bench
+loops `for arm { for run { … } }` (`LLaDABench.swift:1174`), so each arm occupies a **contiguous
+time block** within the process — arm identity is confounded with elapsed time. One process removes
+the ±6–10% *cross-process* drift, but a within-process ramp (thermal, fragmentation) still tracks
+arm order. Scale check: within-arm/within-prompt CV is ~0.33% median, but run-to-run suite-mean
+spread reached **10.96% max** in the backfill, so this is not always negligible.
+
+- **For this experiment: acceptable.** The expected deltas (~27–37%, see below) dwarf the drift.
+- **For credit decoding's +1.8%: NOT acceptable.** Interleaving must be run-major
+  (`for run { for arm { … } }`) before that question can be settled, or the ordering bias is the
+  same size as the effect. **This is the one thing standing between `LLaDAArm.overrides` and
+  actually resolving credit decoding — do it as part of that work, not this one** (it touches the
+  loop every existing workflow uses, so it wants its own change and its own control run).
+
+**Dev-host smoke (2026-07-14) — pipeline validation, explicitly NOT a measurement.** Ran on the
+M1 (n=3–4 prompts, gen-16, chat only) purely to prove the plumbing emits what the Studio needs:
+effective echoes correct per arm, all four arms sharing one `processId`, `totalMemoryMB` present.
+The numbers are dev-host and worthless as a result — **but the sanity gate passes**: MoE 35.8% +
+attention 37.3% + remainder 26.9% = 100.0%, every term positive, nothing exceeding the forward.
+That is the first evidence the method does not blow up the way the microbench did (161%). It says
+the *approach* is sound; it says nothing about the Studio's numbers, which is what the
+pre-registered rule reads.

@@ -160,6 +160,18 @@ struct LLaDAArm {
     let mode: GenerationParams.Mode
     let cached: Bool
     let mask: BlockDiffusionMask.Semantics
+
+    /// Per-arm `GenerationParams` overrides, applied **after** the CLI-derived defaults so an arm
+    /// always wins over a flag.
+    ///
+    /// Why this exists (m6-logbook Finding 7 + the WP-3/WP-4 backfill post-mortem): every other
+    /// lever (`jotEnabled`, `creditDecodingEnabled`, `nBuf`, …) is a **process-global CLI flag**, so
+    /// A/B-ing them forced one process per arm — making every comparison *cross-process*, where
+    /// thermal drift is ±6–10%. That is why sub-10% effects (e.g. credit decoding's +1.8%) were not
+    /// resolvable: the same comparison moved ~4pp between two clean runs, including a sign flip.
+    /// Within one process, run-to-run CV is ~0.33%. Arms that carry their own overrides can be
+    /// interleaved in a single process, which is the only way to see an effect that small.
+    var overrides: @Sendable (inout GenerationParams) -> Void = { _ in }
 }
 
 struct LLaDARunResult: Codable {
@@ -249,6 +261,10 @@ struct LLaDARunResult: Codable {
     let creditAlpha: Float
     let creditBeta: Float
     let creditGamma: Float
+    // In-situ module attribution (diagnostic). "none" on every served row. Rows must be
+    // self-describing (m6-logbook rule 3) — an ablated row's TPS is meaningless and its text is
+    // garbage, so the label has to travel with the data.
+    let moduleAblation: String
     // Warmup / process / environment classification (m6-logbook Findings 1/2/7):
     // the process's first generation carries ~19 s one-off cost; cross-process
     // comparisons carry thermal drift; env fields + validity label per the frozen rule.
@@ -383,10 +399,45 @@ func runLLaDABench() async throws {
         arms = [
             LLaDAArm(name: "q-cached", mode: .q, cached: true, mask: .strict),
             LLaDAArm(name: "s-cached", mode: .s, cached: true, mask: .strict),
+            // In-situ module attribution (gather_qmm_handoff.md §5.5). Diagnostic arms: ablated
+            // arms emit garbage on purpose — the metric is ms/forward
+            // (denoiseSeconds/forwardsEvaluated), never TPS. Run them together in ONE process so
+            // the deltas are within-process (~0.33% CV) rather than cross-process (±6–10% drift):
+            //   diffusion-bench llada --arms attr-full,attr-no-routed,attr-no-moe,attr-no-attn \
+            //     --runs 3 --no-early-stop --json scratch/attribution.jsonl
+            // attr-full is the CONTROL: it must reproduce q-cached's ms/forward (≈27.5 ms on the
+            // Studio). If it does not, the harness changed the default path — stop, do not read
+            // any delta.
+            LLaDAArm(name: "attr-full", mode: .q, cached: true, mask: .strict),
+            LLaDAArm(name: "attr-no-routed", mode: .q, cached: true, mask: .strict) {
+                $0.moduleAblation = .moeRoutedExperts
+            },
+            // Splits attr-no-routed's 56.2%: router still runs, only the GEMMs are skipped, so
+            // `full − no-experts` isolates gatherQuantizedMM itself.
+            LLaDAArm(name: "attr-no-experts", mode: .q, cached: true, mask: .strict) {
+                $0.moduleAblation = .moeExpertGEMMs
+            },
+            LLaDAArm(name: "attr-no-moe", mode: .q, cached: true, mask: .strict) {
+                $0.moduleAblation = .moeAll
+            },
+            LLaDAArm(name: "attr-no-attn", mode: .q, cached: true, mask: .strict) {
+                $0.moduleAblation = .attention
+            },
         ]
         if let filter = argValue("--arms") {
             let wanted = Set(filter.split(separator: ",").map(String.init))
+            let unknown = wanted.subtracting(Set(arms.map(\.name)))
+            if !unknown.isEmpty {
+                // Fail loudly: silently filtering to an empty arm set produces a "successful" run
+                // with no rows, which is indistinguishable from a clean null result.
+                FileHandle.standardError.write(Data(
+                    "unknown arm(s): \(unknown.sorted().joined(separator: ", ")). known: \(arms.map(\.name).joined(separator: ", "))\n".utf8))
+                exit(2)
+            }
             arms = arms.filter { wanted.contains($0.name) }
+        } else {
+            // Default grid stays the two served arms — attribution arms are opt-in via --arms.
+            arms = arms.filter { !$0.name.hasPrefix("attr-") }
         }
     }
     for arm in arms {
@@ -456,7 +507,8 @@ func runLLaDABench() async throws {
         iceEnabledOverride: Bool? = nil,
         iceTauOverride: Float? = nil,
         iceNtOverride: Int? = nil,
-        promptLength: Int? = nil
+        promptLength: Int? = nil,
+        arm: LLaDAArm? = nil
     ) -> GenerationParams {
         let effIceEnabled = iceEnabledOverride ?? iceEnabled
         let effIceNt = iceNtOverride ?? iceNt
@@ -494,6 +546,10 @@ func runLLaDABench() async throws {
         // Threshold overrides
         if let t = thresholdMaskOverride { p.threshold = t }
         if let t = thresholdEditOverride { p.editingThreshold = t }
+        // Per-arm overrides last: an arm always wins over a process-global CLI flag. This is what
+        // lets several arms be interleaved in ONE process (see LLaDAArm.overrides for why that
+        // matters — cross-process drift is ±6–10%, within-process CV ~0.33%).
+        arm?.overrides(&p)
         return p
     }
 
@@ -566,7 +622,8 @@ func runLLaDABench() async throws {
             iceEnabledOverride: effIceEnabled,
             iceTauOverride: iceTauOverride,
             iceNtOverride: effIceNt,
-            promptLength: pLen
+            promptLength: pLen,
+            arm: arm
         )
 
         let output = arm.cached
@@ -655,7 +712,7 @@ func runLLaDABench() async throws {
         let posts = output.metrics.postStepsPerBlock.reduce(0, +)
         let blocks = output.stepsPerBlock.count
         // Effective thresholds (overrides included), not the mode label's — rule F7.
-        let effectiveParams = params(for: arm.mode)
+        let effectiveParams = params(for: arm.mode, arm: arm)
         let thresholds = (mask: effectiveParams.threshold, edit: effectiveParams.editingThreshold)
         let result = LLaDARunResult(
             arm: arm.name, run: run, suite: suite, promptId: prompt.id,
@@ -736,6 +793,7 @@ func runLLaDABench() async throws {
             creditAlpha: output.metrics.effectiveCreditAlpha,
             creditBeta: output.metrics.effectiveCreditBeta,
             creditGamma: output.metrics.effectiveCreditGamma,
+            moduleAblation: output.metrics.effectiveModuleAblation.rawValue,
             warmupIncluded: warmup,
             processId: Int(ProcessInfo.processInfo.processIdentifier),
             host: sysctlString("hw.model"),

@@ -260,11 +260,43 @@ public final class LLaDA2SparseMoEBlock: Module {
     }
 
     public func callAsFunction(
-        _ x: MLXArray, frozen: MLXArray? = nil, capacity: Int? = nil
+        _ x: MLXArray, frozen: MLXArray? = nil, capacity: Int? = nil,
+        ablation: ModuleAblation = .none
     ) -> MLXArray {
         let shape = x.shape
         let flat = x.reshaped(-1, shape.last!)  // [T, H]
         let T = flat.dim(0)
+
+        // In-situ attribution (diagnostic; `Plans/gather_qmm_handoff.md` §5). Handled before every
+        // other path so an ablation always dominates. Skipped work is never *built* — this does
+        // not rely on MLX dead-code-eliminating it, which would be an unverified assumption.
+        switch ablation {
+        case .moeAll:
+            return x
+        case .moeRoutedExperts:
+            // Router + expert GEMMs skipped; shared expert retained.
+            guard let sharedExperts else { return MLXArray.zeros(like: x) }
+            return sharedExperts(flat).reshaped(shape)
+        case .moeExpertGEMMs:
+            // Router RUNS in full; only `experts(flat, indices:)` — the gatherQuantizedMM calls —
+            // is replaced. The combine arithmetic below is kept *identical* to the real path so
+            // the delta from `.none` isolates the GEMMs alone and nothing else.
+            //
+            // `weights` is consumed here, and it is `takeAlong(scores, indices)` — dependent on
+            // the full matmul → sigmoid → group-limit → top-k chain. The router therefore cannot
+            // be eliminated. (Asserted behaviourally in ModuleAblationTests, not assumed.)
+            let (_, weights, _) = gate(flat)
+            // Stands in for `experts(...)`'s [T, k, H] output. A broadcast scalar: no allocation,
+            // no GEMM.
+            let stand = broadcast(MLXArray(Float(1)), to: [T, weights.dim(1), flat.dim(1)])
+            var combined = (stand * weights.expandedDimensions(axis: -1))
+                .sum(axis: 1)
+                .asType(x.dtype)
+            if let sharedExperts { combined = combined + sharedExperts(flat) }
+            return combined.reshaped(shape)
+        case .none, .attention:
+            break  // `.attention` is handled in LLaDA2DecoderLayer; the MoE runs normally.
+        }
 
         // Capacity-gather path (WP-3a §10, Option-B enabler). Only when we actually skip tokens
         // (`capacity < T`). `capacity` is a Swift Int (⌈ratio·T⌉ from the caller), so the gather

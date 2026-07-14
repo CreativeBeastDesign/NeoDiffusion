@@ -205,6 +205,14 @@ public final class DiffusionEngine {
         public let effectiveCreditAlpha: Float
         public let effectiveCreditBeta: Float
         public let effectiveCreditGamma: Float
+
+        // MARK: In-situ attribution effective echo
+        /// What the engine **actually ran with**, not what was requested. Load-bearing: an
+        /// ablation that silently fails to reach the forward would otherwise look like a clean
+        /// "no effect" result. The default path (`DiffusionEngine+Entry`) has several overloads
+        /// and only the ones the served config reaches carry the switch — this echo is what makes
+        /// that verifiable from the JSONL instead of by inspection.
+        public let effectiveModuleAblation: ModuleAblation
     }
 
     /// Mutable stats shared between the cached entry point's closures and `run` (the capture

@@ -152,7 +152,8 @@ extension DiffusionEngine {
                 return model(activeIds, positionIds: positionIds, caches: cache.layers,
                              jotCaches: jotCache.layers, frozen: frozenMaskVal, mask: nil, capacity: capacity,
                              flashBlockEnabled: params.flashBlockEnabled, flashBlockTau: params.flashBlockTau,
-                             isFirstStepOfBlock: isFirstStep, dirtyPerSeq: [dirtyCount])
+                             isFirstStepOfBlock: isFirstStep, dirtyPerSeq: [dirtyCount],
+                             ablation: params.moduleAblation)
             }
 
             // Elastic off (the served default): plain cached forward. The elastic overload
@@ -163,7 +164,8 @@ extension DiffusionEngine {
                 // ExactPrefixCache argument). Two active blocks: block-causal active mask
                 // (the trailing block sees the front, never vice versa — WP-1b).
                 guard activeLen > B else {
-                    return model(activeIds, positionIds: positionIds, caches: cache.layers, mask: nil, frozen: frozen)
+                    return model(activeIds, positionIds: positionIds, caches: cache.layers, mask: nil,
+                                 frozen: frozen, ablation: params.moduleAblation)
                 }
                 let prefixLen = W - activeLen
                 let mask = maskMemo[prefixLen] ?? {
@@ -172,7 +174,8 @@ extension DiffusionEngine {
                     maskMemo[prefixLen] = m
                     return m
                 }()
-                return model(activeIds, positionIds: positionIds, caches: cache.layers, mask: mask, frozen: frozen)
+                return model(activeIds, positionIds: positionIds, caches: cache.layers, mask: mask,
+                             frozen: frozen, ablation: params.moduleAblation)
             }
 
             let prefixLen = W - activeLen
