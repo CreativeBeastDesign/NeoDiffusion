@@ -621,3 +621,228 @@ attention 37.3% + remainder 26.9% = 100.0%, every term positive, nothing exceedi
 That is the first evidence the method does not blow up the way the microbench did (161%). It says
 the *approach* is sound; it says nothing about the Studio's numbers, which is what the
 pre-registered rule reads.
+
+---
+
+## 6. Megakernel: wrong target for the MoE, right target for the router (2026-07-14)
+
+Prompted by André: given the §5.7 budget, would an [[alpha-moe-megakernel]]-style fusion help?
+The budget answers it decisively, and the answer flips depending on *which* module you point it at.
+
+### 6.1 Alpha-MoE-style expert fusion: NO — 0.39% end-to-end *(inferred, arithmetic)*
+
+Alpha-MoE fuses UpProj+Gate → SwiGLU → quant → DownProj into one persistent kernel. **What that
+buys is the elimination of intermediate-activation round-trips to global memory.** So the only
+question that matters is how big our intermediates are next to our weights:
+
+| per forward | bytes |
+|---|---|
+| MoE intermediates (gate/up/swiglu/down, written + re-read) | **~50 MB** |
+| expert **weights** | **~5,447 MB** |
+
+Intermediates are **0.9%** of the MoE's memory traffic. Fusing every one of them away saves
+**≤0.11 ms of 11.75 ms = 0.39% end-to-end.** Rounding error.
+
+**This is a regime mismatch, not a quality judgement on their work.** Alpha-MoE targets
+tensor-parallel serving (TP16) with `moe_intermediate_size` **sharded to 256/GPU** and high batch:
+there each GPU holds a *thin slice* of weights, so weight traffic is small and activation traffic
+dominates. We are the mirror image — TP1, the whole 8.6 GB model on one device, batch T=32 — where
+weights dominate ~99:1. Their own note says gains are "most pronounced at large TP sizes and high
+batch sizes"; we are precisely the regime where they vanish. **Do not port it.**
+
+### 6.2 A *fused router* megakernel: the best-looking lever found so far *(inferred; measure first)*
+
+Point the same principle at the router (13.8%, 3.81 ms) and it inverts:
+
+| | |
+|---|---|
+| router matmul | 0.64 GFLOP/forward → **0.024 ms** at ~27 TFLOPS |
+| router weights | 40 MB/forward → **0.050 ms** at 800 GB/s |
+| **physical floor** | **~0.05 ms** |
+| **measured** | **3.81 ms — ~76× the floor** |
+
+The router computes on *tiny* tensors (`scores` is [32,256] = 8k elements) through ~18 separate
+MLX ops — matmul, sigmoid, bias, reshape, top, sum, two negates, **two full `argSort`s**, iota,
+compare, any, broadcast, `which`, slice, `takeAlong`, normalise, scale. That is **~342 kernel
+launches per forward**, and 3.81 ms / 342 = **11 µs per launch** — exactly the "tens of
+microseconds per dispatch" figure §3 quotes.
+
+**The router is dispatch-bound, not compute-bound.** Its cost is the *number of launches*, not the
+work inside them. Fusing it into one kernel per layer (342 launches → 19) plausibly takes 3.81 ms
+toward ~0.5 ms: **~3.3 ms ≈ 12% end-to-end** — comparable to the entire `gather_qmm` kernel
+project, for a fraction of the risk.
+
+**And it dodges Case C entirely.** This is a **new** kernel, not a patch to MLX's `gather_qmm` —
+§4.2's route (b). It ships via `MLXFast.metalKernel` from an inline Swift string exactly like
+FlashBlock: no mlx-swift fork, no DerivedData rebuild loop, no permanent maintenance burden.
+
+**Cheaper still, try first**: `argSort(-maskedScores)[..<topK]` **fully sorts 256 experts to take
+8**. `argPartition` (O(E), `mlx-swift/Source/MLX/Ops.swift:257`) is a few-line change. If selection
+dominates, that alone may bank much of it with no kernel at all — which is why the `attr-no-topk`
+arm (§5.7 run 3) splits matmul vs selection before anything gets built.
+
+### 6.3 Revised ranking of everything on the table
+
+| lever | est. end-to-end | cost | risk |
+|---|---|---|---|
+| `argPartition` for top-k | ? (pending `attr-no-topk`) | a few lines | trivial |
+| **fused router megakernel** | **~12%** | one new MLXFast kernel | moderate, **no fork** |
+| 3-bit experts | ~10% | conversion + quality gate | quality |
+| blockLength 64/128 | ~15% *if* steps/block grows <18% | config sweep + quality gate | quality; margin tight |
+| `gather_qmm` dequant kernel | ~10% (ceiling 18–26%) | **mlx-swift fork forever** | high; premise likely wrong (memory-bound) |
+| Alpha-MoE expert fusion | **0.39%** | large | — **rejected on arithmetic** |
+
+The kernel everyone started with is now **last**. The router — which nobody looked at, because the
+microbench's inflated numbers made every module look equally overhead-bound — is first.
+
+---
+
+## 7. Diagnostics run 3 (2026-07-14, Studio, 288 rows, one process, all `envValid`)
+
+Record: `scratch/diag.jsonl`. Control: `attr-full` 27.79 ms vs served `q-cached` 27.50 ms (+1.04%).
+
+### 7.1 blockLength — **REJECTED, decisively**
+
+The §5.7 recommendation ("sweep blockLength first — the bigger lever") is **dead**. Measured, in
+one process, `bl-32` reproducing the control:
+
+| arm | blocks | **steps/block** | ms/forward | T/forward | **TPS** |
+|---|---|---|---|---|---|
+| bl-32 | 5 | **7.78** | 27.82 | 32 | **70.73** |
+| bl-64 | 3 | **13.36** (1.72×) | 45.46 | 64 | **55.69 (−21.3%)** |
+| bl-128 | 2 | **27.75** (3.57×) | 81.22 | 128 | **23.96 (−66.1%)** |
+
+**The amortisation is real and it is not enough.** ms/forward grows only **1.63×** for 2× the
+tokens (sublinear, exactly as the byte model predicted — expert haulage really does amortise). But
+**steps/block grows 1.72× against a 1.18× break-even**, and the extra steps eat the gain twice
+over. At B=128 it collapses.
+
+This is the same mechanism that killed MultiBD (§ CLAUDE.md WP-1b): *widening the forward buys
+sublinear cost, but the wider block needs proportionally more steps to settle, and steps are
+forwards.* Two independent levers, one shared reason. **No quality sweep is needed — the speed
+case never survives, so there is nothing for quality to rescue.**
+
+*Claude's earlier "61% ≫ 18%" claim for this lever was wrong twice over: it counted only expert
+bytes (ignoring that router/attention/lm_head scale with tokens too), and it assumed steps/block
+would hold. Corrected to ~15% before the run, and now refuted outright at −21%.*
+
+### 7.2 Router split — **argSort is half the router** *(sourced)*
+
+André's question — MatMul vs ArgSort — answered:
+
+| component | ms | share of forward |
+|---|---|---|
+| `gather_qmm` expert GEMMs | 11.92 | 42.9% |
+| router: **argSort selection** (2× full sorts + group masking) | **1.91** | **6.9%** |
+| router: matmul + sigmoid + bias + takeAlong/normalise | 1.87 | 6.7% |
+| *router total* | *3.77* | *13.6%* (run 2: 13.8% ✓) |
+
+**The selection costs as much as the router's actual matmul** — to pick 8 of 256. And it is not
+compute: sorting 8k elements is microseconds of work; this is ~190 dispatches of near-nothing.
+
+**Cheapest actionable win on the board**: `argSort(-maskedScores)[..<topK]` → `argPartition`
+(O(E) vs O(E log E), `mlx-swift/Source/MLX/Ops.swift:257`). Even a 3× improvement on selection is
+**~1.3 ms ≈ 4.7% end-to-end for a few lines** — no kernel, no fork, no quality gate. Do this first.
+
+The fused-router megakernel (§6.2) remains the larger prize: the whole 3.77 ms sits ~76× above its
+physical floor, so collapsing ~342 dispatches → 19 targets **13.6%**, and it subsumes the
+`argPartition` win rather than competing with it.
+
+### 7.3 lm_head ablation — **INVALID on the first attempt (Claude's bug)**
+
+`attr-no-lmhead` reported lm_head at **86.1% of the forward** — impossible, since `gather_qmm`
+alone is 42.9%. Cause: the substitute returned a **constant**, so the logits no longer depended on
+`hidden` and **MLX eliminated the entire transformer stack as dead code**. The arm measured "model
+deleted", not "lm_head removed".
+
+Two things worth keeping from this:
+1. **The §5.7 sanity gate caught it** (sum ≤ 100%, all terms positive). No test could have: timing
+   cannot distinguish "this module is free" from "this module was deleted" — the exact trap
+   `.moeExpertGEMMs` was explicitly constructed to avoid, and which was then not applied here.
+2. **It is the same failure as WP-6b's 161%**, from the opposite direction — a number that cannot
+   be true, surfaced by an arithmetic identity rather than by intuition. Keep the gate.
+
+Fixed by making the substitute depend on `hidden` (`hidden.sum(axis:-1)` broadcast across vocab —
+O(H) per position, negligible against a [2048 × 157184] projection). Re-run pending.
+
+---
+
+## 8. Routing distribution measured — **the roofline was wrong; Case B is back** (2026-07-14)
+
+Record: `scratch/routing.jsonl` (246 forwards recovered from 223 traced steps, chat suite,
+`--speculation-k 1`, per-layer readbacks ⇒ **timings from this run are invalid by construction;
+only the distribution is used**). Instrument: `RoutingTrace` + `--dump-routing`.
+
+### 8.1 The load-bearing number, measured at last
+
+| | distinct experts / layer / forward |
+|---|---|
+| Claude's **uniform** model (§5.7) | 162 |
+| Claude's **concentrated** model (§5.7 caveat) | 111 |
+| **MEASURED** | **57.3** (median 55, range 8–144) |
+
+**Both models were wrong, and in the same direction.** Real routing is far more concentrated than
+even the pessimistic model: 256 picks (32 tokens × 8) land on ~57 distinct experts — **~4.5 picks
+per expert**. Expert popularity is heavily skewed, as MoE routing generally is.
+
+### 8.2 Consequence: `gather_qmm` is **not** demonstrably memory-bound
+
+The §5.7 conclusion — *"memory-bound at 40–58% of peak, so dequant (ALU) cannot help, Case B's
+mechanism is dead"* — **does not survive**. It rested on the 162 figure. With the real count:
+
+| assumption about the kernel's coalescing | bytes/forward | achieved | % of 800 GB/s peak |
+|---|---|---|---|
+| **perfect** (each distinct expert fetched once) | 1.93 GB | 162 GB/s | **20%** |
+| **zero** (refetch the expert per token) | 8.61 GB | 722 GB/s | **90%** |
+
+**The truth is between, and which end decides Case B outright:**
+- near **20%** → *not* memory-bound, ~5× headroom → **Case B's premise (dequant/register pressure
+  capping throughput) is live**, and the ceiling on `gather_qmm` kernel work rises to **~34.7%
+  end-to-end** — nearly double §5.7's 17.9%.
+- near **90%** → memory-bound, no headroom → Case B dead as §5.7 argued.
+
+**Coalescing quality is now THE question.** It is directly measurable (Instruments: bytes actually
+read by the kernel) — and it is *exactly* what the dormant sorted path (§2.4/§2.5) manipulates.
+
+### 8.3 The sorting argument is revived — Claude's dismissal used the wrong number
+
+§7/§6 argued sorting is pointless at T=32 ("~1.6 tokens per expert — barely anything to
+coalesce"). That used the uniform model's 162. **The real figure is 4.5 tokens per expert** —
+genuine, exploitable sharing. Combined with §6.2's free-sort idea (a fused router emits sorted
+indices as a by-product, removing the 0.43 ms that made sorting a net loss), this is now a
+first-class candidate rather than a footnote.
+
+### 8.4 Noise-aware routing (André's table): rows 1–3 **SUPPORTED**, row 4 already done
+
+| denoising phase | distinct experts/layer | n |
+|---|---|---|
+| high noise (mask > 0.6) | **49.6** | 102 |
+| mid (0.2–0.6) | **61.3** | 77 |
+| low (< 0.2) | **64.2** | 67 |
+
+Routing **is** phase-dependent, in the direction the table predicts: high-noise steps concentrate
+on *fewer, more general* experts (49.6); as the block settles, routing fans out to more
+specialised ones (64.2). Consecutive steps of a block share **80%** of their expert set (Jaccard)
+— routing is highly stable step-to-step.
+
+*(Row 4, "committed prefix → bypass MoE", is already implemented: `ExactPrefixCache` means the MoE
+only ever sees the active window — the sixth instance of the baseline-relativity pattern.)*
+
+**Exploitability** *(speculative)*: 57 experts × 1.77 MB ≈ **101 MB** per layer — the same order as
+the M2 Ultra's system-level cache, where the 162-expert model gave 287 MB (hopeless). With 80%
+step-to-step overlap, an expert's weights may well already be resident across a block's steps.
+That is a *possible* explanation for why achieved bandwidth looks low, and it is testable. It also
+means the phase-routing structure is a **description to exploit, not a policy to change** — do not
+override what the model learned.
+
+### 8.5 Corrected status
+
+**Claude's §5.7 recommendation ordering is retracted.** blockLength is refuted (§7.1); the
+memory-bound argument that demoted Case B rested on a 2.8×-wrong expert count. Standing:
+
+1. **`argPartition`** for the router's top-k — 6.9% of the forward, a few lines. Unaffected by any
+   of this. Still the cheapest win.
+2. **Measure coalescing** (Instruments on `gather_qmm`, or simply A/B the sorted path now that we
+   know sharing is 4.5×). This single number decides Case B — 20% vs 90% of peak.
+3. **Fused router megakernel** (§6.2) — 13.6%, no fork, and it makes sorting free (§8.3).
+4. Case B kernel — ceiling now **~34.7%** if (2) says 20%; dead if it says 90%.

@@ -51,7 +51,29 @@ public class LLaDA2MoeModel: Module {
     ) -> MLXArray {
         let hidden = model(activeIds, positionIds: positionIds, caches: caches, mask: mask,
                            frozen: frozen, ablation: ablation)
-        return lmHead(hidden).asType(.float32)
+        return applyLMHead(hidden, ablation: ablation)
+    }
+
+    /// LM head, with the `.lmHead` diagnostic ablation (see ``ModuleAblation``). Substitutes a
+    /// broadcast constant of the same `[.., vocab]` shape — not materialised — so the delta from
+    /// `.none` is the [hidden → vocab] projection's own cost.
+    func applyLMHead(_ hidden: MLXArray, ablation: ModuleAblation) -> MLXArray {
+        guard ablation == .lmHead else { return lmHead(hidden).asType(.float32) }
+        // The substitute MUST depend on `hidden`.
+        //
+        // The first version returned a plain constant. That made the logits independent of the
+        // transformer stack, so **MLX dead-code-eliminated the entire model** — every layer,
+        // embedding included — and the arm reported lm_head at 86% of the forward (impossible;
+        // gather_qmm alone is 42.9%). Caught by the §5.7 sanity gate, not by a test: a timing
+        // check cannot tell "this module is free" from "this module was deleted", which is the
+        // same trap `.moeExpertGEMMs` was explicitly built to avoid.
+        //
+        // Summing hidden's channels is O(H) per position — negligible against a
+        // [hiddenSize × 157184] projection — and keeps the whole stack alive.
+        var shape = hidden.shape
+        shape[shape.count - 1] = lmHead.weight.dim(0)  // [vocabSize, hiddenSize]
+        let probe = hidden.sum(axis: -1, keepDims: true).asType(.float32)  // [..., 1]
+        return broadcast(probe, to: shape)
     }
 
     /// Faithful-JOT cache-aware forward (WP-3a v2) + FlashBlock (WP-3b): active-window hidden states through the cached
@@ -68,7 +90,7 @@ public class LLaDA2MoeModel: Module {
             flashBlockEnabled: flashBlockEnabled, flashBlockTau: flashBlockTau,
             isFirstStepOfBlock: isFirstStepOfBlock, dirtyPerSeq: dirtyPerSeq,
             ablation: ablation)
-        return lmHead(hidden).asType(.float32)
+        return applyLMHead(hidden, ablation: ablation)
     }
 
     /// Elastic-Cache aware model forward pass (WP-1a).

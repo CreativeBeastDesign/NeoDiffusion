@@ -181,12 +181,26 @@ public final class LLaDA2MoEGate: Module {
     /// - Parameter x: token hidden states `[T, hiddenSize]`
     /// - Returns: `indices` `[T, topK]` (descending by biased masked score, matching
     ///   `torch.topk` order), `weights` `[T, topK]` FP32, `logits` `[T, numExperts]` FP32.
-    public func callAsFunction(_ x: MLXArray) -> (indices: MLXArray, weights: MLXArray, logits: MLXArray) {
+    public func callAsFunction(
+        _ x: MLXArray, ablation: ModuleAblation = .none
+    ) -> (indices: MLXArray, weights: MLXArray, logits: MLXArray) {
         let logits = matmul(x.asType(.float32), weight.asType(.float32).transposed())
         let scores = sigmoid(logits)
         let scoresForRouting = scores + expertBias.asType(.float32)
 
         let tokens = scoresForRouting.dim(0)
+
+        // Diagnostic (`ModuleAblation.moeRouterNoTopK`): keep matmul+sigmoid+bias, skip the group
+        // limiting and both argSorts, substituting a fixed index set. `weights` still derives from
+        // `scores` via takeAlong, so the matmul chain above cannot be eliminated.
+        if ablation == .moeRouterNoTopK {
+            let fixed = broadcast(MLXArray(0 ..< Int32(topK)).expandedDimensions(axis: 0),
+                                  to: [tokens, topK])
+            var w = takeAlong(scores, fixed, axis: -1)
+            if topK > 1 { w = w / (w.sum(axis: -1, keepDims: true) + 1e-20) }
+            w = w * routedScalingFactor
+            return (fixed, w, logits)
+        }
 
         // Group score = sum of the top-2 expert scores in each group (top-2 is fixed in
         // the reference, independent of topK).
@@ -213,6 +227,10 @@ public final class LLaDA2MoEGate: Module {
             weights = weights / (weights.sum(axis: -1, keepDims: true) + 1e-20)
         }
         weights = weights * routedScalingFactor
+
+        // Diagnostic routing capture (nil in serving; see RoutingTrace). Placed after selection so
+        // it records what the gather will actually read.
+        if let trace = moeRoutingTrace { trace.record(indices) }
 
         return (indices, weights, logits)
     }
@@ -277,15 +295,19 @@ public final class LLaDA2SparseMoEBlock: Module {
             // Router + expert GEMMs skipped; shared expert retained.
             guard let sharedExperts else { return MLXArray.zeros(like: x) }
             return sharedExperts(flat).reshaped(shape)
-        case .moeExpertGEMMs:
-            // Router RUNS in full; only `experts(flat, indices:)` — the gatherQuantizedMM calls —
-            // is replaced. The combine arithmetic below is kept *identical* to the real path so
-            // the delta from `.none` isolates the GEMMs alone and nothing else.
+        case .moeExpertGEMMs, .moeRouterNoTopK:
+            // Router RUNS; only `experts(flat, indices:)` — the gatherQuantizedMM calls — is
+            // replaced. The combine arithmetic below is kept *identical* to the real path so the
+            // delta from `.none` isolates the GEMMs alone and nothing else.
+            //
+            // `.moeRouterNoTopK` additionally drops the selection inside `gate` (see there), so
+            // the pair splits the router into matmul/sigmoid vs argSort-selection.
             //
             // `weights` is consumed here, and it is `takeAlong(scores, indices)` — dependent on
-            // the full matmul → sigmoid → group-limit → top-k chain. The router therefore cannot
-            // be eliminated. (Asserted behaviourally in ModuleAblationTests, not assumed.)
-            let (_, weights, _) = gate(flat)
+            // the matmul → sigmoid chain (and, for `.moeExpertGEMMs`, the full group-limit/top-k).
+            // The router therefore cannot be eliminated. (Asserted behaviourally in
+            // ModuleAblationTests, not assumed.)
+            let (_, weights, _) = gate(flat, ablation: ablation)
             // Stands in for `experts(...)`'s [T, k, H] output. A broadcast scalar: no allocation,
             // no GEMM.
             let stand = broadcast(MLXArray(Float(1)), to: [T, weights.dim(1), flat.dim(1)])
@@ -294,8 +316,8 @@ public final class LLaDA2SparseMoEBlock: Module {
                 .asType(x.dtype)
             if let sharedExperts { combined = combined + sharedExperts(flat) }
             return combined.reshaped(shape)
-        case .none, .attention:
-            break  // `.attention` is handled in LLaDA2DecoderLayer; the MoE runs normally.
+        case .none, .attention, .lmHead:
+            break  // handled elsewhere (decoder layer / model head); the MoE runs normally.
         }
 
         // Capacity-gather path (WP-3a §10, Option-B enabler). Only when we actually skip tokens

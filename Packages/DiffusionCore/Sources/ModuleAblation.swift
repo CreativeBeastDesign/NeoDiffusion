@@ -50,6 +50,29 @@ public enum ModuleAblation: String, Sendable, Codable, CaseIterable {
     /// Skip the whole MoE block (identity). Delta from ``moeRoutedExperts`` = shared-expert cost.
     case moeAll
 
+    /// As ``moeExpertGEMMs`` (no expert GEMMs), **and** replace the group-limited top-k selection
+    /// with a fixed index set — the router's matmul + sigmoid + expert-bias still run, only the
+    /// two `argSort`s and the group masking are skipped.
+    ///
+    /// `moeExpertGEMMs − moeRouterNoTopK` = the **selection** cost; `moeRouterNoTopK −
+    /// moeRoutedExperts` = the **matmul/sigmoid** cost. This matters because the router currently
+    /// does `argSort(-maskedScores)[..<topK]` — a *full sort of all 256 experts per token* to take
+    /// 8. If selection dominates the router's 13.8%, `argPartition` (O(E), available in MLX-Swift
+    /// `Ops.swift:257`) is a few-line change with no kernel and no mlx-swift fork.
+    ///
+    /// Not eliminable: `weights = takeAlong(scores, fixedIndices)` still consumes `scores`, which
+    /// forces the matmul chain.
+    case moeRouterNoTopK
+
+    /// Replace the LM head's output with a broadcast constant of the same shape. Delta from
+    /// ``none`` = the lm_head projection's cost, splitting the 25.2% "remainder" (lm_head + norms
+    /// + loop overhead) that §5.7 could only attribute by subtraction.
+    ///
+    /// The broadcast is not materialised, so this measures the [H → 157184] projection itself.
+    /// Sampling then reads a constant and picks garbage — irrelevant, since the metric is
+    /// ms/forward.
+    case lmHead
+
     /// Skip the attention residual add. Delta from ``none`` is attention's **total** cost including
     /// KV-cache growth (the cache never fills in this arm) — not "attention math only".
     case attention

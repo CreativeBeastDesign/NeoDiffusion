@@ -423,6 +423,23 @@ func runLLaDABench() async throws {
             LLaDAArm(name: "attr-no-attn", mode: .q, cached: true, mask: .strict) {
                 $0.moduleAblation = .attention
             },
+            // Splits the router: `no-topk` keeps matmul+sigmoid but drops the two argSorts.
+            //   attr-no-experts − attr-no-topk  = selection (argSort) cost
+            //   attr-no-topk    − attr-no-routed = matmul/sigmoid cost
+            LLaDAArm(name: "attr-no-topk", mode: .q, cached: true, mask: .strict) {
+                $0.moduleAblation = .moeRouterNoTopK
+            },
+            // Splits the 25.2% "remainder": full − no-lmhead = the [hidden -> 157184] projection.
+            LLaDAArm(name: "attr-no-lmhead", mode: .q, cached: true, mask: .strict) {
+                $0.moduleAblation = .lmHead
+            },
+            // Block-length sweep. The decisive question for the amortisation lever is how fast
+            // steps/block grows when the block grows — hardware-independent, and unmeasured.
+            // As arms (not a CLI flag) so all three run in ONE process and the wall-clock
+            // comparison is within-process (~0.3% CV) rather than cross-process (±6–10%).
+            LLaDAArm(name: "bl-32", mode: .q, cached: true, mask: .strict) { $0.blockLength = 32 },
+            LLaDAArm(name: "bl-64", mode: .q, cached: true, mask: .strict) { $0.blockLength = 64 },
+            LLaDAArm(name: "bl-128", mode: .q, cached: true, mask: .strict) { $0.blockLength = 128 },
         ]
         if let filter = argValue("--arms") {
             let wanted = Set(filter.split(separator: ",").map(String.init))
@@ -437,7 +454,7 @@ func runLLaDABench() async throws {
             arms = arms.filter { wanted.contains($0.name) }
         } else {
             // Default grid stays the two served arms — attribution arms are opt-in via --arms.
-            arms = arms.filter { !$0.name.hasPrefix("attr-") }
+            arms = arms.filter { !$0.name.hasPrefix("attr-") && !$0.name.hasPrefix("bl-") }
         }
     }
     for arm in arms {
@@ -496,6 +513,43 @@ func runLLaDABench() async throws {
             if let data = try? JSONSerialization.data(withJSONObject: rec),
                let line = String(data: data, encoding: .utf8) {
                 traceHandle.write(Data((line + "\n").utf8))
+            }
+        }
+    }
+
+    // MoE routing-distribution capture (gather_qmm_handoff §5.7's load-bearing unknown: how many
+    // DISTINCT experts a forward really touches). Pairs each forward's per-layer expert selection
+    // with its denoising phase (block / step / mask ratio), which also tests the noise-aware-routing
+    // hypothesis for free. Per-layer readbacks — wall-clock from such a run is meaningless.
+    if let dumpRoutingPath = argValue("--dump-routing") {
+        FileManager.default.createFile(atPath: dumpRoutingPath, contents: nil)
+        guard let routingHandle = FileHandle(forWritingAtPath: dumpRoutingPath) else {
+            fatalError("cannot open --dump-routing path \(dumpRoutingPath)")
+        }
+        precondition(speculationKInput == 1,
+            "--dump-routing requires --speculation-k 1: with K>1 a forward covers several steps, "
+            + "so gate records cannot be paired 1:1 with an onTrace step.")
+        let trace = RoutingTrace()
+        moeRoutingTrace = trace
+        print("routing dump enabled -> \(dumpRoutingPath) (per-layer readbacks; timings INVALID)")
+        engine.onTrace = { t in
+            // One drain per step == one record per MoE layer, in layer order.
+            let perLayer = trace.drain()
+            let maskedCount = t.masked.reduce(0) { $0 + ($1 ? 1 : 0) }
+            let rec: [String: Any] = [
+                "promptId": tracePromptId,
+                "block": t.blockIndex,
+                "step": t.stepInBlock,
+                "activeLen": t.masked.count,
+                "maskedCount": maskedCount,
+                // Denoising phase proxy: 1.0 = all masked (high noise), 0.0 = settled (low noise).
+                "maskRatio": t.masked.isEmpty ? 0
+                    : Double(maskedCount) / Double(t.masked.count),
+                "layers": perLayer.map { $0.map(Int.init) },
+            ]
+            if let data = try? JSONSerialization.data(withJSONObject: rec),
+               let line = String(data: data, encoding: .utf8) {
+                routingHandle.write(Data((line + "\n").utf8))
             }
         }
     }
