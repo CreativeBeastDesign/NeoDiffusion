@@ -16,9 +16,9 @@ import DiffusionModel
 final class SumiLMHeadPrecisionTests: XCTestCase {
 
     static let modelDir = URL(fileURLWithPath:
-        "/Users/andrebarlocher/Documents/Swift/NeoDiffusion/models/sumi-7b-4bit")
+        "./models/sumi-7b-4bit")
     static let tokenizerDir = URL(fileURLWithPath:
-        "/Users/andrebarlocher/Documents/Swift/NeoDiffusion/Tools/reference/sumi")
+        "./Tools/reference/sumi")
 
     func testHeadQuantizationImpact() async throws {
         try XCTSkipUnless(

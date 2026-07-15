@@ -52,7 +52,7 @@ final class SumiCoreFixtureTests: XCTestCase {
             return URL(fileURLWithPath: override)
         }
         return URL(fileURLWithPath:
-            "/Users/andrebarlocher/Documents/Swift/NeoDiffusion/scratch/sumi_core_fixtures")
+            "./scratch/sumi_core_fixtures")
     }
 
     var manifest: Manifest!

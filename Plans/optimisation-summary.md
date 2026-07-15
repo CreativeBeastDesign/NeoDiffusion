@@ -15,14 +15,14 @@ The following table summarizes the status and key metrics of each experiment:
 
 | Campaign / Work Package | Primary Lever | Verdict | Key Algorithmic Metric | Wall-Clock TPS Impact (M1) | Key Document / Logbook |
 | :--- | :--- | :--- | :--- | :--- | :--- |
-| **M6 Baseline Campaign** | N/A | **Complete** | Baseline established | ~0.34s / steady forward | [m6-logbook.md](file:///Users/andrebarlocher/Documents/Swift/NeoDiffusion/Plans/m6-logbook.md) |
-| **M8 Quantization Sweep** | Cheaper steps | **Uniform 4-bit g64** | ~2.7% confident flip rate | Baseline footprint ~9.57 GB | [m8-logbook.md](file:///Users/andrebarlocher/Documents/Swift/NeoDiffusion/Plans/m8-logbook.md) |
-| **WP-1a Elastic-Cache** | Cheaper steps | **REJECTED** | Steps/block: 12.6 → up to 30.6 | Negative (adds drift overhead) | [elastic-cache-logbook.md](file:///Users/andrebarlocher/Documents/Swift/NeoDiffusion/Plans/elastic-cache-logbook.md) |
-| **WP-1b MultiBD** | More tokens/fwd | **PROVISIONAL ACCEPT** | TPF-logical: +23% (chat) / +29.5% (reasoning) | Compute-bound (1.75× latency) | [wp1b-logbook.md](file:///Users/andrebarlocher/Documents/Swift/NeoDiffusion/Plans/wp1b-logbook.md) |
-| **WP-2a Auto-speculation** | More tokens/fwd | **REJECTED (default-off)** | S2D2 acceptance: 4–10 tok/step | Compute-negative (~2× width) | [wp2a-logbook.md](file:///Users/andrebarlocher/Documents/Swift/NeoDiffusion/Plans/wp2a-logbook.md) |
-| **WP-2b-2 Dynamic Threshold** | Fewer steps/blk | **ACCEPT** | Steps/block: -14.8% (chat) / -11.3% (reasoning) | Positive (fewer total steps) | [wp2b-logbook.md](file:///Users/andrebarlocher/Documents/Swift/NeoDiffusion/Plans/wp2b-logbook.md) |
-| **WP-2b-3 EOS Early Exit** | Fewer steps/blk | **NULL** | 0% change in steps or tokens | Neutral (pre-banked in base) | [wp2b-logbook.md](file:///Users/andrebarlocher/Documents/Swift/NeoDiffusion/Plans/wp2b-logbook.md) |
-| **WP-3a JOT Early Stopping** | Cheaper steps | **WALL-CLOCK REJECT** | Steps/block: +15% in v2 (vs +75% in v1) | Compute-neutral/negative | [jot-logbook.md](file:///Users/andrebarlocher/Documents/Swift/NeoDiffusion/Plans/jot-logbook.md) |
+| **M6 Baseline Campaign** | N/A | **Complete** | Baseline established | ~0.34s / steady forward | [m6-logbook.md](file://./Plans/m6-logbook.md) |
+| **M8 Quantization Sweep** | Cheaper steps | **Uniform 4-bit g64** | ~2.7% confident flip rate | Baseline footprint ~9.57 GB | [m8-logbook.md](file://./Plans/m8-logbook.md) |
+| **WP-1a Elastic-Cache** | Cheaper steps | **REJECTED** | Steps/block: 12.6 → up to 30.6 | Negative (adds drift overhead) | [elastic-cache-logbook.md](file://./Plans/elastic-cache-logbook.md) |
+| **WP-1b MultiBD** | More tokens/fwd | **PROVISIONAL ACCEPT** | TPF-logical: +23% (chat) / +29.5% (reasoning) | Compute-bound (1.75× latency) | [wp1b-logbook.md](file://./Plans/wp1b-logbook.md) |
+| **WP-2a Auto-speculation** | More tokens/fwd | **REJECTED (default-off)** | S2D2 acceptance: 4–10 tok/step | Compute-negative (~2× width) | [wp2a-logbook.md](file://./Plans/wp2a-logbook.md) |
+| **WP-2b-2 Dynamic Threshold** | Fewer steps/blk | **ACCEPT** | Steps/block: -14.8% (chat) / -11.3% (reasoning) | Positive (fewer total steps) | [wp2b-logbook.md](file://./Plans/wp2b-logbook.md) |
+| **WP-2b-3 EOS Early Exit** | Fewer steps/blk | **NULL** | 0% change in steps or tokens | Neutral (pre-banked in base) | [wp2b-logbook.md](file://./Plans/wp2b-logbook.md) |
+| **WP-3a JOT Early Stopping** | Cheaper steps | **WALL-CLOCK REJECT** | Steps/block: +15% in v2 (vs +75% in v1) | Compute-neutral/negative | [jot-logbook.md](file://./Plans/jot-logbook.md) |
 
 ---
 

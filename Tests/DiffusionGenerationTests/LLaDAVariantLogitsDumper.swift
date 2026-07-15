@@ -20,9 +20,9 @@ import DiffusionModel
 final class LLaDAVariantLogitsDumper: XCTestCase {
 
     static let corpusDir = URL(fileURLWithPath:
-        "/Users/andrebarlocher/Documents/Swift/NeoDiffusion/scratch/m8_drift")
+        "./scratch/m8_drift")
     static let defaultModelDir =
-        "/Users/andrebarlocher/Documents/Swift/NeoDiffusion/models/llada2-1-mini-4bit"
+        "./models/llada2-1-mini-4bit"
 
     func testDumpVariantLogits() throws {
         let env = ProcessInfo.processInfo.environment

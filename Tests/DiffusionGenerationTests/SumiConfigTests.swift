@@ -9,7 +9,7 @@ final class SumiConfigTests: XCTestCase {
 
     static let referenceConfigURL = URL(
         fileURLWithPath:
-            "/Users/andrebarlocher/Documents/Swift/NeoDiffusion/Tools/reference/sumi/config.json")
+            "./Tools/reference/sumi/config.json")
 
     func testSumiConfigLoads() throws {
         let data = try Data(contentsOf: Self.referenceConfigURL)

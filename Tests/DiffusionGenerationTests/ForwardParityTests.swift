@@ -43,7 +43,7 @@ final class ForwardParityTests: XCTestCase {
             return URL(fileURLWithPath: override)
         }
         return URL(fileURLWithPath:
-            "/Users/andrebarlocher/Documents/Swift/NeoDiffusion/scratch/core_fixtures")
+            "./scratch/core_fixtures")
     }
 
     var manifest: FixtureManifest!

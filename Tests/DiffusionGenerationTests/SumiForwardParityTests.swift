@@ -17,7 +17,7 @@ final class SumiForwardParityTests: XCTestCase {
             return URL(fileURLWithPath: override)
         }
         return URL(fileURLWithPath:
-            "/Users/andrebarlocher/Documents/Swift/NeoDiffusion/scratch/sumi_core_fixtures")
+            "./scratch/sumi_core_fixtures")
     }
 
     func testFullForwardParity() throws {

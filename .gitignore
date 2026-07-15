@@ -6,3 +6,14 @@ scratch/
 DerivedData/
 *.xcodeproj/xcuserdata/
 *.xcworkspace/xcuserdata/
+
+# Metal build outputs (compiled from inline kernel sources at runtime; never source)
+*.metallib
+*.air
+
+# Python bytecode
+**/__pycache__/
+*.pyc
+
+# Local archives
+*.zip

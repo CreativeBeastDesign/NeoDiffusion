@@ -19,11 +19,11 @@ import DiffusionModel
 final class LLaDADriftCorpusDumper: XCTestCase {
 
     static let modelDir = URL(fileURLWithPath:
-        "/Users/andrebarlocher/Documents/Swift/NeoDiffusion/models/llada2-1-mini-4bit")
+        "./models/llada2-1-mini-4bit")
     static let tokenizerDir = URL(fileURLWithPath:
-        "/Users/andrebarlocher/Documents/Swift/NeoDiffusion/models/llada2-1-mini")
+        "./models/llada2-1-mini")
     static let outDir = URL(fileURLWithPath:
-        "/Users/andrebarlocher/Documents/Swift/NeoDiffusion/scratch/m8_drift")
+        "./scratch/m8_drift")
 
     // One prompt per content regime (steps/block spans 2–21 by content — m6 Finding 5).
     static let prompts: [(id: String, user: String, genLength: Int)] = [

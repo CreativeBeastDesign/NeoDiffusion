@@ -18,7 +18,7 @@ final class SumiEarlyExitTests: XCTestCase {
             return URL(fileURLWithPath: override)
         }
         return URL(fileURLWithPath:
-            "/Users/andrebarlocher/Documents/Swift/NeoDiffusion/scratch/sumi_loop_fixtures")
+            "./scratch/sumi_loop_fixtures")
     }
 
     private func makeEngine() throws -> (SumiEngine, SumiConfig) {

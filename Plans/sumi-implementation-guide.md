@@ -753,7 +753,7 @@ Naming: `sumi-M1'` through `sumi-M7'`. Prime marks distinguish from LLaDA-family
 
 ## 11. Kick-off objective for Claude Code / Codex
 
-Copy-paste this into a fresh Claude Code / Codex session inside `/Users/andrebarlocher/Documents/Swift/NeoDiffusion` after LMOE (`M6'`) is merged. Under 300 words, names the first file to touch and the first test to keep green.
+Copy-paste this into a fresh Claude Code / Codex session inside `./` after LMOE (`M6'`) is merged. Under 300 words, names the first file to touch and the first test to keep green.
 
 ```
 Task: begin the Sumi-7B port for NeoDiffusion, milestone sumi-M1'.

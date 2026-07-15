@@ -18,7 +18,7 @@ final class SumiSamplerTests: XCTestCase {
             return URL(fileURLWithPath: override)
         }
         return URL(fileURLWithPath:
-            "/Users/andrebarlocher/Documents/Swift/NeoDiffusion/scratch/sumi_core_fixtures")
+            "./scratch/sumi_core_fixtures")
     }
 
     var tensors: [String: MLXArray]!

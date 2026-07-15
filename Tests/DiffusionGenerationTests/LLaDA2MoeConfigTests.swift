@@ -90,7 +90,7 @@ final class LLaDA2MoeConfigTests: XCTestCase {
     }
     
     func testWeightsLoader() throws {
-        let mlxDir = URL(fileURLWithPath: "/Users/andrebarlocher/Documents/Swift/NeoDiffusion/scratch/dummy_mlx")
+        let mlxDir = URL(fileURLWithPath: "./scratch/dummy_mlx")
         let configURL = mlxDir.appendingPathComponent("config.json")
         let weightsURL = mlxDir.appendingPathComponent("model.safetensors")
         

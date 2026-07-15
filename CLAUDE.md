@@ -19,7 +19,7 @@ Planning is **complete**; implementation is **underway**. **M0–M5 are implemen
 | `Plans/Optimisations.md` | Historical concept survey — **superseded by phase-3 doc** for ordering; keep for context only | Optional |
 
 Internal & external references (fetch, don't trust memory):
-- `/Users/andrebarlocher/Documents/Swift/NeoDiffusion/models/llada2-1-mini` — `config.json`, `configuration_llada2_moe.py`, `modeling_llada2_moe.py` (the ground-truth reference implementation; the phase-2 doc §1 pins its `generate()` semantics), `model.safetensors.index.json` (weight-name verification, M1 gate), `generation_config.json` + `tokenizer_config.json` (special-token audit, M2 gate).
+- `./models/llada2-1-mini` — `config.json`, `configuration_llada2_moe.py`, `modeling_llada2_moe.py` (the ground-truth reference implementation; the phase-2 doc §1 pins its `generate()` semantics), `model.safetensors.index.json` (weight-name verification, M1 gate), `generation_config.json` + `tokenizer_config.json` (special-token audit, M2 gate).
 - André's research wiki (separate Obsidian vault, "Diffusion") — concept/proposal pages behind the design, notably `04-Proposals/neodiffusion-inference-engine.md`, `04-Proposals/elastic-cache-metal-kernel.md`, `02-Sources/mbd-lms.md`. Not required for Phase 2 coding; required before Phase 3 work packages. Ask André for access if needed.
 
 ## Fixed decisions (summary — details in phase-1 §1 and §13)
@@ -58,6 +58,7 @@ Internal & external references (fetch, don't trust memory):
 - **Provenance discipline** (house style, from the wiki): mark claims **sourced / inferred / speculative** in docs and non-trivial code comments; unsourced performance assumptions are bugs.
 - **Record negative results**: failed approaches go into the Plans docs (and the wiki via André), not into deletion.
 - **André's preferences**: Swift 6 / SwiftPM; hexagonal architecture (Generation = application core; kernels/model-IO/tokenizer/server = adapters behind ports — this mapping is phase-1 §4); ask questions rather than assume when information is missing; concise communication.
+- **Agent Rules & Benchmarking Methodology**: Adhere strictly to the workspace guidelines in [.agents/AGENTS.md](.agents/AGENTS.md), specifically the "paranoid" benchmarking discipline (validating telemetry logs via `envValid` row labeling, logging engine-level effective echoes, excluding warmup, content sensitivity), hard optimization acceptance gates, and provenance requirements.
 - **When you deviate from the plans**: update the relevant Plans doc in the same change, and flag it to André. The Plans docs are the source of truth, not this summary — on conflict, phase-2 wins for implementation detail, phase-1 for architecture intent.
 
 ## Environment notes

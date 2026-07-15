@@ -29,7 +29,7 @@ final class CoreFixtureTests: XCTestCase {
     static let seqLength = 48
 
     static let fixtureDir = URL(fileURLWithPath:
-        "/Users/andrebarlocher/Documents/Swift/NeoDiffusion/scratch/core_fixtures")
+        "./scratch/core_fixtures")
 
     var weights: [String: MLXArray]!
     var tensors: [String: MLXArray]!

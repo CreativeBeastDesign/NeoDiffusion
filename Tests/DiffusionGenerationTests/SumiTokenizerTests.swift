@@ -45,10 +45,10 @@ final class SumiTokenizerTests: XCTestCase {
 
     static let fixtureURL = URL(
         fileURLWithPath:
-            "/Users/andrebarlocher/Documents/Swift/NeoDiffusion/scratch/sumi_tokenizer_fixtures.json")
+            "./scratch/sumi_tokenizer_fixtures.json")
     static let tokenizerDir = URL(
         fileURLWithPath:
-            "/Users/andrebarlocher/Documents/Swift/NeoDiffusion/Tools/reference/sumi")
+            "./Tools/reference/sumi")
 
     func testTokenizerParity() async throws {
         try XCTSkipUnless(

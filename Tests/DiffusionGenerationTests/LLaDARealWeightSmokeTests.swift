@@ -17,9 +17,9 @@ import DiffusionModel
 final class LLaDARealWeightSmokeTests: XCTestCase {
 
     static let modelDir = URL(fileURLWithPath:
-        "/Users/andrebarlocher/Documents/Swift/NeoDiffusion/models/llada2-1-mini-4bit")
+        "./models/llada2-1-mini-4bit")
     static let tokenizerDir = URL(fileURLWithPath:
-        "/Users/andrebarlocher/Documents/Swift/NeoDiffusion/models/llada2-1-mini")
+        "./models/llada2-1-mini")
 
     private func loadContainerOrSkip() throws -> DiffusionModel {
         try XCTSkipUnless(

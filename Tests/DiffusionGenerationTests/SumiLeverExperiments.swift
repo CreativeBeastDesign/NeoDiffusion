@@ -24,9 +24,9 @@ import DiffusionModel
 final class SumiLeverExperiments: XCTestCase {
 
     static let modelDir = URL(fileURLWithPath:
-        "/Users/andrebarlocher/Documents/Swift/NeoDiffusion/models/sumi-7b-4bit")
+        "./models/sumi-7b-4bit")
     static let tokenizerDir = URL(fileURLWithPath:
-        "/Users/andrebarlocher/Documents/Swift/NeoDiffusion/Tools/reference/sumi")
+        "./Tools/reference/sumi")
 
     static let prompt = "Question: What is the capital of Japan?\nAnswer:"
     static let budget = 64

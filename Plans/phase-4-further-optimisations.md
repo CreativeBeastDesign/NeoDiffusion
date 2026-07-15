@@ -3,7 +3,7 @@
 **Status**: draft  
 **Last updated**: 2026-07-12  
 **Prerequisites**: Phase 2 and Phase 3 completed; baseline environment telemetry and MultiBD/Dynamic Thresholding stacks landed.  
-**Objective**: This document defines the implementation plans, concrete experiments, and Apple Silicon evaluation methodologies for the training-free and lightweight training optimizations identified during the [Research Sources Evaluation](file:///Users/andrebarlocher/Documents/Swift/NeoDiffusion/Plans/research-sources-evaluation.md).
+**Objective**: This document defines the implementation plans, concrete experiments, and Apple Silicon evaluation methodologies for the training-free and lightweight training optimizations identified during the [Research Sources Evaluation](file://./Plans/research-sources-evaluation.md).
 
 ---
 
@@ -31,7 +31,7 @@ graph TD
 ---
 
 ## WP-4a: Temporal Self-Consistency Voting
-*Sourced from [time-is-a-feature.md](file:///Users/andrebarlocher/Documents/Swift/NeoDiffusion/Resources/TimeIsAFeature/time-is-a-feature.md) and [temporal-self-consistency-voting.md](file:///Users/andrebarlocher/Documents/Swift/NeoDiffusion/Resources/TimeIsAFeature/temporal-self-consistency-voting.md)*
+*Sourced from [time-is-a-feature.md](file://./Resources/TimeIsAFeature/time-is-a-feature.md) and [temporal-self-consistency-voting.md](file://./Resources/TimeIsAFeature/temporal-self-consistency-voting.md)*
 
 ### 1. Concept & Mechanism
 dLLMs suffer from *temporal oscillation*—intermediate steps frequently produce correct answers that are later overwritten with incorrect tokens by the final step. Temporal Self-Consistency Voting (TSCV) aggregates intermediate predictions from the second half of the denoising trajectory, clusters them by semantic equivalence, and performs an exponentially-weighted vote to select the final output.
@@ -58,7 +58,7 @@ $$\text{Output } a^* = \operatorname{argmax}_a \sum_{t=t_{\text{start}}}^T e^{\a
 ---
 
 ## WP-4b: Guided Diffusion
-*Sourced from [flashdlm-tech-report.md](file:///Users/andrebarlocher/Documents/Swift/NeoDiffusion/Resources/FlashDLM/flashdlm-tech-report.md) and [guided-diffusion.md](file:///Users/andrebarlocher/Documents/Swift/NeoDiffusion/Resources/FlashDLM/guided-diffusion.md)*
+*Sourced from [flashdlm-tech-report.md](file://./Resources/FlashDLM/flashdlm-tech-report.md) and [guided-diffusion.md](file://./Resources/FlashDLM/guided-diffusion.md)*
 
 ### 1. Concept & Mechanism
 Standard parallel unmasking breaks local dependencies because the DLM samples independently from conditional marginals, causing semantic incoherence (especially in code). Guided Diffusion uses a compact, pretrained AR model (e.g. Qwen2.5-1.5B) to guide unmasking. At each step, the DLM proposes tokens; the AR model processes the proposed sequence and only tokens where both models agree are accepted.
@@ -84,7 +84,7 @@ Standard parallel unmasking breaks local dependencies because the DLM samples in
 ---
 
 ## WP-4c: In-Place Chain-of-Thought with Early Exit (ICE)
-*Sourced from [ice-tech-report.md](file:///Users/andrebarlocher/Documents/Swift/NeoDiffusion/Resources/ICE/ice-tech-report.md) and [in-place-chain-of-thought.md](file:///Users/andrebarlocher/Documents/Swift/NeoDiffusion/Resources/ICE/in-place-chain-of-thought.md)*
+*Sourced from [ice-tech-report.md](file://./Resources/ICE/ice-tech-report.md) and [in-place-chain-of-thought.md](file://./Resources/ICE/in-place-chain-of-thought.md)*
 
 ### 1. Concept & Mechanism
 ICE embeds structured reasoning step templates (e.g. "Step 1:", "Step 2:") directly into the active generation block. It refines the "thinking" section while monitoring the average confidence of the masked "answer" tokens. When the average answer confidence stabilizes above $\tau$, the engine exits the reasoning loop early and decodes the entire answer in a single parallel step.
@@ -110,7 +110,7 @@ $$\text{avg\_conf}_{\text{answer}} = \frac{1}{L_{\text{answer}}} \sum_{i \in \te
 ---
 
 ## WP-4d: Credit Decoding
-*Sourced from [dinfer-framework.md](file:///Users/andrebarlocher/Documents/Swift/NeoDiffusion/Resources/dInfer/dinfer-framework.md) and [credit-decoding.md](file:///Users/andrebarlocher/Documents/Swift/NeoDiffusion/Resources/dInfer/credit-decoding.md)*
+*Sourced from [dinfer-framework.md](file://./Resources/dInfer/dinfer-framework.md) and [credit-decoding.md](file://./Resources/dInfer/credit-decoding.md)*
 
 ### 1. Concept & Mechanism
 Credit Decoding tracks prediction stability across steps. Tokens that are consistently predicted accumulate credit. This credit is then used to boost their logits in subsequent steps, driving them over the unmasking threshold faster and reducing overall denoising steps.
@@ -137,7 +137,7 @@ $$\tilde{f}_\theta(x_t)_i^v = f_\theta(x_t)_i^v + \alpha \cdot \log(1 + C_{i,v}^
 ---
 
 ## WP-4e: Autoregressive Plan Conditioning
-*Sourced from [Think First, Diffuse Fast (arXiv:2603.13243)](file:///Users/andrebarlocher/Documents/Swift/NeoDiffusion/Resources/TimeIsAFeature/time-is-a-feature.md)*
+*Sourced from [Think First, Diffuse Fast (arXiv:2603.13243)](file://./Resources/TimeIsAFeature/time-is-a-feature.md)*
 
 ### 1. Concept & Mechanism
 Multi-step reasoning tasks pose a "coordination problem" for DLMs: they lack the incremental coherence-building properties of AR models. Plan Conditioning prepends a short (~100 token) natural-language plan generated by an AR model to the diffusion prompt. The plan serves as an immutable, globally visible "frozen scaffold." During denoising, all token positions attend to the plan, allowing structured global context to guide local generation from step 0.
@@ -162,7 +162,7 @@ Multi-step reasoning tasks pose a "coordination problem" for DLMs: they lack the
 ---
 
 ## WP-4f: Progressive Refinement Regulation (PRR)
-*Sourced from [Progressive Refinement Regulation (arXiv:2603.04514)](file:///Users/andrebarlocher/Documents/Swift/NeoDiffusion/Resources/dInfer/iteration-smoothing.md)*
+*Sourced from [Progressive Refinement Regulation (arXiv:2603.04514)](file://./Resources/dInfer/iteration-smoothing.md)*
 
 ### 1. Concept & Mechanism
 PRR regulates decoding speed by preventing redundant refinement of early-stabilized tokens. A token-wise Multi-Layer Perceptron (MLP) controller predicts "empirical convergence progress" based on intermediate hidden states. It then dynamically shapes the denoising distribution (via temperature scaling) to freeze converged tokens earlier and continue refinement only where needed.

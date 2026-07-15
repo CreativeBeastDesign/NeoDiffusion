@@ -20,9 +20,9 @@ import DiffusionModel
 final class SumiRealWeightSmokeTests: XCTestCase {
 
     static let modelDir = URL(fileURLWithPath:
-        "/Users/andrebarlocher/Documents/Swift/NeoDiffusion/models/sumi-7b-4bit")
+        "./models/sumi-7b-4bit")
     static let tokenizerDir = URL(fileURLWithPath:
-        "/Users/andrebarlocher/Documents/Swift/NeoDiffusion/Tools/reference/sumi")
+        "./Tools/reference/sumi")
     static let canvas = 1024        // generation operating point (Finding 1, revised)
     static let probeCanvas = 1536   // reconstruction probe needs ≥1536 (see header)
 

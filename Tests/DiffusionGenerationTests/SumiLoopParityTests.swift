@@ -54,7 +54,7 @@ final class SumiLoopParityTests: XCTestCase {
             return URL(fileURLWithPath: override)
         }
         return URL(fileURLWithPath:
-            "/Users/andrebarlocher/Documents/Swift/NeoDiffusion/scratch/sumi_loop_fixtures")
+            "./scratch/sumi_loop_fixtures")
     }
 
     func testDeterministicLoopParity() throws {

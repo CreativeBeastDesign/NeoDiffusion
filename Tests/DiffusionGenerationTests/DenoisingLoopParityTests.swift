@@ -92,7 +92,7 @@ final class DenoisingLoopParityTests: XCTestCase {
             return URL(fileURLWithPath: override)
         }
         return URL(fileURLWithPath:
-            "/Users/andrebarlocher/Documents/Swift/NeoDiffusion/scratch/loop_fixtures")
+            "./scratch/loop_fixtures")
     }
 
     var manifest: Manifest!
