@@ -16,7 +16,7 @@ This document is scoped to *things you'd otherwise have to rediscover*. The auth
 The pinned reference `.py` files are downloaded and cached locally — **you do not need network access to read them**:
 
 ```
-/Users/andrebarlocher/.cache/huggingface/hub/models--inclusionAI--LLaDA2.1-mini/snapshots/20e64e2ad21644d0e5248586ed9c942cdd45de0f/
+~/.cache/huggingface/hub/models--inclusionAI--LLaDA2.1-mini/snapshots/20e64e2ad21644d0e5248586ed9c942cdd45de0f/
     modeling_llada2_moe.py            # the reference model + generate(); generate() at line 1244
     configuration_llada2_moe.py       # the default table (use_qk_norm=True etc.)
     config.json                       # real model config (20 layers, 256 experts, ...)

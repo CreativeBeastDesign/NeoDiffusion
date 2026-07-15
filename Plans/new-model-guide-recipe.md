@@ -16,7 +16,7 @@ The output of this recipe is a document with the same shape and rigour as `Plans
 Produce a single markdown file, `Plans/<model-slug>-implementation-guide.md`, that lets André (or Claude Code operating on his behalf) implement and optimise the new model inside NeoDiffusion **without re-reading the source papers**. Everything load-bearing must be in the guide.
 
 ### 0.2 Target reader
-André, and Claude Code running inside `/Users/andrebarlocher/Documents/Swift/NeoDiffusion`. Assume both know Swift/MLX, Metal, and diffusion LLMs at a working level. Do not re-explain what masked diffusion is. Do explain what is different about *this* model.
+André, and Claude Code running inside `./`. Assume both know Swift/MLX, Metal, and diffusion LLMs at a working level. Do not re-explain what masked diffusion is. Do explain what is different about *this* model.
 
 ### 0.3 Non-goals
 - Not a research paper summary. If the paper's contribution isn't observable in the released weights or reference code, omit it.
@@ -50,7 +50,7 @@ If any of these are missing and the request is not a followup on this same recip
 
 ## 2. Sources to read, in order
 
-The agent should read these files in the sandbox before writing a single line. If they are not in the sandbox, pull them from the Mac with `pc pull /Users/andrebarlocher/Documents/Swift/NeoDiffusion/<path>`.
+The agent should read these files in the sandbox before writing a single line. If they are not in the sandbox, pull them from the Mac with `pc pull ./<path>`.
 
 ### 2.1 NeoDiffusion state (read all)
 - `Plans/CLAUDE.md` — engine invariants, style rules, milestone status.
@@ -117,7 +117,7 @@ For every optimisation surfaced by web search:
 ## 3. Output file location and naming
 
 - Write to `/home/user/workspace/<slug>-implementation-guide.md` first.
-- After it validates (§8), push to `/Users/andrebarlocher/Documents/Swift/NeoDiffusion/Plans/<slug>-implementation-guide.md` with `pc push`.
+- After it validates (§8), push to `./Plans/<slug>-implementation-guide.md` with `pc push`.
 - Share the sandbox copy with `share_file` (name argument: `<slug>-implementation-guide`).
 
 ---

@@ -1,6 +1,6 @@
 # Nemotron-Labs-Diffusion-3B — MLX-Swift + Metal implementation guide
 
-**Target repo**: `/Users/andrebarlocher/Documents/Swift/NeoDiffusion/`
+**Target repo**: `./`
 **Target integration point**: extends the LLaDA-family engine (after LMOE + DiffusionGemma + Sumi land)
 **Purpose**: honest, load-bearing plan to bring NVIDIA's tri-mode diffusion LM to Apple Silicon with the SAME LLaDA-family engine — reusing everything possible, being explicit about what breaks and what doesn't.
 
@@ -763,7 +763,7 @@ Copy-paste to your dev agent to start execution:
 
 ---
 
-> You are working on `/Users/andrebarlocher/Documents/Swift/NeoDiffusion/`, an MLX-Swift + Metal implementation of the LLaDA-family engine. LMOE, DiffusionGemma, and Sumi are already in-tree (or will be by the time you start).
+> You are working on `./`, an MLX-Swift + Metal implementation of the LLaDA-family engine. LMOE, DiffusionGemma, and Sumi are already in-tree (or will be by the time you start).
 >
 > **Task**: Implement Nemotron-Labs-Diffusion-3B as the fourth model. Follow the guide at `Plans/nemotron-labs-diffusion-implementation-guide.md` (this file). Start with milestone **nemotron-M0'''-1** and stop after it passes its exit criteria before proceeding.
 >
