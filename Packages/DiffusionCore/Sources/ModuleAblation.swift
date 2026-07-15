@@ -47,6 +47,23 @@ public enum ModuleAblation: String, Sendable, Codable, CaseIterable {
     /// output must differ from ``moeRoutedExperts``, which is only possible if the router ran.
     case moeExpertGEMMs
 
+    /// **The coalescing probe.** Router runs; expert GEMMs run; but the routing indices are
+    /// overridden to a fixed set, so the layer touches only `topK` (8) distinct experts instead of
+    /// the ~57 real routing touches — while the *pick count* stays identical at T×K = 256.
+    ///
+    /// This isolates the one question §8.2 leaves open: does `gather_qmm`'s time track **distinct
+    /// experts** (i.e. bytes — the kernel coalesces repeated reads) or **picks** (i.e. it refetches
+    /// per token)?
+    ///
+    /// | outcome | reading |
+    /// |---|---|
+    /// | time collapses ~11.9 → ~2 ms | tracks bytes ⇒ coalesced ⇒ really at ~20% of peak ⇒ **not** memory-bound ⇒ Case B live, ceiling ~35% |
+    /// | time stays ~11.9 ms | tracks picks, not bytes ⇒ not bandwidth-limited at all ⇒ Case B live for a different reason |
+    /// | time drops only ~10% | already near the 90%-of-peak bound ⇒ memory-bound ⇒ **Case B dead** |
+    ///
+    /// FLOPs are unchanged (still 256 pick-GEMMs), so any large delta is memory traffic, not work.
+    case moeFixedExperts
+
     /// Skip the whole MoE block (identity). Delta from ``moeRoutedExperts`` = shared-expert cost.
     case moeAll
 

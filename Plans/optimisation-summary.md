@@ -1,8 +1,12 @@
 # NeoDiffusion Optimization Summary
 
+> [!NOTE]
+> A comprehensive, unified dashboard of all campaigns, work packages, and experiments is available in the [Experiments Master List](file:///Users/andrebarlocher/Documents/Swift/NeoDiffusion/Plans/experiments-master-list.md).
+
 This document consolidates the experimental results, verdicts, and architectural lessons from the optimization campaigns run across **Phase 2** and **Phase 3** of the NeoDiffusion project. It provides an overview of what was measured, what was accepted, what was rejected, and why.
 
 ---
+
 
 ## Executive Summary & Performance Matrix
 

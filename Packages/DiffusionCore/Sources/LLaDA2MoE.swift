@@ -159,6 +159,22 @@ public final class LLaDA2MoEGate: Module {
     public let weight: MLXArray
     @ParameterInfo(key: "expert_bias") public var expertBias: MLXArray
 
+    /// Router-reuse state (experimental; see `GenerationParams.routerReuseSteps`). Lives on the
+    /// gate because there is exactly one gate instance per MoE layer, so this *is* per-layer state
+    /// with no extra plumbing. Not a parameter — never enters the checkpoint tree.
+    ///
+    /// Holds already-evaluated arrays: by the time a step ends MLX has realised them, so reusing
+    /// them is a buffer reference and genuinely skips rebuilding the router's ops (that is the
+    /// point — the router's cost is the ~18 dispatches, not the arithmetic).
+    private var cachedIndices: MLXArray?
+    private var cachedWeights: MLXArray?
+
+    /// Drop reuse state. Call between generations; a stale set from another sequence is nonsense.
+    public func resetRouterCache() {
+        cachedIndices = nil
+        cachedWeights = nil
+    }
+
     public init(
         hiddenSize: Int,
         numExperts: Int,
@@ -182,8 +198,17 @@ public final class LLaDA2MoEGate: Module {
     /// - Returns: `indices` `[T, topK]` (descending by biased masked score, matching
     ///   `torch.topk` order), `weights` `[T, topK]` FP32, `logits` `[T, numExperts]` FP32.
     public func callAsFunction(
-        _ x: MLXArray, ablation: ModuleAblation = .none
+        _ x: MLXArray, ablation: ModuleAblation = .none, reuseRouter: Bool = false
     ) -> (indices: MLXArray, weights: MLXArray, logits: MLXArray) {
+        // Router reuse (experimental). Serve the previous forward's decision without rebuilding
+        // any of the router's ops. Guarded on token count: a shape change means a different active
+        // window, where the old decision is meaningless.
+        if reuseRouter, let ci = cachedIndices, let cw = cachedWeights, ci.dim(0) == x.dim(0) {
+            // `logits` is discarded by every caller (LLaDA2SparseMoEBlock ignores it), so an empty
+            // stand-in is safe and costs nothing.
+            return (ci, cw, MLXArray.zeros([0]))
+        }
+
         let logits = matmul(x.asType(.float32), weight.asType(.float32).transposed())
         let scores = sigmoid(logits)
         let scoresForRouting = scores + expertBias.asType(.float32)
@@ -232,6 +257,9 @@ public final class LLaDA2MoEGate: Module {
         // it records what the gather will actually read.
         if let trace = moeRoutingTrace { trace.record(indices) }
 
+        cachedIndices = indices
+        cachedWeights = weights
+
         return (indices, weights, logits)
     }
 }
@@ -279,7 +307,7 @@ public final class LLaDA2SparseMoEBlock: Module {
 
     public func callAsFunction(
         _ x: MLXArray, frozen: MLXArray? = nil, capacity: Int? = nil,
-        ablation: ModuleAblation = .none
+        ablation: ModuleAblation = .none, reuseRouter: Bool = false
     ) -> MLXArray {
         let shape = x.shape
         let flat = x.reshaped(-1, shape.last!)  // [T, H]
@@ -295,6 +323,20 @@ public final class LLaDA2SparseMoEBlock: Module {
             // Router + expert GEMMs skipped; shared expert retained.
             guard let sharedExperts else { return MLXArray.zeros(like: x) }
             return sharedExperts(flat).reshaped(shape)
+        case .moeFixedExperts:
+            // Coalescing probe (§8.2). Router runs; GEMMs run; only the *indices* are overridden to
+            // a fixed set, so the layer touches `topK` distinct experts instead of ~57 while the
+            // pick count (and therefore the FLOPs) stays identical. Any large delta from `.none` is
+            // memory traffic, not work.
+            let (_, weights, _) = gate(flat)
+            let k = weights.dim(1)
+            let fixed = broadcast(MLXArray(0 ..< Int32(k)).expandedDimensions(axis: 0), to: [T, k])
+            let expertOut = experts(flat, indices: fixed)  // [T, k, H] — real gatherQuantizedMM
+            var combined = (expertOut.asType(.float32) * weights.expandedDimensions(axis: -1))
+                .sum(axis: 1)
+                .asType(x.dtype)
+            if let sharedExperts { combined = combined + sharedExperts(flat) }
+            return combined.reshaped(shape)
         case .moeExpertGEMMs, .moeRouterNoTopK:
             // Router RUNS; only `experts(flat, indices:)` — the gatherQuantizedMM calls — is
             // replaced. The combine arithmetic below is kept *identical* to the real path so the
@@ -350,7 +392,7 @@ public final class LLaDA2SparseMoEBlock: Module {
 
         // Routed experts + shared expert over the *full* window. Identical for both paths — JOT
         // (below) does not change the shape or the dispatch, only zeroes selected outputs.
-        let (indices, weights, _) = gate(flat)
+        let (indices, weights, _) = gate(flat, reuseRouter: reuseRouter)
         
         var combined: MLXArray
         // Adaptive Dispatcher (WP-6a):

@@ -159,6 +159,24 @@ public struct GenerationParams: Sendable, Equatable {
     /// Defined in DiffusionCore (the modules it switches live there); see ``ModuleAblation``.
     public var moduleAblation: ModuleAblation = .none
 
+    /// **Router reuse** (experimental, `0` = off). Recompute the MoE router only every N forwards
+    /// and reuse the previous decision in between.
+    ///
+    /// Motivated by measurement, not theory: the router costs **13.6% of the forward** and is
+    /// dispatch-bound (~76× its physical floor — `gather_qmm_handoff.md` §6.2), while consecutive
+    /// denoising steps were measured to share **80% of their expert set** (§8.4). If routing barely
+    /// changes step to step, recomputing it every step buys little. At N=2 the ceiling is ~6.8% of
+    /// the forward; at N=4, ~10%.
+    ///
+    /// The trade is quality: ~20% of expert choices per step are genuinely new, and reuse serves
+    /// those tokens the wrong experts. Needs a quality gate before it is anything but a probe.
+    ///
+    /// **Known approximation in this implementation**: recompute is keyed off the *global* forward
+    /// counter, not a per-block one, so a block boundary can occasionally land on a reuse step and
+    /// carry the previous block's routing for one forward. That makes the quality reading
+    /// pessimistic (conservative), not optimistic. Shape changes still force a recompute.
+    public var routerReuseSteps: Int = 0
+
     public init(
         threshold: Float,
         editingThreshold: Float,

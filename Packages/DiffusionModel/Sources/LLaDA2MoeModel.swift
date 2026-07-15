@@ -47,10 +47,11 @@ public class LLaDA2MoeModel: Module {
     ///     block, the block-causal active-window mask for a two-block window (WP-1b)
     public func callAsFunction(
         _ activeIds: MLXArray, positionIds: MLXArray, caches: [LayerKVCache],
-        mask: MLXArray? = nil, frozen: MLXArray? = nil, ablation: ModuleAblation = .none
+        mask: MLXArray? = nil, frozen: MLXArray? = nil, ablation: ModuleAblation = .none,
+        reuseRouter: Bool = false
     ) -> MLXArray {
         let hidden = model(activeIds, positionIds: positionIds, caches: caches, mask: mask,
-                           frozen: frozen, ablation: ablation)
+                           frozen: frozen, ablation: ablation, reuseRouter: reuseRouter)
         return applyLMHead(hidden, ablation: ablation)
     }
 
@@ -188,14 +189,15 @@ public class LLaDA2MoeInnerModel: Module {
     /// (its `pending*` set to this window's K/V) for a later commit.
     public func callAsFunction(
         _ activeIds: MLXArray, positionIds: MLXArray, caches: [LayerKVCache],
-        mask: MLXArray? = nil, frozen: MLXArray? = nil, ablation: ModuleAblation = .none
+        mask: MLXArray? = nil, frozen: MLXArray? = nil, ablation: ModuleAblation = .none,
+        reuseRouter: Bool = false
     ) -> MLXArray {
         precondition(caches.count == layers.count, "one cache per layer required")
         var hidden = wordEmbeddings(activeIds)
         let (cos, sin) = rotaryEmbedding.cosSin(positionIds: positionIds)
         for (layer, cache) in zip(layers, caches) {
             hidden = layer(hidden, cos: cos, sin: sin, cache: cache, mask: mask, frozen: frozen,
-                           ablation: ablation)
+                           ablation: ablation, reuseRouter: reuseRouter)
         }
         return norm(hidden)
     }

@@ -88,7 +88,7 @@ final class ModuleAblationTests: XCTestCase {
             let base = DiffusionEngine(model: model, speculationK: 4)
                 .generateCached(prompt: c.prompt, params: p)
 
-            for ablation: ModuleAblation in [.moeRoutedExperts, .moeExpertGEMMs, .moeAll, .attention] {
+            for ablation: ModuleAblation in [.moeRoutedExperts, .moeExpertGEMMs, .moeFixedExperts, .moeAll, .attention] {
                 var pa = p
                 pa.moduleAblation = ablation
                 let out = DiffusionEngine(model: model, speculationK: 4)
@@ -157,5 +157,84 @@ final class ModuleAblationTests: XCTestCase {
                               "\(c.name): .moeRoutedExperts must retain the shared expert, so it "
                               + "cannot be identical to .moeAll")
         }
+    }
+}
+
+/// Guards for router reuse (`GenerationParams.routerReuseSteps`) — experimental, default off.
+final class RouterReuseTests: XCTestCase {
+    var manifest: DenoisingLoopParityTests.Manifest!
+    var traces: DenoisingLoopParityTests.Traces!
+    var model: LLaDA2MoeModel!
+
+    override func setUpWithError() throws {
+        let dir = DenoisingLoopParityTests.fixtureDir
+        try XCTSkipUnless(
+            FileManager.default.fileExists(atPath: dir.appendingPathComponent("traces.json").path),
+            "Loop fixtures missing at \(dir.path)")
+        manifest = try JSONDecoder().decode(
+            DenoisingLoopParityTests.Manifest.self,
+            from: Data(contentsOf: dir.appendingPathComponent("manifest.json")))
+        traces = try JSONDecoder().decode(
+            DenoisingLoopParityTests.Traces.self,
+            from: Data(contentsOf: dir.appendingPathComponent("traces.json")))
+        let dm = DiffusionModel(config: manifest.config)
+        try dm.loadWeights(from: dir.appendingPathComponent("weights.safetensors"))
+        model = dm.model
+    }
+
+    /// Off by default, and `0`/`1` must be bit-identical to the baseline: the reuse plumbing must
+    /// not perturb the served path merely by existing.
+    func testReuseOffIsBitIdentical() throws {
+        for c in traces.cases {
+            let p = c.params.toGenerationParams()
+            XCTAssertEqual(p.routerReuseSteps, 0, "reuse must be off by default")
+            for n in [0, 1] {
+                var pr = p; pr.routerReuseSteps = n
+                let base = DiffusionEngine(model: model, speculationK: 4)
+                    .generateCached(prompt: c.prompt, params: p)
+                let out = DiffusionEngine(model: model, speculationK: 4)
+                    .generateCached(prompt: c.prompt, params: pr)
+                XCTAssertEqual(out.finalSequence, base.finalSequence,
+                               "\(c.name): routerReuseSteps=\(n) must be inert")
+            }
+        }
+    }
+
+    /// Reuse must actually *bite* — if the output is unchanged, the reuse path never fired and any
+    /// speed reading from it would be measuring nothing (the `attr-*` lesson).
+    func testReuseChangesBehaviour() throws {
+        var changed = false
+        for c in traces.cases {
+            let p = c.params.toGenerationParams()
+            var pr = p; pr.routerReuseSteps = 2
+            let base = DiffusionEngine(model: model, speculationK: 4)
+                .generateCached(prompt: c.prompt, params: p)
+            let out = DiffusionEngine(model: model, speculationK: 4)
+                .generateCached(prompt: c.prompt, params: pr)
+            if out.finalSequence != base.finalSequence { changed = true }
+        }
+        XCTAssertTrue(changed,
+            "routerReuseSteps=2 changed no output on any fixture — the reuse path is not firing, "
+            + "so its timings would be meaningless. (A toy fixture settling in <2 steps could also "
+            + "explain this; check stepsPerBlock before trusting a green result here.)")
+    }
+
+    /// Reuse state must not leak between generations — a decision cached from another prompt is
+    /// nonsense. Running B after A must equal running B alone.
+    func testReuseStateDoesNotLeakAcrossGenerations() throws {
+        guard traces.cases.count >= 2 else { throw XCTSkip("need 2 fixture cases") }
+        let a = traces.cases[0], b = traces.cases[1]
+        var pr = b.params.toGenerationParams(); pr.routerReuseSteps = 2
+        var pa = a.params.toGenerationParams(); pa.routerReuseSteps = 2
+
+        let bAlone = DiffusionEngine(model: model, speculationK: 4)
+            .generateCached(prompt: b.prompt, params: pr)
+        let engine = DiffusionEngine(model: model, speculationK: 4)
+        _ = engine.generateCached(prompt: a.prompt, params: pa)
+        let bAfterA = engine.generateCached(prompt: b.prompt, params: pr)
+
+        XCTAssertEqual(bAfterA.finalSequence, bAlone.finalSequence,
+            "router-reuse state leaked from the previous generation — resetRouterCache() is not "
+            + "being called, and results depend on what ran before.")
     }
 }

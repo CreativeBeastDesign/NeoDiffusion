@@ -55,7 +55,8 @@ public final class LLaDA2DecoderLayer: Module {
     ///   elastic/JOT/FlashBlock all off), which is why it carries the switch.
     public func callAsFunction(
         _ x: MLXArray, cos: MLXArray, sin: MLXArray, cache: LayerKVCache,
-        mask: MLXArray? = nil, frozen: MLXArray? = nil, ablation: ModuleAblation = .none
+        mask: MLXArray? = nil, frozen: MLXArray? = nil, ablation: ModuleAblation = .none,
+        reuseRouter: Bool = false
     ) -> MLXArray {
         // `.attention` skips the attention residual add. The KV cache therefore never grows in
         // that arm, so the delta measures attention's *total* cost including cache growth — not
@@ -71,7 +72,7 @@ public final class LLaDA2DecoderLayer: Module {
         switch mlp {
         case let dense as LLaDA2MLP: ffnOutput = dense(ffnInput)
         case let moe as LLaDA2SparseMoEBlock:
-            ffnOutput = moe(ffnInput, frozen: frozen, ablation: ablation)
+            ffnOutput = moe(ffnInput, frozen: frozen, ablation: ablation, reuseRouter: reuseRouter)
         default: fatalError("unsupported mlp module type \(type(of: mlp))")
         }
         hidden = hidden + ffnOutput
@@ -93,7 +94,7 @@ public final class LLaDA2DecoderLayer: Module {
         jot: LayerJotCache, frozen: MLXArray, mask: MLXArray? = nil, capacity: Int? = nil,
         flashBlockEnabled: Bool = false, flashBlockTau: Int = 4,
         isFirstStepOfBlock: Bool = false, dirtyPerSeq: [Int] = [0],
-        ablation: ModuleAblation = .none
+        ablation: ModuleAblation = .none, reuseRouter: Bool = false
     ) -> MLXArray {
         // `.attention` skips the attention residual add entirely. Note this also means the KV
         // cache never grows in that arm, so the measured delta is attention's *total* cost
@@ -112,7 +113,7 @@ public final class LLaDA2DecoderLayer: Module {
         switch mlp {
         case let dense as LLaDA2MLP: ffnOutput = dense(ffnInput)
         case let moe as LLaDA2SparseMoEBlock:
-            ffnOutput = moe(ffnInput, frozen: frozen, capacity: capacity, ablation: ablation)
+            ffnOutput = moe(ffnInput, frozen: frozen, capacity: capacity, ablation: ablation, reuseRouter: reuseRouter)
         default: fatalError("unsupported mlp module type \(type(of: mlp))")
         }
         hidden = hidden + ffnOutput

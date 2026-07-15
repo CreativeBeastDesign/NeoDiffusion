@@ -288,6 +288,9 @@ func runLLaDABench() async throws {
     let runs = (baselineCheck || iceSweep) ? 1 : (Int(argValue("--runs") ?? "3") ?? 3)
     let cooldown = (baselineCheck || iceSweep) ? 2 : (Int(argValue("--cooldown") ?? "30") ?? 30)
     let jsonPath = argValue("--json") ?? "\(repoRoot)/scratch/llada_bench.jsonl"
+    // Case B causal probe: swap 4-bit experts for pre-dequantized FP16 (4x the bytes, zero dequant
+    // work, identical FLOPs). ~30 GB — Studio only. See ExpertDequantization.
+    let dequantExperts = hasFlag("--dequantize-experts")
     let genLength = Int(argValue("--gen-length") ?? "128") ?? 128
     let iceEnabled = hasFlag("--ice") || iceSweep
     let iceTau = Float(argValue("--ice-tau") ?? "0.9") ?? 0.9
@@ -433,6 +436,20 @@ func runLLaDABench() async throws {
             LLaDAArm(name: "attr-no-lmhead", mode: .q, cached: true, mask: .strict) {
                 $0.moduleAblation = .lmHead
             },
+            // Coalescing probe (§8.2): same 256 picks, but only 8 distinct experts instead of ~57.
+            // full - fixed  ==  the cost of the extra 49 distinct experts' bytes.
+            LLaDAArm(name: "attr-fixed-experts", mode: .q, cached: true, mask: .strict) {
+                $0.moduleAblation = .moeFixedExperts
+            },
+            // Router reuse (§8.4): recompute routing every N forwards, reuse in between.
+            // Ceiling is the router's 13.6%: N=2 -> ~6.8%, N=4 -> ~10%. Quality is the open
+            // question — ~20% of expert picks per step are genuinely new (measured Jaccard 80%).
+            LLaDAArm(name: "reuse-2", mode: .q, cached: true, mask: .strict) { $0.routerReuseSteps = 2 },
+            LLaDAArm(name: "reuse-4", mode: .q, cached: true, mask: .strict) { $0.routerReuseSteps = 4 },
+            // Router's TRUE in-context marginal cost: compute routing once per block, reuse for
+            // every other step, GEMMs still running. q-cached - reuse-999 == what a perfect fused
+            // router could ever save. (Trajectory is garbage; only ms/forward is read.)
+            LLaDAArm(name: "reuse-999", mode: .q, cached: true, mask: .strict) { $0.routerReuseSteps = 999 },
             // Block-length sweep. The decisive question for the amortisation lever is how fast
             // steps/block grows when the block grows — hardware-independent, and unmeasured.
             // As arms (not a CLI flag) so all three run in ONE process and the wall-clock
@@ -454,7 +471,7 @@ func runLLaDABench() async throws {
             arms = arms.filter { wanted.contains($0.name) }
         } else {
             // Default grid stays the two served arms — attribution arms are opt-in via --arms.
-            arms = arms.filter { !$0.name.hasPrefix("attr-") && !$0.name.hasPrefix("bl-") }
+            arms = arms.filter { !$0.name.hasPrefix("attr-") && !$0.name.hasPrefix("bl-") && !$0.name.hasPrefix("reuse-") }
         }
     }
     for arm in arms {
@@ -476,6 +493,13 @@ func runLLaDABench() async throws {
     if hasFlag("--quantize-lm-head") {
         container.quantizeLMHead()
         print("lm_head quantized to 4-bit (g64) in memory (M8 E5 axis)")
+    }
+    if dequantExperts {
+        let n = ExpertDequantization.dequantizeRoutedExperts(container.model)
+        let peak = Double(GPU.peakMemory) / 1_073_741_824
+        print(String(format: "routed experts DEQUANTIZED to FP16 in memory: %d projections, "
+                     + "peak %.1f GB — gatherMM replaces gatherQuantizedMM (Case B causal probe; "
+                     + "4x the bytes, zero dequant work, identical FLOPs)", n, peak))
     }
     let tokenizer = try await DiffusionTokenizer.from(modelFolder: tokenizerDir)
     let loadSeconds = Date().timeIntervalSince(loadStart)

@@ -846,3 +846,261 @@ memory-bound argument that demoted Case B rested on a 2.8×-wrong expert count. 
    know sharing is 4.5×). This single number decides Case B — 20% vs 90% of peak.
 3. **Fused router megakernel** (§6.2) — 13.6%, no fork, and it makes sorting free (§8.3).
 4. Case B kernel — ceiling now **~34.7%** if (2) says 20%; dead if it says 90%.
+
+---
+
+## 9. Incidental find: **FlashBlock has never reused its cache** (2026-07-15)
+
+Found while wiring router reuse; **not fixed** (see below). *Sourced — code, not inference.*
+
+`DiffusionEngine+Entry.swift`'s forward closure branches three ways:
+
+```
+if flashBlock || jotFaithful { ... return model(...) }      // returns
+guard elasticCacheEnabled else { ... return model(...) }     // returns
+// Elastic-Cache path only:
+stepIndex += 1                                               // <- ONLY here
+```
+
+**`stepIndex += 1` is inside the Elastic-Cache branch**, which the other two `return` before ever
+reaching. With Elastic off — i.e. **every FlashBlock and JOT configuration ever benched** —
+`stepIndex` is permanently **0**, so `isFirstStep = (stepIndex == 0)` is permanently **true**.
+
+`FlashBlockRunner.chooseStepKind` (`:462`) opens with:
+```swift
+if isFirstStepOfBlock { return .refreshCache }
+```
+
+⇒ **FlashBlock has never once taken its `.reuseCache` path.** It pays the full cache-refresh on
+every step and receives none of the benefit its entire design exists for.
+
+### Why this matters
+
+**WP-3b's "algorithmic ACCEPT / wall-clock REJECT" is likely invalid.** That verdict measured
+FlashBlock's cost with its benefit switched off by a bug. The wiki draft's own headline —
+"verified token-for-token against the MLX baseline under `tau = 0`" — is exactly why nobody caught
+it: at τ=0 refresh-every-step *is* the expected behaviour, so the parity test passes whether or not
+the reuse path works. The one config that would have exposed the bug is the one the test didn't run.
+
+Note this does **not** rescue FlashBlock's ceiling: §7 measured attention at **14.3%** of the
+forward, so even flawless reuse cannot buy more than that. But "rejected because it never ran" and
+"rejected because attention is only 14%" are different facts, and only the second is a real result.
+
+### FIXED 2026-07-15 (André's call), full suite green
+
+`onBlockSettled` does `stepIndex = 0` — so `stepIndex` was **designed** as a per-block step counter
+and `isFirstStep = (stepIndex == 0)` was always the right *intent*. Only the increment sat in the
+wrong branch. That made the fix unambiguous rather than a judgement call.
+
+Now incremented once per forward at the top of the closure, with every branch reading the
+pre-increment value (`stepInBlock`). **Elastic's semantics are preserved exactly**: it previously
+incremented *after* its body, so during forward N of a block it observed `stepIndex == N`; it still
+does. Full suite: **118 tests, 0 failures** — including the JOT/FlashBlock parity tests, which now
+run with `isFirstStepOfBlock` actually varying.
+
+Bonus: router reuse keys off the same per-block counter, so it always recomputes at each block's
+first step — removing the block-boundary staleness approximation its first version had to accept.
+
+**Outstanding (André's call): re-bench WP-3b's FlashBlock arm.** Its "algorithmic accept /
+wall-clock reject" was measured with the reuse path dead, so it recorded cost without benefit. Note
+the ceiling is unchanged either way — §7 measured attention at 14.3% of the forward — so this
+cannot make FlashBlock a winner; it can only establish *why* it lost.
+
+---
+
+## 10. Coalescing probe: **`gather_qmm` is not memory-bound. Case B is LIVE.** (2026-07-15)
+
+Record: `scratch/coalesce.jsonl` — 108 rows, all `envValid`, one process, control `attr-full`
+27.88 ms vs served `q-cached` 27.50 (+1.37%).
+
+The probe (`.moeFixedExperts`) holds picks and FLOPs **identical** (256 pick-GEMMs) and changes
+only the number of *distinct* experts touched: ~57 → 8, i.e. **7× fewer bytes**.
+
+| | gather_qmm |
+|---|---|
+| 57 distinct experts (real routing) | **11.78 ms** |
+| 8 distinct experts (7× fewer bytes, same FLOPs) | **14.76 ms** |
+| predicted if time tracked **bytes** | 14.0% of the 57-expert cost |
+| predicted if time tracked **picks** | 100% |
+| **measured** | **125%** |
+
+**Reading 7× less data made it 25% SLOWER.** No bandwidth-bound kernel can behave this way.
+**Time does not track bytes.** §5.7's central claim — *"memory-bound, therefore dequant (ALU)
+cannot help, therefore Case B's mechanism is dead"* — is **refuted by measurement**.
+
+### What bound is it under? None of the obvious ones
+
+| bound | figure | verdict |
+|---|---|---|
+| bandwidth | 1.93 GB/forward ⇒ 164 GB/s = **20% of 800 GB/s** | not bandwidth-bound |
+| compute | 30.6 GFLOP/forward ⇒ 2.60 TFLOPS = **12% of ~21 TFLOPS** | not compute-bound |
+| dispatch | 57 calls/forward ⇒ **207 µs each** (vs ~11 µs launch overhead) | not dispatch-bound |
+
+`gather_qmm` sits at ~12% of compute and ~20% of bandwidth while doing neither. **The only bound
+left is latency/occupancy — which is precisely Case B's hypothesis** (dequant chain → register
+pressure → occupancy → too few memory requests in flight to saturate anything).
+
+*(The 125% anomaly deserves its own explanation and is **not** yet explained: plausibly all 32
+tokens hammering the same 8 weight tiles serialises the memory system or collapses
+memory-level parallelism. It is consistent with "not bandwidth-bound" but should not be
+over-read — flagged as **speculative**, and worth one Instruments capture to confirm.)*
+
+### Ceiling on Case B, revised upward — twice
+
+| | ceiling on `gather_qmm` kernel work |
+|---|---|
+| §5.7 (uniform-routing model, "memory-bound") | 17.9% |
+| §8.2 (measured 57.3 experts, coalescing unknown) | 18–26% |
+| **§10 (measured: not memory-bound)** | **~34–37% end-to-end** |
+
+`gather_qmm` is 42.3% of the forward and is running at ~1/5 of what the hardware can do. Driving it
+to *either* physical bound would recover ~34–37% end-to-end. Even a partial win is large.
+
+### Corrected standing order
+
+1. **§3 step 1's Instruments profile — now fully justified and precisely targeted.** Measure
+   occupancy, register usage and memory-level parallelism on `gather_qmm` at T=32. Do **not**
+   measure ALU time; the question is what caps occupancy. This is the profile the original hand-off
+   asked for, and after three rounds of measurement it is finally the right next move.
+2. **Fused router megakernel** (§6.2) — 13.6%, dispatch-bound, no fork. Independent of (1).
+3. Case C (§4) decides *how* any kernel ships — route (b), a new `MLXFast.metalKernel`, no fork.
+
+**Retracted by this section**: §5.7's "memory-bound ⇒ Case B dead", §5.7's blockLength
+recommendation (refuted in §7.1), and §6/§8.3's dismissal of sorting on a wrong expert count.
+The one thing that has survived every round is **§2.8's Case A verdict** — and §2.7 measured it.
+
+---
+
+## 11. Router reuse: **REJECTED** — and it exposed a flaw in the ablation budget (2026-07-15)
+
+Record: `scratch/reuse.jsonl` — 108 rows, all `envValid`, one process. Control `q-cached` 28.15 ms
+vs the 27.50 reference (+2.4%).
+
+| arm | ms/forward | steps/block | TPS |
+|---|---|---|---|
+| q-cached | 28.15 | 8.85 | **73.50** |
+| reuse-2 | 27.56 (−2.1%) | 11.95 (**1.35×**) | **63.01 (−14.3%)** |
+| reuse-4 | 27.32 (−3.0%) | 14.22 (**1.61×**) | **55.78 (−24.1%)** |
+
+**Rejected on both halves of the trade.**
+
+**Quality/steps**: stale routing costs **35% more steps** at N=2. §8.4's 80% consecutive-step expert
+overlap did *not* mean routing is reusable — the ~20% that churns each step is evidently the part
+that matters. A high Jaccard on the *set* hides that the per-token assignment is what the model
+needs. Fourth idea in this document to die on "the baseline already banks it or the trade doesn't
+pay"; **record and move on**.
+
+### The more important finding: **ablation costs are not additive**
+
+Skipping the router on half the forwards should have saved ~6.6% (half of its measured 13.2%).
+It saved **2.1%** — a third of that. Implied marginal cost of the router in a *real* forward: ~4%.
+
+**Why §7.2's router split is suspect**: `attr-no-topk` and `attr-no-routed` both run with the expert
+GEMMs *removed*. So selection (1.91 ms) and matmul (1.87 ms) were measured in a **GEMM-less
+forward**, where the router's ~342 tiny dispatches are fully exposed. In a real forward, with 11.9 ms
+of GEMM work in the queue, much of that dispatch latency is evidently hidden.
+
+**This does not affect the load-bearing numbers**, which were all measured against a full forward:
+- `gather_qmm` = `full − no-experts` = 11.92 ms — both arms have the router ✓
+- routed-MoE total = `full − no-routed` = 15.56 ms ✓ (replicated twice)
+- attention = `full − no-attn` ✓
+- §10's coalescing probe = `full` vs `fixed-experts`, both complete forwards ✓
+
+**And it kills §6.2's fused-router recommendation.** The `reuse-999` arm (routing computed once per
+block, GEMMs still running) measures the router's true in-context marginal cost — the hard ceiling
+on *any* fused router:
+
+| | router cost |
+|---|---|
+| ablation, GEMM-less forward (§7.2) | 3.64 ms = **13.2%** |
+| reuse-2 implied | ~4% |
+| **`q-cached − reuse-999`, full forward** | **0.48 ms = 1.7%** |
+
+**Overstated by 7.7×. A perfect fused router saves 1.7% end-to-end — §6.2 is DEAD, and
+`argPartition` (§7.2) with it, being a subset of that 1.7%.**
+
+**Mechanism** *(inferred, and it explains every router figure in this document)*: the router's cost
+is largely **CPU-side dispatch**, which overlaps with GPU execution. With 11.9 ms of GEMM work in
+the queue the CPU builds the router's ~342 tiny kernels while the GPU is still busy — free. Remove
+the GEMMs and there is nothing left to hide behind. It also explains the microbench: 1.02 ms for a
+router on 8k elements is dispatch cost with *no* GPU work to hide it, which is the same artefact
+§5.2/§5.3 diagnosed, seen from another angle.
+
+**The "39% of the forward is dispatch-bound small ops" reframing (§7.3) is therefore retracted.**
+Those dispatches are largely hidden, not costly.
+
+**Lesson for the method**: an ablation delta answers *"what does removing X from THIS configuration
+cost?"* — not *"what is X worth in isolation."* Deltas measured against different baselines are not
+interchangeable, and on a GPU the difference is not academic: work that hides behind other work is
+free until the work it hides behind goes away. Every future arm must be differenced against the
+**full** forward, not against another ablation.
+
+---
+
+## 12. FP16 probe: quantization vindicated, **Case B's premise SUPPORTED and sized ~27%** (2026-07-15)
+
+Record: `scratch/fp16.jsonl` — 72 rows, all `envValid`, one process, peak 30.1 GB. Routed experts
+dequantized to FP16 in memory (57 projections), so the MoE dispatches `gatherMM`, not
+`gatherQuantizedMM`: **4× the bytes, zero dequant work, identical FLOPs.**
+
+| | bytes/forward | dequant | measured | achieved BW |
+|---|---|---|---|---|
+| 4-bit `gatherQuantizedMM` | 1.93 GB | yes | **11.92 ms** | 162 GB/s (**20%** of peak) |
+| FP16 `gatherMM` | 7.73 GB | **none** | **17.86 ms** | 433 GB/s (**54%** of peak) |
+
+### 1. Quantization is doing its job — the escape is refuted
+
+**4-bit is 1.50× faster than FP16 end-to-end.** Removing dequantization entirely makes things
+*worse*, because you pay 4× the bandwidth for it. "Just don't quantize the experts" is not an
+option on speed grounds (independent of the 31.5 GB it would cost). **The artefact's design is
+vindicated by direct measurement** — the first time that has actually been tested rather than
+assumed.
+
+### 2. But the bandwidths expose the real story
+
+The same gather family moves bytes at **433 GB/s** with FP16 and only **162 GB/s** with 4-bit — a
+**2.7× gap**. Decomposing the 4-bit path against FP16's demonstrated rate:
+
+```
+  4-bit at FP16's 433 GB/s would take :  4.46 ms
+  4-bit actually takes                : 11.92 ms
+  NOT EXPLAINED BY MOVING BYTES       :  7.46 ms  = ~27% of the forward
+```
+The model closes on both arms (FP16: 7.73 GB / 433 GB/s = 17.86 ✓; 4-bit: 4.46 + 7.46 = 11.92 ✓).
+
+**Case B's premise — that the 4-bit inner loop carries a large non-bandwidth cost — is SUPPORTED,
+and for the first time SIZED at ~7.5 ms ≈ 27% of the forward.** This is consistent with §10's
+independent finding (time doesn't track bytes; 12% of compute peak, 20% of bandwidth peak) and
+explains it: the 4-bit gather spends most of its time *not moving bytes*.
+
+**Caveat — inferred, not sourced.** This assumes `gatherQuantizedMM` *could* reach the 433 GB/s
+that `gatherMM` demonstrates. They are different kernels and packed 4-bit reads may be intrinsically
+less efficient per byte, so **7.5 ms is an upper bound on the prize, not a promise**. What is solid
+is the direction: the 4-bit gather leaves real time on the table, and it is the only lever in this
+document still standing.
+
+### 3. Where that leaves the whole investigation
+
+Everything proposed over two days is now measured. **The original hand-off's instinct was right and
+every one of Claude's alternatives was wrong:**
+
+| lever | verdict | evidence |
+|---|---|---|
+| **`gather_qmm` inner loop (Case B)** | **ALIVE — the only survivor. ~27% upper bound** | §10, §12 |
+| Case A (divergence/tiling) | closed | §2.8, measured §2.7 |
+| blockLength 64/128 | **refuted** (−21% / −66% TPS) | §7.1 |
+| router reuse | **refuted** (−14% / −24% TPS) | §11 |
+| fused-router megakernel | **refuted** (ceiling 1.7%, not 13.6%) | §11 |
+| `argPartition` top-k | **refuted** (subset of that 1.7%) | §11 |
+| Alpha-MoE expert fusion | refuted (0.39%) | §6.1 |
+| FP16 experts (drop quantization) | **refuted** (1.5× slower) | §12 |
+| lm_head 4-bit | rejected on quality (M8), ~3% anyway | §7.3 |
+
+### Next
+
+1. **§3 step 1's Instruments profile on `gatherQuantizedMM` at T=32** — now targeted at a specific,
+   sized question: *what is the 7.5 ms doing, if it is not moving bytes?* Measure occupancy,
+   register pressure and memory-level parallelism. This was the original hand-off's request; three
+   rounds of measurement have finally earned it.
+2. Case C (§4) decides delivery: route **(b)**, a new `MLXFast.metalKernel` — no mlx-swift fork.
+3. Re-bench WP-3b's FlashBlock now that §9's fix lets its reuse path run (ceiling 14.3%, unchanged).

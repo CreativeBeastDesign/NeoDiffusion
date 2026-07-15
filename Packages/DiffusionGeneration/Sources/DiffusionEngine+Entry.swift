@@ -117,6 +117,29 @@ extension DiffusionEngine {
         }
         stats.prefillSeconds = Date().timeIntervalSince(prefillStart)
 
+        // Router-reuse state is per-layer and lives on the gate modules, which outlive a single
+        // generation. Clear it here: a routing decision cached from a *previous prompt* is
+        // meaningless, and reusing it would silently corrupt the next generation's first steps.
+        if params.routerReuseSteps > 1 {
+            for layer in model.model.layers {
+                (layer.mlp as? LLaDA2SparseMoEBlock)?.gate.resetRouterCache()
+            }
+        }
+
+        /// Step index **within the current block** — reset to 0 by `onBlockSettled`, which is what
+        /// fixes its intended meaning: `stepIndex == 0` ⟺ first step of this block.
+        ///
+        /// FIXED 2026-07-15: the increment used to live at the bottom of the Elastic-Cache branch,
+        /// which the JOT/FlashBlock and served-default branches `return` before reaching. With
+        /// Elastic off — every configuration ever benched — it never incremented, so
+        /// `isFirstStepOfBlock` was permanently `true` and **FlashBlock never once took its
+        /// `.reuseCache` path** (`FlashBlockRunner.chooseStepKind` opens with
+        /// `if isFirstStepOfBlock { return .refreshCache }`). It is now incremented once per
+        /// forward on every path, with each branch reading the pre-increment value.
+        ///
+        /// Elastic's semantics are preserved exactly: it previously incremented *after* its body,
+        /// so during forward N of a block it observed `stepIndex == N`; it still does, via
+        /// `stepInBlock`.
         var stepIndex = 0
 
         let boundaryHolder = BoundaryHolder()
@@ -132,6 +155,11 @@ extension DiffusionEngine {
             let activeIds = windowIds[0..., (W - activeLen)...]
             let positionIds = MLXArray(Int32(W - activeLen) ..< Int32(W)).expandedDimensions(axis: 0)
 
+            // Pre-increment value, captured before any branch can return. Every branch below
+            // reads `stepInBlock`; nothing reads `stepIndex` directly.
+            let stepInBlock = stepIndex
+            stepIndex += 1
+
             // Faithful JOT (WP-3a v2) / FlashBlock (WP-3b)
             if params.flashBlockEnabled || (params.jotEnabled && params.jotFaithful) {
                 let frozenMaskVal = frozen ?? MLXArray.zeros([1, activeLen], dtype: .bool)
@@ -139,7 +167,10 @@ extension DiffusionEngine {
                     ? Int((params.moeCapacityRatio * Float(activeLen)).rounded(.up))
                     : nil
                 
-                let isFirstStep = (stepIndex == 0)
+                // Now genuinely "first step of THIS block" (stepIndex resets in onBlockSettled).
+                // Until 2026-07-15 this was permanently true — see the stepIndex declaration — so
+                // FlashBlock never reused its cache. WP-3b's wall-clock verdict predates this fix.
+                let isFirstStep = (stepInBlock == 0)
                 
                 let dirtyCount: Int
                 if let frozen {
@@ -163,9 +194,18 @@ extension DiffusionEngine {
                 // Single active block: mask nil (every committed key is allowed — the
                 // ExactPrefixCache argument). Two active blocks: block-causal active mask
                 // (the trailing block sees the front, never vice versa — WP-1b).
+                // Router reuse (experimental; GenerationParams.routerReuseSteps). Recompute on
+                // every Nth forward, reuse in between. Keyed off the global forward counter — see
+                // the param's doc for the block-boundary approximation this accepts.
+                // Per-block counter => step 0 of every block always recomputes, so routing is
+                // never carried across a block boundary (the staleness caveat this originally had).
+                let reuseRouter = params.routerReuseSteps > 1
+                    && stepInBlock % params.routerReuseSteps != 0
+
                 guard activeLen > B else {
                     return model(activeIds, positionIds: positionIds, caches: cache.layers, mask: nil,
-                                 frozen: frozen, ablation: params.moduleAblation)
+                                 frozen: frozen, ablation: params.moduleAblation,
+                                 reuseRouter: reuseRouter)
                 }
                 let prefixLen = W - activeLen
                 let mask = maskMemo[prefixLen] ?? {
@@ -175,13 +215,14 @@ extension DiffusionEngine {
                     return m
                 }()
                 return model(activeIds, positionIds: positionIds, caches: cache.layers, mask: mask,
-                             frozen: frozen, ablation: params.moduleAblation)
+                             frozen: frozen, ablation: params.moduleAblation,
+                             reuseRouter: reuseRouter)
             }
 
             let prefixLen = W - activeLen
 
             var recomputeFlags = Array(repeating: true, count: model.layerCount)
-            if stepIndex > 0 {
+            if stepInBlock > 0 {
                 if let staticBoundary = params.elasticStaticBoundary {
                     for l in 0 ..< model.layerCount {
                         recomputeFlags[l] = (l >= staticBoundary)
@@ -216,7 +257,6 @@ extension DiffusionEngine {
                 eval(similarities)
             }
 
-            stepIndex += 1
             return logits
         }
 
