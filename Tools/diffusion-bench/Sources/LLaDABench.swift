@@ -402,6 +402,75 @@ func runLLaDABench() async throws {
         arms = [
             LLaDAArm(name: "q-cached", mode: .q, cached: true, mask: .strict),
             LLaDAArm(name: "s-cached", mode: .s, cached: true, mask: .strict),
+            LLaDAArm(name: "wp3b-vanilla", mode: .q, cached: true, mask: .strict) {
+                $0.flashBlockEnabled = false
+            },
+            LLaDAArm(name: "wp3b-flashblock", mode: .q, cached: true, mask: .strict) {
+                $0.flashBlockEnabled = true
+                $0.flashBlockTau = 4
+            },
+            // Dyn-τ × MultiBD 2×2 factorial (WP-2b-2 × WP-1b). Control is q-cached, which is
+            // already the (α=0, nBuf=1) cell — run all four in ONE process:
+            //   diffusion-bench llada --arms q-cached,dt-tau,dt-mbd,dt-tau-mbd \
+            //     --runs 3 --gen-length 128 --json scratch/dyntau_factorial.jsonl
+            // Why the factorial and not a lone dyntau arm: dyn-τ has never been measured on the
+            // Studio without MultiBD — α=0.6 appears only in p3-combo/p4-combo, both nBuf=2,
+            // because nBuf was a process-global flag. MultiBD is independently −17% TPS, so the
+            // existing combo number cannot separate the two. These four cells give dyn-τ's main
+            // effect, MultiBD's main effect, and the interaction.
+            // τ_add=0.5 is WP-1b's chat winner (wp1b-logbook F4: front-block interference is
+            // +0.0 steps at τ_add ≥ 0.5). Reasoning's winner is 0.3 — held at 0.5 here for
+            // one-variable discipline; a τ_add sweep is a separate experiment.
+            LLaDAArm(name: "dt-tau", mode: .q, cached: true, mask: .strict) {
+                $0.dynamicTauAlpha = 0.6
+            },
+            LLaDAArm(name: "dt-mbd", mode: .q, cached: true, mask: .strict) {
+                $0.nBuf = 2
+                $0.tauAdd = 0.5
+            },
+            LLaDAArm(name: "dt-tau-mbd", mode: .q, cached: true, mask: .strict) {
+                $0.nBuf = 2
+                $0.tauAdd = 0.5
+                $0.dynamicTauAlpha = 0.6
+            },
+            // Lever-refresh arms (2026-07-16, `lf-*`): each accepted preset as a per-arm override so
+            // it interleaves against the SAME-process baseline (drift-free, ~0.33% CV) instead of the
+            // cross-process ±6–10% the original campaigns suffered. Grouped by speculationK — K is an
+            // engine constructor arg, NOT a GenerationParams field, so it can't be an override.
+            //   K=4 process (drift-free credit + combos):
+            //     diffusion-bench llada --arms q-cached,lf-credit-preset,lf-credit-default,lf-p3combo,lf-p4combo \
+            //       --runs 3 --suites chat,reasoning,code --json scratch/leverfresh_k4.jsonl
+            //   K=1 process (drift-free JOT; q-cached here IS the K=1 JOT baseline):
+            //     diffusion-bench llada --arms q-cached,lf-jot,lf-jotcredit --speculation-k 1 \
+            //       --runs 3 --suites reasoning,code --json scratch/leverfresh_k1.jsonl
+            // Credit is run at BOTH the (mis-)documented "preset" (α=1.0/γ=1.0) and the code defaults
+            // (α=0.5/γ=0.5). RESOLVED 2026-07-16: 0.5/0.5 is the SHIPPED config (git 7bb761f, never
+            // 1.0/1.0); the 1.0/1.0 in the old master-list header was a phase-4 grid candidate, not
+            // shipped. `lf-credit-default` (0.5/0.5) is the real one; `lf-credit-preset` (1.0/1.0) is
+            // kept only as the negative control that exposed the doc error.
+            LLaDAArm(name: "lf-credit-preset", mode: .q, cached: true, mask: .strict) {
+                $0.creditDecodingEnabled = true
+                $0.creditAlpha = 1.0; $0.creditBeta = 0.9; $0.creditGamma = 1.0
+            },
+            LLaDAArm(name: "lf-credit-default", mode: .q, cached: true, mask: .strict) {
+                $0.creditDecodingEnabled = true   // leaves α/β/γ at the .mode() defaults 0.5/0.9/0.5
+            },
+            LLaDAArm(name: "lf-p3combo", mode: .q, cached: true, mask: .strict) {
+                $0.nBuf = 2; $0.tauAdd = 0.5; $0.dynamicTauAlpha = 0.6
+            },
+            LLaDAArm(name: "lf-p4combo", mode: .q, cached: true, mask: .strict) {
+                $0.nBuf = 2; $0.tauAdd = 0.5; $0.dynamicTauAlpha = 0.6
+                $0.creditDecodingEnabled = true
+                $0.creditAlpha = 1.0; $0.creditBeta = 0.9; $0.creditGamma = 1.0
+            },
+            LLaDAArm(name: "lf-jot", mode: .q, cached: true, mask: .strict) {
+                $0.jotEnabled = true; $0.jotFaithful = true; $0.jotK = 2
+            },
+            LLaDAArm(name: "lf-jotcredit", mode: .q, cached: true, mask: .strict) {
+                $0.jotEnabled = true; $0.jotFaithful = true; $0.jotK = 2
+                $0.creditDecodingEnabled = true
+                $0.creditAlpha = 1.0; $0.creditBeta = 0.9; $0.creditGamma = 1.0
+            },
             // In-situ module attribution (gather_qmm_handoff.md §5.5). Diagnostic arms: ablated
             // arms emit garbage on purpose — the metric is ms/forward
             // (denoiseSeconds/forwardsEvaluated), never TPS. Run them together in ONE process so
@@ -470,8 +539,7 @@ func runLLaDABench() async throws {
             }
             arms = arms.filter { wanted.contains($0.name) }
         } else {
-            // Default grid stays the two served arms — attribution arms are opt-in via --arms.
-            arms = arms.filter { !$0.name.hasPrefix("attr-") && !$0.name.hasPrefix("bl-") && !$0.name.hasPrefix("reuse-") }
+            arms = arms.filter { !$0.name.hasPrefix("attr-") && !$0.name.hasPrefix("bl-") && !$0.name.hasPrefix("reuse-") && !$0.name.hasPrefix("wp3b-") && !$0.name.hasPrefix("dt-") && !$0.name.hasPrefix("lf-") }
         }
     }
     for arm in arms {
