@@ -95,12 +95,16 @@ public enum ModuleAblation: String, Sendable, Codable, CaseIterable {
     case attention
 
     /// Replace the two per-layer RMSNorms (`input_layernorm`, `post_attention_layernorm`) with
-    /// identity across all 20 layers — 40 of the model's ~41 RMSNorm sites. Delta from ``none``
-    /// splits the norms term out of the ~21% "remainder" (final-plan Step 3). **Scope caveat**
-    /// (stated, not corrected): this excludes the per-head qk-norm (inside `attention`) and the
-    /// single final norm, so it is a norms *lower bound* — the two layer norms dominate the count.
-    /// Skipping normalization scales the residual stream to garbage; harmless, since the metric is
-    /// ms/forward. Not eliminable: the un-normalized `x`/`hidden` still flow into attention and the
-    /// FFN, so both run in full.
+    /// identity across all 20 layers. **⚠️ NOT A USABLE REAL-WEIGHT ATTRIBUTION ARM — recorded
+    /// negative (final-plan Step 3, 2026-07-17).** RMSNorm is load-bearing for numerical stability:
+    /// skipping it lets the residual stream compound across 20 layers into inf/NaN, and the
+    /// denoising loop then cannot make progress (NaN never clears a mask under the confidence
+    /// threshold), so a real-weight forward **hangs** (observed: 64 min, no block progress, killed).
+    /// It is *behaviourally* correct — the toy-fixture guard `testAblationActuallyBitesOnDefaultPath`
+    /// passes because toy weights don't explode — but you cannot time it on the 4-bit model.
+    /// **Lesson**: forward-level ablation resolves large, numerically-robust components (attn, MoE);
+    /// norms cannot be attributed this way. The ~21% remainder's norms/sampler/selection/loop split
+    /// needs engine-level per-phase timers, not ModuleAblation. Kept for the guard + the record;
+    /// do not run it on real weights.
     case layerNorms
 }

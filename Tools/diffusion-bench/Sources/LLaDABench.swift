@@ -626,13 +626,10 @@ func runLLaDABench() async throws {
             LLaDAArm(name: "attr-no-lmhead", mode: .q, cached: true, mask: .strict) {
                 $0.moduleAblation = .lmHead
             },
-            // Step-3 remainder decomposition: full - no-layernorms = the two per-layer RMSNorms
-            // (40 sites) share of the ~21% remainder. Run with attr-full + attr-no-lmhead:
-            //   full - lmhead = lm_head; full - layernorms = norms; remainder minus both =
-            //   sampler + selection + loop (the engine per-step overhead, needs separate probes).
-            LLaDAArm(name: "attr-no-layernorms", mode: .q, cached: true, mask: .strict) {
-                $0.moduleAblation = .layerNorms
-            },
+            // NOTE: no `attr-no-layernorms` arm — `.layerNorms` HANGS on real weights (NaN cascade
+            // across 20 unnormalized layers stalls the loop; final-plan Step 3 recorded negative).
+            // The enum case + its toy-fixture guard are kept, but there is deliberately no bench arm
+            // so nobody hangs a Studio session. Norms attribution needs engine-level per-phase timers.
             // Coalescing probe (§8.2): same 256 picks, but only 8 distinct experts instead of ~57.
             // full - fixed  ==  the cost of the extra 49 distinct experts' bytes.
             LLaDAArm(name: "attr-fixed-experts", mode: .q, cached: true, mask: .strict) {
