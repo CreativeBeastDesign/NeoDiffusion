@@ -151,3 +151,21 @@ Three things follow, and they resolve §8's open questions rather than complicat
 **F14 — counters are not host-independent, contra §0.1's working assumption.** (sourced, from F13) The §0.1 protocol has dev-host deterministic counters *decide* and treats wall-clock as host-scoped. A **sign reversal** on `logicalSteps` between M1 and Studio (−14.8% → +4.8%, same code, same α, same prompts) is a direct counterexample. It is consistent with the known M1↔Studio GPU-floating-point divergence, but the magnitude means **dev-host step counts cannot be treated as portable verdicts for threshold-sensitive levers** — a lever that decides acceptance by comparing a confidence against a moving threshold is precisely where small per-position FP differences compound into different trajectories. Counters gate what is *worth measuring* on the Studio; they do not decide it. Every dev-host "algorithmic ACCEPT" resting on counters alone inherits this caveat — including this logbook's own §5 verdict, which is hereby scoped to the dev host for chat.
 
 **Revised disposition (supersedes §8's)**: `dynamicTauAlpha` stays landed, **default-off**. The surviving candidate is a **reasoning-only preset at α=0.6** (+13.8% TPS on the Studio, 4/4 quality ties on the dev sheet) — pending a *Studio* blind sheet at α=0.6 on reasoning, since the dev sheet does not transfer verbatim. Chat: closed negative. Code: +3.5%, never quality-scored — not worth a sheet at that size unless it moves.
+
+## 9. Step-1 α sweep on the Studio, standalone + interleaved (2026-07-17)
+
+**Run** (`scratch/refreeze_step1.jsonl`, one interleaved P2 run-major process, MLX core 0.31.1 / mlx-swift 0.31.6, host Mac14,14): `q-cached` × `dt-tau` (α=0.6) × `dt-tau-a03` (α=0.3), 3 runs × chat+reasoning+code × gen-128, warmup+`envValid:false` excluded (107/108 usable), variance gate PASS all arms (≤0.3%).
+
+**P7 re-freeze cross-check**: q-cached TPS reproduces `dyntau_factorial_0316` within noise (chat +2.6%, reasoning +0.2%, code +0.1%) — the frozen 0.31.6 baseline holds; no re-anchoring needed.
+
+| suite | α=0.3 ΔTPS (Δsteps, post/blk) | α=0.6 ΔTPS (Δsteps, post/blk) |
+|---|---|---|
+| chat | **+0.5%** (−1.9%, 1.18) | −0.1% (+4.8%, 1.35) |
+| reasoning | +9.3% (−15.2%, 1.10) | **+14.1%** (−13.6%, 1.70) |
+| code | **+11.2%** (−14.2%, 1.10) | +3.6% (−8.0%, 1.65) |
+
+**F15 — the per-suite optimum is α-dependent, and it is NOT uniform: reasoning wants α=0.6, code wants α=0.3.** (sourced) α=0.6 reproduces F13 (reasoning +14.1% vs the earlier +13.8%; chat dead). But the new α=0.3 arm overturns two §1.5 assumptions: (i) **code jumps to +11.2% at α=0.3 from +3.6% at α=0.6** — code was called "not worth a sheet" in §1.4 on the strength of the α=0.6 number; at the α that actually suits it, it is the second-best cell in the whole sweep; (ii) reasoning keeps +9.3% at α=0.3 (65% of α=0.6's gain) at **less than half the churn** (post/blk 1.10 vs 1.70). Chat is dead at both α (α=0.3 +0.5%, α=0.6 −0.1%), closing that suite for good — F13's chat verdict survives the gentler α, as F-b predicted.
+
+**F16 — α=0.3 is the systematically lower-churn point (post/blk 1.10–1.18 vs 1.35–1.70), i.e. the lower corruption risk per F9.** (sourced) This reframes the preset question. It is no longer "α=0.6 or off per suite"; it is a genuine quality/speed trade *within* the accepted suites: reasoning α=0.6 buys +4.8pp TPS (14.1 vs 9.3) at +0.6 post/blk of churn over α=0.3. Whether that edge is real quality-neutral throughput or churn that a sheet would catch is exactly what the Studio blind sheet must now decide.
+
+**Revised blind-sheet scope (supersedes §8's "reasoning α=0.6 only")**: the Studio sheet should score **reasoning at α=0.3 and α=0.6** (to price the churn trade) **and code at α=0.3** (newly a live preset candidate, never scored). Chat needs no sheet — it is closed. This is the item André approved 2026-07-17.
