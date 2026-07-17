@@ -126,5 +126,10 @@ methodology noise floor (fidelity check: 0/809 at ≥ 0.20, |Δmargin| p99 0.115
 *E5 measured head-vs-head (same 4-bit body both sides), not vs BF16.
 
 E8 (blind mask scoring): pairs generated (12 prompts × strict/referenceBias, uncached,
-gen-64); scripted checks clean in both arms (no repetition/mask-leak/length anomalies);
-**awaiting André's blind scores** (`scratch/m8_blind/sheet.md`; key sealed).
+gen-64); scripted checks clean in both arms (no repetition/mask-leak/length anomalies).
+**SCORED (André, 2026-07-17): 10/12 ties, 1 strict win (`reason-logic`), 1 referenceBias
+win (`code-regex`) — a wash** (`blinds/m8_blind/`, scored against its own `key.json`).
+Verdict: no detectable task-level quality difference between the mask semantics at 4-bit;
+**no basis to switch, `.strict` stays the incumbent default** and the M6 smoke-level
+qualitative claim is neither promoted nor contradicted. E8 CLOSED; this was M8's last
+open item.

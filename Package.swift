@@ -13,7 +13,9 @@ let package = Package(
         .library(name: "DiffusionGeneration", targets: ["DiffusionGeneration"]),
     ],
     dependencies: [
-        .package(url: "https://github.com/ml-explore/mlx-swift.git", from: "0.29.0"),
+        // .exact, not from:, so both hosts cannot re-resolve to different MLX versions —
+        // cross-host step counts and kernel timings are only comparable within one version.
+        .package(url: "https://github.com/ml-explore/mlx-swift.git", exact: "0.31.6"),
         .package(url: "https://github.com/huggingface/swift-transformers.git", from: "1.1.1"),
         .package(url: "https://github.com/apple/swift-numerics.git", from: "1.1.0"),
         .package(url: "https://github.com/hummingbird-project/hummingbird.git", from: "2.0.0")

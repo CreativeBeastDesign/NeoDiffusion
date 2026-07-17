@@ -271,14 +271,93 @@ struct LLaDARunResult: Codable {
     let warmupIncluded: Bool
     let processId: Int
     let host: String
+    // Build provenance (final-plan P4). Step counts and kernel timings are deterministic
+    // per (host, MLX version) — a row without these cannot be compared across hosts or
+    // across an MLX bump. `Package.resolved` does not establish what a given binary
+    // linked, so mlxCoreVersion is read from the linked library itself at runtime.
+    // The 0.31.4 -> 0.31.6 bump left counters byte-identical and moved wall-clock ~+6-8%
+    // (final plan §1.5 F-d), which is exactly the drift these fields make legible.
+    let toolchain: BuildProvenance
     let env: EnvSnapshot
     let envValid: Bool
     let textPrefix: String
     let date: String
 }
 
+/// What produced this row. See `LLaDARunResult.toolchain`.
+struct BuildProvenance: Codable {
+    /// The MLX **core** version, queried from the linked library at runtime — the only
+    /// evidence of what this binary actually links. Note this is NOT the mlx-swift package
+    /// version: mlx-swift 0.31.6 bundles MLX core 0.31.1, so the two legitimately differ
+    /// and the docs' "mlx-swift 0.31.x" refers to `mlxSwiftPackage` below.
+    let mlxCoreVersion: String
+    /// The mlx-swift **package** version from `Package.resolved` (the number the plans and
+    /// logbooks quote). Read at run time: this is build-provenance *hint*, not proof — it
+    /// reflects the file as it is now, not necessarily as it was when this binary linked.
+    /// `Package.swift` pins it `.exact`, so drift requires a deliberate edit.
+    let mlxSwiftPackage: String
+    /// Swift compiler that built this binary, major.minor (compile-time, so it describes
+    /// the build rather than whatever toolchain happens to be on PATH at run time).
+    let swiftCompiler: String
+}
+
+// MLX exposes no Swift-level version API and does not vend Cmlx as a product, so the C
+// entry points are bound directly. They are plain C symbols statically linked into this
+// binary via MLX (verified: `nm -gU .build/debug/diffusion-bench | grep mlx_version`).
+// `mlx_string` is `struct { void *ctx; }` — a single-pointer struct, ABI-identical to a
+// raw pointer on arm64, which is why it maps to UnsafeMutableRawPointer here.
+@_silgen_name("mlx_string_new") private func c_mlx_string_new() -> UnsafeMutableRawPointer?
+@_silgen_name("mlx_version") private func c_mlx_version(_ str: UnsafeMutableRawPointer?) -> Int32
+@_silgen_name("mlx_string_data") private func c_mlx_string_data(_ str: UnsafeMutableRawPointer?) -> UnsafePointer<CChar>?
+@_silgen_name("mlx_string_free") private func c_mlx_string_free(_ str: UnsafeMutableRawPointer?) -> Int32
+
+func mlxCoreVersionString() -> String {
+    var s = c_mlx_string_new()
+    defer { _ = c_mlx_string_free(s) }
+    guard withUnsafeMutablePointer(to: &s, { c_mlx_version(UnsafeMutableRawPointer($0)) }) == 0,
+          let data = c_mlx_string_data(s)
+    else { return "unknown" }
+    return String(cString: data)
+}
+
+func mlxSwiftPackageVersion(repoRoot: String) -> String {
+    guard let data = FileManager.default.contents(atPath: "\(repoRoot)/Package.resolved"),
+          let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any]
+    else { return "unknown" }
+    // Package.resolved v2/v3: { "pins": [ { "identity": ..., "state": { "version": ... } } ] }
+    let pins = (json["pins"] as? [[String: Any]]) ?? []
+    for pin in pins where (pin["identity"] as? String) == "mlx-swift" {
+        if let state = pin["state"] as? [String: Any],
+           let v = state["version"] as? String { return v }
+    }
+    return "unknown"
+}
+
+func swiftCompilerVersion() -> String {
+    // Compile-time ladder: records the compiler that built this binary. Deliberately
+    // major.minor — patch-level differences have never been the thing that moved a number
+    // here, and a ladder cannot see them anyway.
+    #if swift(>=6.4)
+        return ">=6.4"
+    #elseif swift(>=6.3)
+        return "6.3"
+    #elseif swift(>=6.2)
+        return "6.2"
+    #elseif swift(>=6.0)
+        return "6.0/6.1"
+    #else
+        return "<6.0"
+    #endif
+}
+
 func runLLaDABench() async throws {
     let repoRoot = FileManager.default.currentDirectoryPath
+    // P4: stamped on every row. Computed once — the MLX query is a C call per invocation
+    // and the answer cannot change within a process.
+    let buildProvenance = BuildProvenance(
+        mlxCoreVersion: mlxCoreVersionString(),
+        mlxSwiftPackage: mlxSwiftPackageVersion(repoRoot: repoRoot),
+        swiftCompiler: swiftCompilerVersion())
     let modelDir = URL(fileURLWithPath: argValue("--model")
         ?? "\(repoRoot)/models/llada2-1-mini-4bit")
     let tokenizerDir = URL(fileURLWithPath: argValue("--tokenizer")
@@ -556,6 +635,8 @@ func runLLaDABench() async throws {
     }
 
     print("diffusion-bench llada — model \(modelDir.path)")
+    print("build: host \(sysctlString("hw.model")) | MLX core \(buildProvenance.mlxCoreVersion) "
+        + "(mlx-swift \(buildProvenance.mlxSwiftPackage)) | Swift \(buildProvenance.swiftCompiler)")
     let loadStart = Date()
     let container = try DiffusionModel.load(from: modelDir)
     if hasFlag("--quantize-lm-head") {
@@ -943,6 +1024,7 @@ func runLLaDABench() async throws {
             warmupIncluded: warmup,
             processId: Int(ProcessInfo.processInfo.processIdentifier),
             host: sysctlString("hw.model"),
+            toolchain: buildProvenance,
             env: env,
             envValid: env.isValid,
             textPrefix: String(text.prefix(160)),

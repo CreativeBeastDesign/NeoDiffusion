@@ -66,7 +66,7 @@ Sweep arms (recorded verbatim; binary = post-commit `wp-2a-speculation` release 
 | **s2d2-t95-k1** | 1.13 (**+19% vs t95**) | 2.02 (+15%) | 2.40 (+5%) | converts vs its own baseline; still < Q-mode |
 
 **Verdict (M1, §0.1): WP-2a's roadmap gate (≥20% TPS over the then-current stack) is NOT met on the dev host, and the reason is now mechanistic, not empirical noise.** The break-even identity (F5) — verification pays iff acc/verified-step > 2× baseline tokens/step — places Q-mode just out of reach on every suite, because aggressive threshold decoding already banks the parallelism single-model speculation sells. Both candidates' *mechanisms* work excellently here (S2D2 acceptance 4–10/step; Spiffy count-ceiling 27–35%). Dispositions:
-1. **S2D2 lands as engine capability, default off** (`speculation: .none` serving default unchanged; parity suite proves the off-path byte-identical). Its niche — the **verified-conservative preset** (τ=0.95 + S2D2, +15–19% over its own baseline, paper-documented quality gains) — awaits André's blind scores (`scratch/wp2a_blind/`) and the Studio wall-clock.
+1. **S2D2 lands as engine capability, default off** (`speculation: .none` serving default unchanged; parity suite proves the off-path byte-identical). Its niche — the **verified-conservative preset** (τ=0.95 + S2D2, +15–19% over its own baseline, paper-documented quality gains) — awaited André's blind scores (`scratch/wp2a_blind/`) and the Studio wall-clock. **RESOLVED 2026-07-17: the preset is WITHDRAWN — the quality premise it rested on failed its own gate (§8).**
 2. **Spiffy runtime: deferred to Studio** with the calibrated graph recorded (F7); on a host where (1+D)-wide forwards amortize, the 27–35% forward saving is the biggest single number Phase 3 has surfaced.
 3. Studio backfill decides both host questions in one session (recorded arms, logbook §3 + this table).
 
@@ -88,7 +88,19 @@ Sweep arms (recorded verbatim; binary = post-commit `wp-2a-speculation` release 
   - **Code**: 70.01 TPS vs 76.67 TPS (−8.7% loss).
 - **Composition with Credit Decoding (`s2d2-credit`: S2D2 + Credit)**:
   - Running Credit Decoding jointly with S2D2 does not yield positive synergy: **33.28 TPS on chat** and **58.83 TPS on reasoning** are slightly slower than S2D2 alone, as logit boost momentum is washed out by the verifier's exact step checks.
-- **Verdict (ACCEPT for verified-conservative serving preset)**:
+- **Verdict (ACCEPT for verified-conservative serving preset)** — ⚠️ **SUPERSEDED / WITHDRAWN 2026-07-17, see §8.** This acceptance was granted on wall-clock alone while the quality half of the preset's own gate (§6 disposition 1: "awaits André's blind scores") was still open. The blind scores have since returned and do not support it.
   The target hardware backfill confirms that the verified-conservative S2D2 preset (τ=0.95 + S2D2 verifier) converts successfully to wall-clock gains on the Mac Studio M2 Ultra, clearing the target gate (>=15% speedup) on reasoning tasks and landing at +14.6% on chat. The baseline Q-mode (τ=0.7) remains the fastest default, but S2D2 is officially accepted as the served "verified-conservative" preset for high-quality/math-stable decoding.
+
+## 8. Blind quality scores → preset WITHDRAWN (2026-07-17)
+
+**Scores** (`blinds/wp2a_blind/`, 12 prompts, s2d2-t95 vs **qmode**, scored against its own `key.json`): **Q-mode 3 wins, s2d2-t95 1 win, 8 ties.**
+
+**F8 — The preset's quality premise is unsupported; the direction is mildly negative.** (sourced) Of the four decided prompts, André annotated two as negligible (`chat-capital` → s2d2 "but negligible"; `chat-explain` → qmode "also negligible"). The two substantive Q-mode wins name concrete defects in the S2D2 arm: `chat-recipe` — "B is factually wrong, too much milk" (250 ml vs the 120 ml the Q-mode arm gives for a 2-person, 100 g-flour recipe); `code-regex` — "clear winner" for Q-mode, because s2d2-t95 emitted `^\d{4}-\d{2}-\d{2}$` with no month/day range validation (scored I:3 F:3 vs 5/5). No substantive s2d2 win exists on the sheet. The 4 reasoning prompts are 4/4 ties, so the "math-stable" half of the claim gets no support either (it was never testable on a 12-prompt smoke sheet — that needs the GSM8K scored set, P13).
+
+**Why this is decisive rather than merely null.** The preset is, by §7's own admission, **slower than the default we would otherwise serve** ("the baseline Q-mode remains the fastest default"; F6: absolute chat 1.13 vs Q-mode 1.49 tok/step, ≈25% compute premium). Its entire case was the quality edge in the conservative regime that the S2D2 paper reports. A preset that costs ~25% compute and is not measurably better has no serving rationale. §7's +14.6/+19.8% is a real number against the *wrong comparator for a serving decision*: `base-t95` is a baseline nobody would deploy — the serving question is "instead of Q-mode?", not "instead of τ=0.95 decoding?".
+
+**Disposition**: the **verified-conservative preset is withdrawn**; §7's ACCEPT is retracted. **S2D2 itself is unaffected** — it stays landed as a tested, parity-gated, default-off engine capability (`speculation: .none` remains the serving default; the off-path is byte-identical). WP-2a's Studio debt is CLOSED with a negative result. The `S2D2 × dyn-τ` composability cell comes off the final-plan Step 2 arm list — the lever it would compose is no longer a shipping candidate. Reviving the preset requires the GSM8K scored set showing a real accuracy edge, not a smoke sheet.
+
+**Sixth instance of the baseline-relativity lesson** (WP-1a prefix cache; F5 threshold decoding; WP-2b-1 suffix; WP-2b-3 EOS; WP-6f Alpha-MoE): the paper's quality gain assumes a conservative baseline, and our served baseline is not conservative.
 
 

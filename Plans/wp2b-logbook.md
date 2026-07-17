@@ -78,6 +78,8 @@ S mode: 225→187 (α=0.3) → 170 (α=0.6) chat; 90→89→82 reasoning; post/b
 
 **Verdict (dev host, §0.1): 2b-2 provisional algorithmic ACCEPT at α=0.6; 2b-3 NULL; 2b-1 closed N/A (§2).** Deciders are deterministic counters and clear the plan's ≥10% line on both suites; served default stays `dynamicTauAlpha 0` until (a) André's blind scores (`scratch/wp2b_blind/sheet.md`, 8 prompts static-vs-α=0.6, objective checks clean: no mask leaks, no 4-gram degeneration deltas, comparable lengths; score with `Tools/m8_blind_sheet.py --pairs scratch/wp2b_blind/pairs.json --out scratch/wp2b_blind --score scratch/wp2b_blind/sheet.md`) and (b) the Studio scored-set + wall-clock backfill (recorded arms, driver `scratch/wp2b_driver.sh`). τ_edit follow-up: entry condition NOT met (post-steps/block 1.16 at the winner < ~3) — dropped per §3. Recommended preset direction (post-Studio): Q + α=0.6 (+ nBuf=2 τ_add=0.5 once WP-1b's Studio gate lands — the stack is additive, F6).
 
+> ⚠️ **AMENDED 2026-07-17 (§8): the α=0.6 accept does not survive its quality gate on chat.** Condition (a) has returned and is not clean — α=0.6 shows visible token corruption on 2/4 chat prompts, 0/4 reasoning. The α=0.6 accept **stands for reasoning** and is **withdrawn for chat** (candidate: α=0.3). The "objective checks clean" claim above is retracted as evidence of non-degradation — the checks passed on visibly corrupted text (F12). The recommended preset direction (Q + α=0.6 + nBuf=2) is **suspended pending a quality sheet on the stack itself** (F10).
+
 ## 6. Deviations from the source (recorded)
 
 1. **No suffix module** — §2: the paper's third component is inapplicable to block-causal LLaDA2.x; closed, not skipped silently.
@@ -95,6 +97,57 @@ S mode: 225→187 (α=0.3) → 170 (α=0.6) chat; 90→89→82 reasoning; post/b
 - **Suffix Pruning (2b-1) and EOS Early Exit (2b-3)**:
   - Suffix pruning is closed N/A.
   - EOS early exit is verified as a complete mechanistic null under clean environment testing.
-- **Verdict (ACCEPTED for serving presets only, default off)**:
+- **Verdict (ACCEPTED for serving presets only, default off)** — ⚠️ **SUSPENDED 2026-07-17, see §8 (F10).** This accepted α=0.6 *through the `p3-combo` preset* (= nBuf=2 + α=0.6) on step/wall-clock evidence, while the quality gate named in §5 condition (a) was still open. That gate has now returned dirty on chat, and `p3-combo` is precisely the configuration with the highest measured edit-churn in the campaign (chat post-steps/blk 1.90) and **zero quality coverage** — neither this sheet (α=0.6 alone, 1.16) nor WP-1b's (nBuf=2 alone, 1.25) scored it.
   Dynamic τ (α=0.6) is accepted as a serving preset option (available within the `p3-combo` preset) for step-limited long-form generations, but is disabled by default for generic real-time serving.
 
+
+## 8. Blind quality scores → α=0.6 fails its gate on chat (2026-07-17)
+
+**Scores** (`blinds/wp2b_blind/`, 8 prompts, static vs α=0.6, scored against its own `key.json`): **static 2 wins, α=0.6 zero wins, 6 ties.**
+
+**F8 — α=0.6 corrupts chat text; reasoning is clean. The split follows the step savings.** (sourced) Both decided prompts are chat, both go to static, and both show *local token corruption in the α=0.6 arm* — not a length or content preference:
+- `chat-explain`: "Imagine the sky is like a big, **of,, and** Sunlight is like a flashlight…" (André: C:3 I:3 F:3, vs static 5/5).
+- `chat-recipe`: broken header "Simple Pancakes for Two **2**", "20 g vegetable oil **( melted butter)**", and **1 tsp salt** where static gives a pinch (André: I:4 vs static 5/5/5).
+
+Reasoning is **4/4 ties**. The asymmetry tracks the savings: chat is where α=0.6 cuts most (−14.8% vs reasoning's −11.3%). The count alone is *not* statistically resolvable (two non-ties both to baseline ⇒ p=0.25, sign test) — the weight here is that the defects are **mechanism-predicted and corroborated by an independent measured indicator** (F9), not that 2/8 is significant. Status per §0.1: smoke-level, directional, sufficient to block a default-on, insufficient to kill the lever.
+
+**F9 — post-steps/block is a leading indicator of the defect, and F1 already described the mechanism without connecting it to quality.** (inferred from F1 + F8) F1 diagnosed α=0.9's non-monotonicity as "the near-zero late-block floor (τ0(1−α)) buys acceptances that Δ then has to repair (edit churn)". F8's corruption is that same mechanism where **Δ's repair came up short** — a cheap late acceptance that never got fixed. The arms rank in defect order by churn:
+
+| arm | τ floor = τ0(1−α) | chat post-steps/blk | quality evidence |
+|---|---|---|---|
+| α=0.3 | 0.49 | 1.06 | never scored |
+| **α=0.6** | 0.28 | 1.16 | **2/4 chat prompts corrupted** |
+| α=0.9 | 0.07 | 1.62 | never scored (F1 flagged the churn) |
+| **nbuf2 + α=0.6** | 0.28 | **1.90** | **never scored — and it is the recommended stack** |
+
+Consequence for the τ_edit follow-up (§3, dropped on "post-steps/block 1.16 < ~3"): that entry condition was read as "churn is low, nothing to fix". F8 says churn at 1.16 is *already* leaving damage, so the threshold was calibrated against the wrong failure mode. Not reopened here, but the rationale is void.
+
+**F10 — the churniest, least-scored configuration in the campaign is the one already accepted as a preset.** (inferred) F6's headline (nBuf=2 + α=0.6: chat TPF-logical +41%, "the two levers stack") is a *step-count* result. Its quality coverage is empty: WP-1b's sheet scored nBuf=2 alone (post/blk 1.25 — 7 ties/1 baseline win, and that loss was benign, "baseline gave more information"), this sheet scored α=0.6 alone (post/blk 1.16 — 2 corrupted). **Nobody has scored the combination at post/blk 1.90**, where both mechanisms compound. F6's "additive" claim is sourced for steps and **unevidenced for quality**.
+
+The sharp edge: **that combination is `p3-combo`, and §7 already accepted α=0.6 as a serving preset *through* it** — on step/wall-clock evidence, with §5's quality condition (a) still open at the time. So the one configuration this campaign has shipped a preset for is the one with the most churn and the least quality evidence. §7's verdict is suspended accordingly; note also that §7 measured `p3-combo` as **net-negative wall-clock on the Studio anyway** (−12.3% to −20.4%, MultiBD's slot-latency multiplier overriding the step saving), so suspending it costs no measured throughput. This is also why final-plan Step 1 exists: α=0.6 has **never been measured standalone on the Studio** — only welded to MultiBD inside `p3-combo`/`p4-combo`.
+
+**F11 — α was selected on speed alone; the sheet says the speed winner is past the quality knee on chat.** (inferred) §5's deciders were explicitly deterministic counters, with quality deferred to this sheet — so α=0.6 winning F1 was never a quality statement. α=0.3's numbers are already recorded and suggest the per-suite split writes itself: reasoning keeps α=0.6 (clean, −11.3%; α=0.3 would still bank −9.3% if a uniform α is ever wanted), chat drops to **α=0.3** (−6.5%, post/blk 1.06) or off. Per-suite α is the shape of the final plan's Step 2 deliverable anyway.
+
+**F12 — methodology: the scripted checks are blind to this defect class.** (sourced) `checks.md` passed every row — `max4gramRepeat` 1, no mask leaks, comparable lengths (106 vs 91 words on `chat-explain`) — on text reading "a big, of,, and". 4-gram repetition and mask-leak heuristics detect *degeneration*, not *local incoherence*. The §5 verdict's "objective checks clean" is therefore retracted as evidence of non-degradation. An 8-prompt blind sheet is currently the only instrument that catches this class; treat quality sheets as on the critical path, not as a formality.
+
+**Disposition**: `dynamicTauAlpha` stays landed, **default-off** (unchanged). The final plan's Step 1 sweeps `{static, α=0.3, α=0.6}` on the Studio so per-suite perf exists at the α the quality evidence supports; Step 2 must carry a quality sheet on the winning stack before any preset ships.
+
+**Host caveat** `[Inferred]`: these are dev-M1 generations and trajectories are host-dependent (M1↔Studio step divergence is GPU floating-point). The specific corruptions will not reproduce verbatim on the Studio; the *mechanism* is a threshold-floor property, not a numerics one, so it should — and post-steps/block re-measures in Step 1 as the leading indicator.
+
+**F13 — Studio standalone (2026-07-17 re-analysis of existing rows): α=0.6 is a REASONING-ONLY lever; chat's step saving reverses sign across hosts.** (sourced: `scratch/dyntau_factorial_0316.jsonl`, mlx-swift 0.31.6, commit `66494bd`; 3 runs × 12 prompts × gen-128, warmup + `envValid:false` rows excluded, 143/144 usable, thermal nominal, swap 0; engine echoes verified `dynamicTauAlpha 0.6, nBuf 1`)
+
+| suite | Studio TPS Δ | Studio steps Δ | **M1 steps Δ (F1)** | Studio post/blk | sheet (§8) |
+|---|---|---|---|---|---|
+| chat | **+0.2%** | **+4.8%** | **−14.8%** | 1.35 | 2/4 corrupted |
+| code | +3.5% | −8.0% | (not swept) | 1.65 | not scored |
+| reasoning | **+13.8%** | **−13.6%** | −11.3% | 1.70 | 4/4 ties |
+
+Three things follow, and they resolve §8's open questions rather than complicate them:
+
+1. **Chat is dead on two independent axes.** F8's blind sheet (visible corruption) and this wall-clock/counter evidence (no gain: +0.2% TPS on +4.8% steps) were produced by different instruments on different hosts and agree. α=0.6 on chat buys nothing and costs text. The Studio churn is *higher* than the M1's (post/blk 1.35 vs 1.16) — same mechanism (F9), worse expression, on the host that also fails to save steps.
+2. **F11's α=0.3-for-chat recommendation is undercut** (inferred): if the aggressive α makes Studio chat steps go *up*, the gentler one is unlikely to save much. The M1's α=0.3 chat −6.5% should not be expected to transfer any better than its α=0.6 −14.8% did (which reversed). Run the arm — it is free — but the honest prior is ~0.
+3. **F1's headline was a dev-host artefact for chat, not for reasoning.** Reasoning transfers and slightly over-delivers (M1 −11.3% → Studio −13.6%). Chat does not transfer at all.
+
+**F14 — counters are not host-independent, contra §0.1's working assumption.** (sourced, from F13) The §0.1 protocol has dev-host deterministic counters *decide* and treats wall-clock as host-scoped. A **sign reversal** on `logicalSteps` between M1 and Studio (−14.8% → +4.8%, same code, same α, same prompts) is a direct counterexample. It is consistent with the known M1↔Studio GPU-floating-point divergence, but the magnitude means **dev-host step counts cannot be treated as portable verdicts for threshold-sensitive levers** — a lever that decides acceptance by comparing a confidence against a moving threshold is precisely where small per-position FP differences compound into different trajectories. Counters gate what is *worth measuring* on the Studio; they do not decide it. Every dev-host "algorithmic ACCEPT" resting on counters alone inherits this caveat — including this logbook's own §5 verdict, which is hereby scoped to the dev host for chat.
+
+**Revised disposition (supersedes §8's)**: `dynamicTauAlpha` stays landed, **default-off**. The surviving candidate is a **reasoning-only preset at α=0.6** (+13.8% TPS on the Studio, 4/4 quality ties on the dev sheet) — pending a *Studio* blind sheet at α=0.6 on reasoning, since the dev sheet does not transfer verbatim. Chat: closed negative. Code: +3.5%, never quality-scored — not worth a sheet at that size unless it moves.

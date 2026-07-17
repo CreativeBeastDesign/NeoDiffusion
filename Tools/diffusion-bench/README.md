@@ -37,6 +37,33 @@ Caveats: the 4-bit artefact is **task-level only, never parity** (gotcha 5); num
 frozen on the M1 are the *dev* baseline — re-freeze on the Studio. Laptop thermals can
 fail the 5% gate on >10-minute arms regardless of `--cooldown` (Sumi campaign quirk 4).
 
+### Build provenance (per JSONL row) — final-plan P4
+
+Step counts and kernel timings are deterministic per **(host, MLX version)**, so a row
+without both is uninterpretable across hosts or across an MLX bump. Every row carries
+`host` (`hw.model`) plus a `toolchain` object, echoed in the startup banner:
+
+```
+build: host Mac14,14 | MLX core 0.31.1 (mlx-swift 0.31.6) | Swift 6.3
+```
+
+| Field | Source | Trust |
+|---|---|---|
+| `toolchain.mlxCoreVersion` | `mlx_version()` on the **linked library**, at run time | **Authoritative** — the only evidence of what this binary links |
+| `toolchain.mlxSwiftPackage` | `Package.resolved`, read at run time | Hint. Reflects the file *now*, not necessarily at link time; `Package.swift` pins it `.exact` so drift needs a deliberate edit |
+| `toolchain.swiftCompiler` | compile-time `#if swift(...)` ladder | Describes the build, not the toolchain on `PATH`. major.minor only |
+
+**The two MLX numbers legitimately differ**: mlx-swift **0.31.6** bundles MLX core
+**0.31.1**. The plans and logbooks quote the *package* version ("mlx-swift 0.31.4/0.31.6");
+rows report both, so read `mlxSwiftPackage` when comparing against a doc. A row is not
+comparable to another row with a different `mlxCoreVersion` on timings — though the
+0.31.4→0.31.6 bump left every counter byte-identical while moving wall-clock ~+6–8%
+(final plan §1.5 F-d), so step-count results did survive it.
+
+Why not read `Package.resolved` alone: it records what SwiftPM *resolved*, not what a
+given binary *linked* — and before the `.exact` pin each host silently re-resolved it in
+the opposite direction, which is what made every historical cross-host row ambiguous.
+
 ## Sumi mode
 
 ```
