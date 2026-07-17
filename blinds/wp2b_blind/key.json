@@ -1,0 +1,34 @@
+{
+  "chat-capital": {
+    "A": "dyntau06",
+    "B": "static"
+  },
+  "chat-email": {
+    "A": "dyntau06",
+    "B": "static"
+  },
+  "chat-explain": {
+    "A": "static",
+    "B": "dyntau06"
+  },
+  "chat-recipe": {
+    "A": "dyntau06",
+    "B": "static"
+  },
+  "reasoning-reason-ages": {
+    "A": "static",
+    "B": "dyntau06"
+  },
+  "reasoning-reason-logic": {
+    "A": "dyntau06",
+    "B": "static"
+  },
+  "reasoning-reason-trains": {
+    "A": "dyntau06",
+    "B": "static"
+  },
+  "reasoning-reason-units": {
+    "A": "dyntau06",
+    "B": "static"
+  }
+}

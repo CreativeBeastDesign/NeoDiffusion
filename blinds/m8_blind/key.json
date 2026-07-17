@@ -1,0 +1,50 @@
+{
+  "chat-capital": {
+    "A": "strict",
+    "B": "referenceBias"
+  },
+  "chat-email": {
+    "A": "strict",
+    "B": "referenceBias"
+  },
+  "chat-explain": {
+    "A": "referenceBias",
+    "B": "strict"
+  },
+  "chat-recipe": {
+    "A": "strict",
+    "B": "referenceBias"
+  },
+  "code-fizzbuzz": {
+    "A": "referenceBias",
+    "B": "strict"
+  },
+  "code-regex": {
+    "A": "strict",
+    "B": "referenceBias"
+  },
+  "code-sql": {
+    "A": "strict",
+    "B": "referenceBias"
+  },
+  "code-swift-struct": {
+    "A": "strict",
+    "B": "referenceBias"
+  },
+  "reason-ages": {
+    "A": "referenceBias",
+    "B": "strict"
+  },
+  "reason-logic": {
+    "A": "strict",
+    "B": "referenceBias"
+  },
+  "reason-trains": {
+    "A": "referenceBias",
+    "B": "strict"
+  },
+  "reason-units": {
+    "A": "referenceBias",
+    "B": "strict"
+  }
+}

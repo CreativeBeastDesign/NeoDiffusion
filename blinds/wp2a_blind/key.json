@@ -1,0 +1,50 @@
+{
+  "chat-capital": {
+    "A": "qmode",
+    "B": "s2d2-t95"
+  },
+  "chat-email": {
+    "A": "qmode",
+    "B": "s2d2-t95"
+  },
+  "chat-explain": {
+    "A": "s2d2-t95",
+    "B": "qmode"
+  },
+  "chat-recipe": {
+    "A": "qmode",
+    "B": "s2d2-t95"
+  },
+  "code-fizzbuzz": {
+    "A": "s2d2-t95",
+    "B": "qmode"
+  },
+  "code-regex": {
+    "A": "qmode",
+    "B": "s2d2-t95"
+  },
+  "code-sql": {
+    "A": "qmode",
+    "B": "s2d2-t95"
+  },
+  "code-swift-struct": {
+    "A": "qmode",
+    "B": "s2d2-t95"
+  },
+  "reason-ages": {
+    "A": "s2d2-t95",
+    "B": "qmode"
+  },
+  "reason-logic": {
+    "A": "qmode",
+    "B": "s2d2-t95"
+  },
+  "reason-trains": {
+    "A": "s2d2-t95",
+    "B": "qmode"
+  },
+  "reason-units": {
+    "A": "s2d2-t95",
+    "B": "qmode"
+  }
+}

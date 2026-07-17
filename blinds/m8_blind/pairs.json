@@ -1,0 +1,220 @@
+{
+  "pairs" : [
+    {
+      "eosBlock" : "1",
+      "mask" : "strict",
+      "prompt" : "chat-capital",
+      "suite" : "chat",
+      "text" : "The capital of Japan is Tokyo. It is best known for being a bustling metropolis that blends traditional culture with cutting-edge technology, offering world-class shopping, entertainment, and cuisine.<|role_end|><|endoftext|>",
+      "tokens" : "37",
+      "user" : "What is the capital of Japan, and what is the city best known for? Answer in two or three sentences."
+    },
+    {
+      "eosBlock" : "1",
+      "mask" : "referenceBias",
+      "prompt" : "chat-capital",
+      "suite" : "chat",
+      "text" : "The capital of Japan is Tokyo. It is best known for its bustling metropolis, blending traditional culture with cutting-edge technology, and as a hub for finance, fashion, technology, and innovation.<|role_end|><|endoftext|>",
+      "tokens" : "40",
+      "user" : "What is the capital of Japan, and what is the city best known for? Answer in two or three sentences."
+    },
+    {
+      "eosBlock" : "none",
+      "mask" : "strict",
+      "prompt" : "chat-email",
+      "suite" : "chat",
+      "text" : "Subject: Request to Move Tomorrow's 10am Meeting  \n\nHi [Colleague's Name],  \n\nHope you're doing well! I just wanted to see if we could move tomorrow’s meeting from around 10am to the afternoon. I’ve got a scheduling conflict at that time and would",
+      "tokens" : "64",
+      "user" : "Write a short, friendly email to a colleague asking to move tomorrow's 10am meeting to the afternoon."
+    },
+    {
+      "eosBlock" : "none",
+      "mask" : "referenceBias",
+      "prompt" : "chat-email",
+      "suite" : "chat",
+      "text" : "Subject: Request to Reschedule Tomorrow's 10am Meeting  \n\nHi [Colleague's Name],  \n\nHope you're doing well! I just wanted to check if we could move tomorrow’s meeting from 10am to the afternoon. I’ve got a scheduling conflict that comes up later,",
+      "tokens" : "64",
+      "user" : "Write a short, friendly email to a colleague asking to move tomorrow's 10am meeting to the afternoon."
+    },
+    {
+      "eosBlock" : "none",
+      "mask" : "strict",
+      "prompt" : "chat-explain",
+      "suite" : "chat",
+      "text" : "Sure! Imagine the sky is like a big, invisible blanket of air around us. The Sun gives light, but it's actually made up of all the colors of the rainbow — red, orange, yellow, green, blue, indigo, and violet.\n\nWhen sunlight comes into our atmosphere, it bumps into",
+      "tokens" : "64",
+      "user" : "Explain to a curious 10-year-old why the sky is blue."
+    },
+    {
+      "eosBlock" : "none",
+      "mask" : "referenceBias",
+      "prompt" : "chat-explain",
+      "suite" : "chat",
+      "text" : "Sure! Imagine the sky is like a big, invisible blanket up above the Earth. Sunlight looks white, but it's actually made up of all the colors of the rainbow—like red, orange, yellow, green, blue, indigo, and violet.\n\nWhen sunlight comes to the Earth, it bumps",
+      "tokens" : "64",
+      "user" : "Explain to a curious 10-year-old why the sky is blue."
+    },
+    {
+      "eosBlock" : "none",
+      "mask" : "strict",
+      "prompt" : "chat-recipe",
+      "suite" : "chat",
+      "text" : "Sure! Here's a simple and delicious recipe for pancakes for two people, using metric measurements:\n\n### Simple Pancakes for Two (Metric)\n\n**Ingredients:**\n- 100g all-purpose flour  \n- 1 tsp sugar  \n- 1 tsp baking powder  \n- Pin",
+      "tokens" : "64",
+      "user" : "Give me a simple recipe for pancakes for two people, with metric measurements."
+    },
+    {
+      "eosBlock" : "none",
+      "mask" : "referenceBias",
+      "prompt" : "chat-recipe",
+      "suite" : "chat",
+      "text" : "Sure! Here's a simple and delicious recipe for two people, using exact metric measurements:\n\n**Basic Pancakes (Serves 2)**\n\n**Ingredients:**\n- 100 g all-purpose flour  \n- 1 tsp baking powder  \n- 1 tsp sugar  \n- 1",
+      "tokens" : "64",
+      "user" : "Give me a simple recipe for pancakes for two people, with metric measurements."
+    },
+    {
+      "eosBlock" : "none",
+      "mask" : "strict",
+      "prompt" : "reason-trains",
+      "suite" : "reasoning",
+      "text" : "We are given:\n\n- Distance between the two trains: 240 km  \n- Speed of first train: 70 km\/h  \n- Speed of second train: 50 km\/h  \n- They are moving **toward each other**\n\n### Step 1: Relative",
+      "tokens" : "64",
+      "user" : "Two trains are 240 km apart and drive toward each other, one at 70 km\/h and one at 50 km\/h. After how many hours do they meet? Show your reasoning briefly."
+    },
+    {
+      "eosBlock" : "none",
+      "mask" : "referenceBias",
+      "prompt" : "reason-trains",
+      "suite" : "reasoning",
+      "text" : "We are given:\n\n- Distance between the two trains: 240 km  \n- Speed of first train: 70 km\/h  \n- Speed of second train: 50 km\/h  \n\nThey are moving **toward each other**, so their speeds add up.\n\n",
+      "tokens" : "64",
+      "user" : "Two trains are 240 km apart and drive toward each other, one at 70 km\/h and one at 50 km\/h. After how many hours do they meet? Show your reasoning briefly."
+    },
+    {
+      "eosBlock" : "none",
+      "mask" : "strict",
+      "prompt" : "reason-ages",
+      "suite" : "reasoning",
+      "text" : "We are given:\n\n- Anna is 24 years old.\n- Ben is 18 years old.\n- The statement: *\"Anna is twice as old as Ben was when Anna was as old as Ben is now.\"*\n\nWe need to check whether this statement is **consistent**.",
+      "tokens" : "64",
+      "user" : "Anna is twice as old as Ben was when Anna was as old as Ben is now. Anna is 24 and Ben is 18. Check whether this statement is consistent and explain."
+    },
+    {
+      "eosBlock" : "none",
+      "mask" : "referenceBias",
+      "prompt" : "reason-ages",
+      "suite" : "reasoning",
+      "text" : "We are given:\n\n- Anna is **24 years** old.\n- Ben is **18 years** old.\n- The statement: \"Anna is twice as old as Ben was when Anna was as old as Ben is now.\"\n\nWe are to check whether this statement is **consistent**.",
+      "tokens" : "64",
+      "user" : "Anna is twice as old as Ben was when Anna was as old as Ben is now. Anna is 24 and Ben is 18. Check whether this statement is consistent and explain."
+    },
+    {
+      "eosBlock" : "1",
+      "mask" : "strict",
+      "prompt" : "reason-logic",
+      "suite" : "reasoning",
+      "text" : "No. The fact that all roses are flowers and that some flowers fade quickly does not necessarily imply that some roses fade quickly, because the flowers that fade quickly might not be roses.<|role_end|><|endoftext|>",
+      "tokens" : "38",
+      "user" : "All roses are flowers. Some flowers fade quickly. Does it follow that some roses fade quickly? Answer yes or no and justify in two sentences."
+    },
+    {
+      "eosBlock" : "1",
+      "mask" : "referenceBias",
+      "prompt" : "reason-logic",
+      "suite" : "reasoning",
+      "text" : "Yes. Since all roses are flowers and some flowers fade quickly, it is possible that some roses fade quickly, though not necessarily all.<|role_end|><|endoftext|>",
+      "tokens" : "29",
+      "user" : "All roses are flowers. Some flowers fade quickly. Does it follow that some roses fade quickly? Answer yes or no and justify in two sentences."
+    },
+    {
+      "eosBlock" : "none",
+      "mask" : "strict",
+      "prompt" : "reason-units",
+      "suite" : "reasoning",
+      "text" : "You need **3\/4 cup** of milk and you only have a **1\/3-cup** measure.\n\nLet’s figure how many times you need to fill the 1\/3-cup measure:\n\n### Step 1: Divide the required amount by the measuring cup\n$$\n\\frac",
+      "tokens" : "64",
+      "user" : "A recipe needs 3\/4 cup of milk. I only have a 1\/3-cup measure. How many times must I fill it, and how much do I overshoot or undershoot?"
+    },
+    {
+      "eosBlock" : "none",
+      "mask" : "referenceBias",
+      "prompt" : "reason-units",
+      "suite" : "reasoning",
+      "text" : "We need **3\/4 cup** of milk, but we only have a **1\/3-cup measuring cup.\n\nLet’s find how many times we need to fill the 1\/3-cup measure to get to 3\/4 cup.\n\n### Step 1: Divide 3",
+      "tokens" : "64",
+      "user" : "A recipe needs 3\/4 cup of milk. I only have a 1\/3-cup measure. How many times must I fill it, and how much do I overshoot or undershoot?"
+    },
+    {
+      "eosBlock" : "none",
+      "mask" : "strict",
+      "prompt" : "code-fizzbuzz",
+      "suite" : "code",
+      "text" : "Here's a Python function that implements the classic FizzBuzz problem:\n\n```python\ndef fizzbuzz(n):\n    \"\"\"\n    Returns a list of FizzBuzz strings for numbers 1 to n.\n    \n    For multiples of 3, returns \"Fizz\"\n    For",
+      "tokens" : "64",
+      "user" : "Write a Python function fizzbuzz(n) that returns a list of the classic FizzBuzz strings for 1..n."
+    },
+    {
+      "eosBlock" : "none",
+      "mask" : "referenceBias",
+      "prompt" : "code-fizzbuzz",
+      "suite" : "code",
+      "text" : "Here's a Python function that implements the classic FizzBuzz problem:\n\n```python\ndef fizzbuzz(n):\n    \"\"\"\n    Returns a list of FizzBuzz strings for numbers 1 to n.\n    \n    For multiples of 3, returns \"Fizz\"\n    For",
+      "tokens" : "64",
+      "user" : "Write a Python function fizzbuzz(n) that returns a list of the classic FizzBuzz strings for 1..n."
+    },
+    {
+      "eosBlock" : "none",
+      "mask" : "strict",
+      "prompt" : "code-swift-struct",
+      "suite" : "code",
+      "text" : "Here's a Swift struct `Point` with `x` and `y` Double properties and a `distance(to:)` method that calculates the Euclidean distance:\n\n```swift\nstruct Point {\n    let x: Double\n    let y: Double\n    \n    func distance(to other: Point) ->",
+      "tokens" : "64",
+      "user" : "Define a Swift struct Point with x and y Doubles and a method distance(to:) returning the Euclidean distance."
+    },
+    {
+      "eosBlock" : "none",
+      "mask" : "referenceBias",
+      "prompt" : "code-swift-struct",
+      "suite" : "code",
+      "text" : "Here's a Swift struct `Point` with `x` and `y` properties and a `distance(to:)` method:\n\n```swift\nstruct Point {\n    let x: Double\n    let y: Double\n    \n    func distance(to other: Point) -> Double {\n        let dx",
+      "tokens" : "64",
+      "user" : "Define a Swift struct Point with x and y Doubles and a method distance(to:) returning the Euclidean distance."
+    },
+    {
+      "eosBlock" : "none",
+      "mask" : "strict",
+      "prompt" : "code-sql",
+      "suite" : "code",
+      "text" : "Here's a SQL query to find the top 5 customers by total spend in 2025:\n\n```sql\nSELECT \n    customer_id,\n    SUM(total) as total_spend\nFROM orders\nWHERE YEAR(created_at) = 2025\nGROUP BY customer_id",
+      "tokens" : "64",
+      "user" : "Given a table orders(id, customer_id, total, created_at), write a SQL query for the top 5 customers by total spend in 2025."
+    },
+    {
+      "eosBlock" : "none",
+      "mask" : "referenceBias",
+      "prompt" : "code-sql",
+      "suite" : "code",
+      "text" : "Here's a SQL query to find the top 5 customers by total spend in 2025:\n\n```sql\nSELECT \n    customer_id,\n    SUM(total) as total_spend\nFROM orders\nWHERE YEAR(created_at) = 2025\nGROUP BY customer_id",
+      "tokens" : "64",
+      "user" : "Given a table orders(id, customer_id, total, created_at), write a SQL query for the top 5 customers by total spend in 2025."
+    },
+    {
+      "eosBlock" : "none",
+      "mask" : "strict",
+      "prompt" : "code-regex",
+      "suite" : "code",
+      "text" : "Here's a regular expression that matches ISO-8601 dates in the format `YYYY-MM-DD`:\n\n```regex\n^\\d{4}-(0[1-9]|1[0-0-2])-(0[1-9]|[12]\\d|3[0",
+      "tokens" : "64",
+      "user" : "Write a regular expression that matches ISO-8601 dates (YYYY-MM-DD) and explain each part briefly."
+    },
+    {
+      "eosBlock" : "none",
+      "mask" : "referenceBias",
+      "prompt" : "code-regex",
+      "suite" : "code",
+      "text" : "Here's a regular expression that matches ISO-8601 dates in the format `YYYY-MM-DD`:\n\n```regex\n^\\d{4})-(0[1-9]|1[0-2])-(0[1-9]|[12]\\d|3[01]",
+      "tokens" : "64",
+      "user" : "Write a regular expression that matches ISO-8601 dates (YYYY-MM-DD) and explain each part briefly."
+    }
+  ]
+}

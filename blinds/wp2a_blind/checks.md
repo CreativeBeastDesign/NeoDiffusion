@@ -1,0 +1,26 @@
+| prompt | label | words | max4gramRepeat | maskLeak | eosBlock | tokens |
+|---|---|---|---|---|---|---|
+| chat-capital | A | 29 | 1 | False | 1 | 38 |
+| chat-capital | B | 41 | 1 | False | 1 | 49 |
+| chat-email | A | 65 | 1 | False | 3 | 105 |
+| chat-email | B | 77 | 1 | False | 4 | 126 |
+| chat-explain | A | 100 | 1 | False | none | 128 |
+| chat-explain | B | 106 | 1 | False | none | 128 |
+| chat-recipe | A | 70 | 1 | False | none | 128 |
+| chat-recipe | B | 66 | 1 | False | none | 128 |
+| code-fizzbuzz | A | 64 | 1 | False | none | 128 |
+| code-fizzbuzz | B | 64 | 1 | False | none | 128 |
+| code-regex | A | 47 | 1 | False | none | 128 |
+| code-regex | B | 65 | 1 | False | none | 128 |
+| code-sql | A | 56 | 2 | False | none | 128 |
+| code-sql | B | 61 | 2 | False | none | 128 |
+| code-swift-struct | A | 66 | 1 | False | none | 128 |
+| code-swift-struct | B | 70 | 1 | False | none | 128 |
+| reason-ages | A | 88 | 3 | False | none | 128 |
+| reason-ages | B | 84 | 4 | False | none | 128 |
+| reason-logic | A | 33 | 1 | False | 1 | 38 |
+| reason-logic | B | 44 | 1 | False | 2 | 56 |
+| reason-trains | A | 74 | 1 | False | none | 128 |
+| reason-trains | B | 69 | 1 | False | none | 128 |
+| reason-units | A | 55 | 1 | False | none | 128 |
+| reason-units | B | 55 | 1 | False | none | 128 |

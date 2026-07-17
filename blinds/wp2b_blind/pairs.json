@@ -1,0 +1,132 @@
+{
+ "pairs": [
+  {
+   "prompt": "chat-capital",
+   "mask": "static",
+   "user": "What is the capital of Japan, and what is the city best known for? Answer in two or three sentences.",
+   "text": "The capital of Japan is Tokyo. It is best known for being a bustling metropolis that blends traditional culture with cutting-edge technology, offering world-class cuisine, shopping, and historical attractions.<|role_end|><|endoftext|>",
+   "tokens": "38",
+   "eosBlock": "1"
+  },
+  {
+   "prompt": "chat-email",
+   "mask": "static",
+   "user": "Write a short, friendly email to a colleague asking to move tomorrow's 10am meeting to the afternoon.",
+   "text": "Subject: Request to Move Tomorrow's 10am Meeting  \n\nHi [Colleague's Name],  \n\nHope you're doing well! I just wanted to see if we could move tomorrow\u2019s meeting from 10 AM to the afternoon. I\u2019ve got a prior commitment in the morning and would appreciate the chance to reschedule briefly.  \n\nLet me know what time works for you, and I\u2019ll adjust my calendar accordingly.  \n\nBest regards,  \n[Your Name]<|role_end|><|endoftext|>",
+   "tokens": "105",
+   "eosBlock": "3"
+  },
+  {
+   "prompt": "chat-explain",
+   "mask": "static",
+   "user": "Explain to a curious 10-year-old why the sky is blue.",
+   "text": "Sure! Imagine the sky is like a big, invisible blanket of air around us. The Sun gives light, but it's actually made up of all the colors of the rainbow \u2014 red, orange, yellow, green, blue, indigo, and violet.\n\nWhen sunlight comes into our atmosphere, it bumps into tiny particles and molecules in the air. These little pieces love to scatter the shorter colors of light \u2014 like blue and violet \u2014 more than the longer colors like red or yellow.\n\nEven though violet light is scattered even more than blue, our eyes are more sensitive to blue, and the Sun sends more blue light than",
+   "tokens": "128",
+   "eosBlock": "none"
+  },
+  {
+   "prompt": "chat-recipe",
+   "mask": "static",
+   "user": "Give me a simple recipe for pancakes for two people, with metric measurements.",
+   "text": "Sure! Here's a simple and delicious recipe for pancakes for two people, using metric measurements:\n\n### Simple Pancakes for Two (Metric)\n\n**Ingredients:**\n- 100g all-purpose flour  \n- 1 tsp sugar  \n- 1 tsp baking powder  \n- Pin pinch of salt  \n- 1 large egg  \n- 120ml milk  \n- 20g unsalted butter, melted  \n- 1 tsp vanilla extract (optional)\n\n**Instructions:**\n\n1. In a large bowl, mix together the flour, sugar, baking",
+   "tokens": "128",
+   "eosBlock": "none"
+  },
+  {
+   "prompt": "reasoning-reason-trains",
+   "mask": "static",
+   "user": "Two trains are 240 km apart and drive toward each other, one at 70 km/h and one at 50 km/h. After how many hours do they meet? Show your reasoning briefly.",
+   "text": "We are given:\n\n- Distance between the two trains: 240 km  \n- Speed of first train: 70 km/h  \n- Speed of second train: 50 km/h  \n- They are moving **toward each other**\n\n### Step 1: Relative speed\nWhen two objects move toward each other, their relative speed is the **sum** of their speeds:\n\n$$\n70 \\text{ km/h} + 50 \\text{ km/h} = 120 \\text{ km/h}\n$$\n\n### Step 2:",
+   "tokens": "128",
+   "eosBlock": "none"
+  },
+  {
+   "prompt": "reasoning-reason-ages",
+   "mask": "static",
+   "user": "Anna is twice as old as Ben was when Anna was as old as Ben is now. Anna is 24 and Ben is 18. Check whether this statement is consistent and explain.",
+   "text": "We are given:\n\n- Anna is 24 years old.\n- Ben is 18 years old.\n- The statement: *\"Anna is twice as old as Ben was when Anna was as old as Ben is now.\"*\n\nWe need to check whether this statement is **consistent**.\n\n---\n\n### Step 1: Understand the statement\n\nLet\u2019s break down the sentence:\n\n> \"Anna is twice as old as Ben was when Anna was as old as Ben is now.\"\n\nLet\u2019s define:\n\n- Anna\u2019s current age = 24\n- Ben",
+   "tokens": "128",
+   "eosBlock": "none"
+  },
+  {
+   "prompt": "reasoning-reason-logic",
+   "mask": "static",
+   "user": "All roses are flowers. Some flowers fade quickly. Does it follow that some roses fade quickly? Answer yes or no and justify in two sentences.",
+   "text": "No. The fact that all roses are flowers and that some flowers fade quickly does not necessarily imply that some roses fade quickly, because the flowers that fade quickly might not include roses.<|role_end|><|endoftext|>",
+   "tokens": "38",
+   "eosBlock": "1"
+  },
+  {
+   "prompt": "reasoning-reason-units",
+   "mask": "static",
+   "user": "A recipe needs 3/4 cup of milk. I only have a 1/3-cup measure. How many times must I fill it, and how much do I overshoot or undershoot?",
+   "text": "We need **3/4 cup of milk**, but we only have a **1/3-cup measure**.\n\nLet\u2019s calculate how many times we need to fill the 1/3-cup measure to get at least 3/4 cup.\n\n### Step 1: Divide 3/4 by 1/3\n$$\n\\frac{3}{4} \\div \\frac{1}{3} = \\frac{3}{4} \\times \\frac{3}{1} = \\frac{9}{4} = 2.25\n$$\n\nSo, we need to",
+   "tokens": "128",
+   "eosBlock": "none"
+  },
+  {
+   "prompt": "chat-capital",
+   "mask": "dyntau06",
+   "user": "What is the capital of Japan, and what is the city best known for? Answer in two or three sentences.",
+   "text": "The capital of Japan is Tokyo. It is best known for being a bustling metropolis that blends traditional culture with cutting-edge technology, famous for its vibrant fashion, cuisine, and historical attractions.<|role_end|><|endoftext|>",
+   "tokens": "39",
+   "eosBlock": "1"
+  },
+  {
+   "prompt": "chat-email",
+   "mask": "dyntau06",
+   "user": "Write a short, friendly email to a colleague asking to move tomorrow's 10am meeting to the afternoon.",
+   "text": "Subject: Request to Move Tomorrow's Meeting  \n\nHi [Colleague's Name],  \n\nHope you're doing well! I just wanted to ask if we could possibly move tomorrow\u2019s 10 a.m meeting to the afternoon. I\u2019ve got a scheduling conflict that I won\u2019t be able to resolve at 10, and I\u2019d love to keep our conversation going.  \n\nLet me know what time works best for you \u2014 I\u2019ll adjust my calendar accordingly.  \n\nBest regards,  \n[Your Name]<|role_end|><|endoftext|>",
+   "tokens": "112",
+   "eosBlock": "3"
+  },
+  {
+   "prompt": "chat-explain",
+   "mask": "dyntau06",
+   "user": "Explain to a curious 10-year-old why the sky is blue.",
+   "text": "Sure! Imagine the sky is like a big, of,, and Sunlight is like a flashlight made of all the colors of the rainbow, white, red, orange, yellow, green, blue, indigo, and violet.\n\nWhen sunlight shines through the atmosphere, it bumps into tiny pieces of air, water, and dust in the sky. These tiny pieces are called molecules.\n\nNow, here's the cool part: the blue part of sunlight (the short, quick waves) bounces off these molecules much more than the other colors. It's like the blue light says, \"Hey, I'll play nicely",
+   "tokens": "128",
+   "eosBlock": "none"
+  },
+  {
+   "prompt": "chat-recipe",
+   "mask": "dyntau06",
+   "user": "Give me a simple recipe for pancakes for two people, with metric measurements.",
+   "text": "Sure! Here's a simple and delicious recipe for pancakes for two people, using metric measurements:\n\n**Simple Pancakes for Two 2\n\n**Ingredients:**\n- 100 g all-purpose flour  \n- 1 tsp sugar  \n- 1 tsp salt  \n- 1 tsp baking powder  \n- 1 large egg  \n- 200 ml milk  \n- 20 g vegetable oil ( melted butter)  \n- 1 tsp vanilla extract (optional)\n\n**Instructions:**\n\n1. In a large bowl, mix together the flour, sugar, salt",
+   "tokens": "128",
+   "eosBlock": "none"
+  },
+  {
+   "prompt": "reasoning-reason-trains",
+   "mask": "dyntau06",
+   "user": "Two trains are 240 km apart and drive toward each other, one at 70 km/h and one at 50 km/h. After how many hours do they meet? Show your reasoning briefly.",
+   "text": "We are given:\n\n- Distance between the two trains: 240 km  \n- Speed of first train: 70 km/h  \n- Speed of second train: 50 km/h  \n- They are moving **toward each other**\n\n### Step 1: Relative Speed\nWhen two objects move toward each other, their relative speed is the sum of their speeds:\n\n$$\n70 \\text{ km/h} + 50 \\text{ km/h} = 120 \\text{ km/h}\n$$\n\n### Step 2: Time to",
+   "tokens": "128",
+   "eosBlock": "none"
+  },
+  {
+   "prompt": "reasoning-reason-ages",
+   "mask": "dyntau06",
+   "user": "Anna is twice as old as Ben was when Anna was as old as Ben is now. Anna is 24 and Ben is 18. Check whether this statement is consistent and explain.",
+   "text": "We are given:\n\n- Anna is 24 years old.\n- Ben is 18 years old.\n- The statement: *\"Anna is twice as old as Ben was when Anna was as old as Ben is now.\"*\n\nWe need to check whether this statement is **consistent**.\n\n---\n\n### Step 1: Understand the statement\n\nLet\u2019s break down the sentence:\n\n> \"Anna is twice as old as Ben was when Anna was as old as Ben is now.\"\n\nLet\u2019s define:\n\n- Anna\u2019s current age: 24\n- Ben",
+   "tokens": "128",
+   "eosBlock": "none"
+  },
+  {
+   "prompt": "reasoning-reason-logic",
+   "mask": "dyntau06",
+   "user": "All roses are flowers. Some flowers fade quickly. Does it follow that some roses fade quickly? Answer yes or no and justify in two sentences.",
+   "text": "No. The fact that all roses are flowers and that some flowers fade quickly does not necessarily imply that some roses fade quickly, because \"some flowers\" could refer to types that are not roses.<|role_end|><|endoftext|>",
+   "tokens": "41",
+   "eosBlock": "1"
+  },
+  {
+   "prompt": "reasoning-reason-units",
+   "mask": "dyntau06",
+   "user": "A recipe needs 3/4 cup of milk. I only have a 1/3-cup measure. How many times must I fill it, and how much do I overshoot or undershoot?",
+   "text": "We need **3/4 cup of milk**, and we only have a **1/3-cup measure**.\n\nLet\u2019s find how many times we need to fill the 1/3-cup measure to get at least 3/4 cup.\n\n### Step 1: Divide 3/4 by 1/3\n$$\n\\frac{3}{4} \\div \\frac{1}{3} = \\frac{3}{4} \\times \\frac{3}{1} = \\frac{9}{4} = 2.25\n$$\n\nSo, we need to",
+   "tokens": "128",
+   "eosBlock": "none"
+  }
+ ]
+}
