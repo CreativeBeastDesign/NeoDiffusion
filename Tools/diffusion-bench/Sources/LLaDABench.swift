@@ -556,6 +556,26 @@ func runLLaDABench() async throws {
                 $0.creditDecodingEnabled = true
                 $0.creditAlpha = 1.0; $0.creditBeta = 0.9; $0.creditGamma = 1.0
             },
+            // Step-2 composability cells (final-plan §2): JOT × dyn-τ × Credit, never measured as
+            // a stack. dyn-τ uses α=0.3 (the Step-1-validated value; α=0.6 was quality-rejected,
+            // wp2b §10). Credit uses the lf-* preset config for consistency with lf-jotcredit.
+            // NOTE: JOT-faithful requires speculationK==1 — run this whole sweep with
+            // --speculation-k 1 against a K=1 q-cached control (the P3 pre-flight enforces it).
+            LLaDAArm(name: "cmp-jot-dt", mode: .q, cached: true, mask: .strict) {
+                $0.jotEnabled = true; $0.jotFaithful = true; $0.jotK = 2
+                $0.dynamicTauAlpha = 0.3
+            },
+            LLaDAArm(name: "cmp-credit-dt", mode: .q, cached: true, mask: .strict) {
+                $0.creditDecodingEnabled = true
+                $0.creditAlpha = 1.0; $0.creditBeta = 0.9; $0.creditGamma = 1.0
+                $0.dynamicTauAlpha = 0.3
+            },
+            LLaDAArm(name: "cmp-jot-credit-dt", mode: .q, cached: true, mask: .strict) {
+                $0.jotEnabled = true; $0.jotFaithful = true; $0.jotK = 2
+                $0.creditDecodingEnabled = true
+                $0.creditAlpha = 1.0; $0.creditBeta = 0.9; $0.creditGamma = 1.0
+                $0.dynamicTauAlpha = 0.3
+            },
             // In-situ module attribution (gather_qmm_handoff.md §5.5). Diagnostic arms: ablated
             // arms emit garbage on purpose — the metric is ms/forward
             // (denoiseSeconds/forwardsEvaluated), never TPS. Run them together in ONE process so
