@@ -172,6 +172,16 @@ struct LLaDAArm {
     /// Within one process, run-to-run CV is ~0.33%. Arms that carry their own overrides can be
     /// interleaved in a single process, which is the only way to see an effect that small.
     var overrides: @Sendable (inout GenerationParams) -> Void = { _ in }
+
+    /// Per-arm `speculationK` override (final-plan F-k). `speculationK` is baked into the engine
+    /// at construction, so comparing K=1 vs K=4 normally means two processes — exactly the
+    /// cross-process drift that inflated JOT's headline (F-j). With an override the bench keeps one
+    /// engine per distinct K and dispatches per arm, so K=1 and K=4 arms interleave in ONE process.
+    /// nil = use the process-global `--speculation-k`.
+    var speculationKOverride: Int? = nil
+
+    /// Returns a copy pinned to speculationK `k` (for the F-k spk-1/spk-4 arms).
+    func withK(_ k: Int) -> LLaDAArm { var a = self; a.speculationKOverride = k; return a }
 }
 
 struct LLaDARunResult: Codable {
@@ -481,6 +491,12 @@ func runLLaDABench() async throws {
         arms = [
             LLaDAArm(name: "q-cached", mode: .q, cached: true, mask: .strict),
             LLaDAArm(name: "s-cached", mode: .s, cached: true, mask: .strict),
+            // F-k: q-cached at fixed K, interleaved in ONE process to settle whether the served
+            // speculationK=4 default is net-negative on reasoning/code (cross-process data says
+            // K=1 beats K=4 by +16-17%, but cross-process = the F-j drift confound). Run e.g.:
+            //   diffusion-bench llada --arms spk-1,spk-4 --runs 5 --suites reasoning,code
+            LLaDAArm(name: "spk-1", mode: .q, cached: true, mask: .strict) .withK(1),
+            LLaDAArm(name: "spk-4", mode: .q, cached: true, mask: .strict) .withK(4),
             LLaDAArm(name: "wp3b-vanilla", mode: .q, cached: true, mask: .strict) {
                 $0.flashBlockEnabled = false
             },
@@ -644,7 +660,7 @@ func runLLaDABench() async throws {
             }
             arms = arms.filter { wanted.contains($0.name) }
         } else {
-            arms = arms.filter { !$0.name.hasPrefix("attr-") && !$0.name.hasPrefix("bl-") && !$0.name.hasPrefix("reuse-") && !$0.name.hasPrefix("wp3b-") && !$0.name.hasPrefix("dt-") && !$0.name.hasPrefix("lf-") }
+            arms = arms.filter { !$0.name.hasPrefix("attr-") && !$0.name.hasPrefix("bl-") && !$0.name.hasPrefix("reuse-") && !$0.name.hasPrefix("wp3b-") && !$0.name.hasPrefix("dt-") && !$0.name.hasPrefix("lf-") && !$0.name.hasPrefix("cmp-") && !$0.name.hasPrefix("spk-") }
         }
     }
     for arm in arms {
@@ -685,6 +701,15 @@ func runLLaDABench() async throws {
 
     let engine = DiffusionEngine(
         model: container.model, speculationK: speculationK, instrument: instrument)
+    // One engine per distinct speculationK, so per-arm-K arms (F-k) interleave in one process.
+    // The default K's engine is pre-seeded; overrides construct lazily (cheap — model is shared).
+    var engineCache: [Int: DiffusionEngine] = [speculationK: engine]
+    func engineFor(_ k: Int) -> DiffusionEngine {
+        if let e = engineCache[k] { return e }
+        let e = DiffusionEngine(model: container.model, speculationK: k, instrument: instrument)
+        engineCache[k] = e
+        return e
+    }
     var currentCommittedTokens: [Int] = []
     let isoFormatter = ISO8601DateFormatter()
     var jsonLines: [String] = []
@@ -879,14 +904,15 @@ func runLLaDABench() async throws {
             arm: arm
         )
 
+        let eng = engineFor(arm.speculationKOverride ?? speculationK)
         let output = arm.cached
-            ? engine.generateCached(prompt: promptIds, params: targetParams,
-                                    iceTemplate: iceTemplate,
-                                    streamBlock: logBlock)
-            : engine.generate(prompt: promptIds, params: targetParams,
-                              maskSemantics: arm.mask,
-                              iceTemplate: iceTemplate,
-                              streamBlock: logBlock)
+            ? eng.generateCached(prompt: promptIds, params: targetParams,
+                                 iceTemplate: iceTemplate,
+                                 streamBlock: logBlock)
+            : eng.generate(prompt: promptIds, params: targetParams,
+                           maskSemantics: arm.mask,
+                           iceTemplate: iceTemplate,
+                           streamBlock: logBlock)
         let seconds = Date().timeIntervalSince(start)
         var finalOutput = output
         if effTempVoting, !baselineCheck, let trajectory = output.trajectorySequences, !trajectory.isEmpty {
