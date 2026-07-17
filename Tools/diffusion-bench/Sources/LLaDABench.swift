@@ -1402,14 +1402,50 @@ func runLLaDABench() async throws {
         return
     }
 
+    // P3: pre-flight the process-global speculationK against every arm's *effective* params.
+    // The engine was built once with one speculationK, but an arm's `overrides` closure can
+    // switch on flashBlock or faithful-JOT — both K==1-only — AFTER the CLI defaults, where the
+    // CLI-level preconditions never see it (e.g. selecting `wp3b-flashblock` or a faithful-JOT
+    // arm via --arms while leaving the default K=4). Without this, the engine's own
+    // `precondition` fires mid-run (handoff §7a:
+    // the mid-run trap), losing a whole interleaved sweep partway through. Fail before the first
+    // generation, naming names.
+    if speculationK != 1 {
+        let k1Conflicts = arms.compactMap { arm -> String? in
+            let p = params(for: arm.mode, arm: arm)
+            var reasons: [String] = []
+            if p.flashBlockEnabled { reasons.append("flashBlock") }
+            if p.jotFaithful { reasons.append("faithful-JOT") }
+            return reasons.isEmpty ? nil : "\(arm.name) (\(reasons.joined(separator: "+")))"
+        }
+        if !k1Conflicts.isEmpty {
+            FileHandle.standardError.write(Data((
+                "ERROR: --speculation-k \(speculationK) conflicts with arms that require K=1 "
+                + "(the engine would precondition-crash mid-run):\n"
+                + k1Conflicts.map { "  - \($0)" }.joined(separator: "\n")
+                + "\nRe-run those arms with --speculation-k 1, or omit them from the arm list.\n"
+            ).utf8))
+            exit(1)
+        }
+    }
+
+    // P2: run-major (interleaved) order by default. Legacy arm-major ran all runs of an arm
+    // consecutively, so arm identity correlated with warmup + thermal drift and nothing near
+    // the noise floor (Credit's +1.8%, composability deltas) was resolvable. Run-major samples
+    // each arm across the whole elapsed span. --arm-major restores the legacy order — the A/B
+    // that validates the interleaving itself (final-plan P2). Loop bounds swap; the body is
+    // order-agnostic (`arm`/`run` bound per unit; JSONL already carries `run`).
+    let armMajor = hasFlag("--arm-major")
     var armTotals: [String: [Double]] = [:]
-    var firstRun = true
-    for arm in arms {
-        for run in 0 ..< runs {
-            if !firstRun && cooldown > 0 {
+    var firstUnit = true
+    for outer in 0 ..< (armMajor ? arms.count : runs) {
+        for inner in 0 ..< (armMajor ? runs : arms.count) {
+            let arm = armMajor ? arms[outer] : arms[inner]
+            let run = armMajor ? inner : outer
+            if !firstUnit && cooldown > 0 {
                 try await Task.sleep(nanoseconds: UInt64(cooldown) * 1_000_000_000)
             }
-            firstRun = false
+            firstUnit = false
             var runTotal = 0.0
 
             for suite in suites {
