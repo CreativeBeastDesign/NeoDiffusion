@@ -10,6 +10,34 @@ import DiffusionGeneration
 extension DiffusionTokenizer: @unchecked Sendable {}
 extension DiffusionEngine: @unchecked Sendable {}
 
+// MARK: - Host-aware speculationK default (final-plan F-l)
+
+func sysctlStringValue(_ name: String) -> String {
+    var size = 0
+    guard sysctlbyname(name, nil, &size, nil, 0) == 0, size > 0 else { return "" }
+    var buf = [CChar](repeating: 0, count: size)
+    guard sysctlbyname(name, &buf, &size, nil, 0) == 0 else { return "" }
+    return String(cString: buf)
+}
+
+/// The K=1-vs-K=4 loop-speculation decision, resolved from host analytics.
+///
+/// Measured (final-plan F-k/F-l, 2026-07-17, single-process interleaved, byte-identical output):
+/// on the M2 Ultra (Mac14,14, 192 GB) K=1 beats the K=4 default by +6–17% because the host is
+/// compute-bound and CPU-GPU syncs are cheap, so speculative run-ahead is pure overhead. K is
+/// output-invariant, so this is a free speedup. On sync-bound hosts (M1 MacBook, 16 GB) K>1 can
+/// still pay, so the default stays 4 there. The finding was only measured on the Ultra, so the
+/// heuristic is deliberately conservative: physical memory ≥ 64 GB (Ultra/Max-class) ⇒ K=1.
+/// Always overridable by `--speculation-k` / `NEODIFFUSION_SPECULATION_K`.
+func hostAwareDefaultSpeculationK() -> (k: Int, model: String, memGB: Double, studioClass: Bool) {
+    var mem: UInt64 = 0; var size = MemoryLayout<UInt64>.size
+    sysctlbyname("hw.memsize", &mem, &size, nil, 0)
+    let memGB = Double(mem) / 1_073_741_824.0
+    let model = sysctlStringValue("hw.model")
+    let studioClass = memGB >= 64.0
+    return (studioClass ? 1 : 4, model, memGB, studioClass)
+}
+
 // MARK: - OpenAI Chat Completion API Models
 
 struct ChatCompletionRequest: Codable {
@@ -177,7 +205,18 @@ struct NeoDiffusionServer {
             ?? ProcessInfo.processInfo.environment["NEODIFFUSION_PORT"] 
             ?? "8080"
         let port = Int(portString) ?? 8080
-        let speculationK = Int(argValue("--speculation-k") ?? "4") ?? 4
+        // Host-aware default (final-plan F-l): K=1 on Studio/Ultra-class hardware (free +6–17%,
+        // output-invariant), K=4 otherwise. Explicit --speculation-k / env always wins.
+        let autoK = hostAwareDefaultSpeculationK()
+        let specKOverride = argValue("--speculation-k")
+            ?? ProcessInfo.processInfo.environment["NEODIFFUSION_SPECULATION_K"]
+        let speculationK = specKOverride.flatMap(Int.init) ?? autoK.k
+        print(String(format: "speculationK = %d (%@ — host %@, %.0f GB, %@-class)",
+                     speculationK,
+                     specKOverride != nil ? "forced via flag/env"
+                        : "host-aware default, F-l",
+                     autoK.model.isEmpty ? "unknown" : autoK.model, autoK.memGB,
+                     autoK.studioClass ? "Studio/Ultra" : "standard"))
         let blockLength = Int(argValue("--block-length") ?? "32") ?? 32
         let noEarlyStop = hasFlag("--no-early-stop")
         
