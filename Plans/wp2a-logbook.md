@@ -55,6 +55,26 @@ Sweep arms (recorded verbatim; binary = post-commit `wp-2a-speculation` release 
 
 **F8 — JOT pre-experiment (by-product)**: k=2 → 44.2% of positions prediction-stable ≥2 steps before unmask, 4.9% later Δ-edited; k=4 → 15.0%/4.8%. Entry condition met at shallow windows; roadmap Tier-3 entry updated.
 
+## 9. Spiffy closed on paper — the Studio break-even upper-bounds it below JOT (2026-07-17)
+
+The Studio host question F7 deferred ("do (1+D)-wide forwards cost ≪ (1+D)×?") is answerable from data already in hand — no bench time — and the answer closes Spiffy without building the runtime.
+
+**Inputs (both sourced)**: the wide-forward multiplier **m(2×) = 1.63×** (WP-6d / `gather_qmm_handoff.md:715` — ms/forward grows 1.63× for 2× the tokens, sublinear) and F7's forward-count ceiling s = **27.6/32.2/35.2%** at D=3/5/8 (`draft_graph.json`).
+
+**Model.** One measured width point, so extrapolate linearly: m(w) = 1 + 0.63·(w−1), width w = 1+D. The marginal cost of one extra token in a wide forward is 0.63× a forward; the *sublinear surplus* — the part of a drafted step that comes free — is 1 − 0.63 = **0.37**. A wide forward at depth D replaces up to (D+1) sequential forwards but costs m(1+D); the compute it saves is (D+1) − m(1+D) = 0.37·D per wide forward. Since the count saving s = (wide forwards)·D / N at full acceptance, the net wall-clock saving telescopes to a D-independent:
+
+> **net saving ≤ 0.37 · s**
+
+| D | width | m (extrap.) | count ceiling s | **net UPPER BOUND** |
+|---|---|---|---|---|
+| 3 | 4× | 2.89× | 27.6% | **+10.2%** |
+| 5 | 6× | 4.15× | 32.2% | **+11.9%** |
+| 8 | 9× | 6.04× | 35.2% | **+13.0%** |
+
+**F9 — the count ceiling does not survive the width penalty; Spiffy is CLOSED on paper.** (inferred from F7 + the 1.63× measurement) The 27–35% forward-count headline collapses to a **≤+13% wall-clock upper bound**, and it is an upper bound in two independent directions: (i) it assumes **full draft acceptance** (e=D), which F7's own 35–40% token-miss contradicts — partial acceptance drives the net toward, and possibly below, zero; (ii) it assumes width scaling stays **linear** out to 9×, extrapolated from a single 2× point. Even the ceiling (+13% at D=8, the widest/most acceptance-fragile arm) sits below JOT's already-landed +21.9% reasoning, for a **full drafting-runtime implementation** that JOT does not need. Per the Redundancy/Width rules: not worth the build.
+
+**The one cheap thing that could reopen it** (if ever wanted): directly time a forward at 4× and 9× width on the Studio — a few minutes, no Spiffy runtime — to replace the linear m(w) extrapolation with measured points. If width stays *sublinear* past 2× (fixed-cost-dominated, which 1.63<2 hints at), the surplus exceeds 0.37 and the ceiling rises; if it turns superlinear at high width (occupancy limits), Spiffy is even more dead. Absent a reason to spend even that, **closed.** WP-2a's Studio debts are now both discharged: preset withdrawn (§8), Spiffy closed (§9).
+
 ## 5. Results summary (M1, gen-128, Q mode unless noted; width-corrected TPF = tokens ÷ 32-token-equivalent forwards)
 
 | Arm | chat WC (Δ vs Q-base) | reasoning WC | code WC | note |

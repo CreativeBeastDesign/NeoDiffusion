@@ -503,6 +503,12 @@ func runLLaDABench() async throws {
             LLaDAArm(name: "dt-tau", mode: .q, cached: true, mask: .strict) {
                 $0.dynamicTauAlpha = 0.6
             },
+            // Step-1 α=0.3 arm (final-plan §1.5): α=0.6 failed its chat quality gate (§1.4);
+            // 0.3 is the gentler point the quality evidence supports. Interleave with q-cached
+            // (control) + dt-tau (α=0.6) in ONE process so all three compare drift-free.
+            LLaDAArm(name: "dt-tau-a03", mode: .q, cached: true, mask: .strict) {
+                $0.dynamicTauAlpha = 0.3
+            },
             LLaDAArm(name: "dt-mbd", mode: .q, cached: true, mask: .strict) {
                 $0.nBuf = 2
                 $0.tauAdd = 0.5
