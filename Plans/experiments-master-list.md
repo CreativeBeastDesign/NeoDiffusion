@@ -141,7 +141,7 @@ Every logged experiment row must record:
     *   `[Sourced]`: v1 (FFN zeroing only) perturbed active token hidden states, causing representation cascades that doubled steps (+75% to +99%).
     *   `[Sourced]`: v2 (faithful K/V hold) pins frozen token's K/V post-qk-norm/post-RoPE, eliminating cascades (step overhead dropped to +15%).
     *   `[Sourced]`: On M1, dynamic index gathering requires a per-layer CPU-GPU sync (`numActive.item()`), stalling wall-clock performance.
-    *   `[Sourced]`: On the M2 Ultra, JOT achieves a **+21.9% wall-clock speedup** on reasoning tasks (92.99 vs. 76.31 TPS).
+    *   `[Sourced]`: On the M2 Ultra, JOT achieves a **+21.9% wall-clock speedup** on reasoning tasks (92.99 vs. 76.31 TPS). — ⚠️ **AMENDED 2026-07-17 (final-plan §2, F-j/F-k/F-l; interleaved single-process re-measure): this figure is REAL vs the K=4 default but MISATTRIBUTED.** JOT-faithful forces K=1, and K=1 *by itself* is +16.2% on reasoning (byte-identical output — speculation is output-invariant). Decomposition: +21.9% ≈ K=1 switch (×1.162) × JOT-on-K=1 (×1.055). **JOT's own contribution is +5.5% reasoning-only** (chat −26%, code −20%); the record's baseline (76.3) was cold — the drift-free interleaved baseline is 92–93. Actionable: take the +16% for free via K=1 (F-l), skip JOT elsewhere.
     *   `[Sourced]`: Composing JOT + Credit Decoding (`jot-credit`) achieves **102.12 TPS on code** (+2.9% net speedup over baseline).
 *   **Verdict**: **ACCEPT (Reasoning served preset; JOT+Credit code served preset)**.
 

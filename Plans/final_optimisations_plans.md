@@ -150,6 +150,16 @@ Both α arms are now measured on the Studio, interleaved with the control in one
 
 **Served outcome**: **dyn-τ α=0.3 per-suite preset (reasoning + code) stands as the Step-1 result; no stacked preset is added.** No quality sheet needed here — nothing new ships (every combo lost). Credit's neutral-negative showing feeds Step 7a; JOT feeds F-j's confirm decision.
 
+#### F-j and F-k CONFIRMED + decomposed (2026-07-17) — the biggest actionable win of the session is quality-free
+
+**F-j confirmed** (`scratch/fj_jot_confirm.jsonl`, q-cached vs lf-jot, K=1, 5 runs interleaved, variance PASS): **JOT reasoning +5.5%** (chat −26.1%, code −19.8%), matching the Step-2 +5.2%. The recorded +21.9–28% was a cold-baseline artefact — JOT's own TPS is stable; the record's baseline was under-warmed.
+
+**F-k SETTLED** (`scratch/fk_speck.jsonl`, spk-1 vs spk-4 in **one** process via the new per-arm-K override — no cross-process drift; 5 runs, variance PASS, 120/120 envValid): **K=1 beats the served K=4 on every suite — chat +6.4%, reasoning +16.2%, code +17.1% — with byte-IDENTICAL output (11/11 prompts, 0 differ).** Speculation K is output-invariant by construction (only sync scheduling changes), verified here on real weights. So this is a **quality-free speedup: no blind sheet is possible or needed.**
+
+**The decomposition ties them together.** The recorded "JOT +21.9% reasoning vs the K=4 default" = the K=1 switch (×1.162) × JOT-on-K=1 (×1.055) ≈ **+22.6%** — arithmetically right but **misattributed**: ~16% is the free K=1 switch that JOT-faithful *forces*, only ~5.5% is JOT itself, and JOT is negative on chat/code. You get the large half for free, without JOT.
+
+**F-l — the loop-speculation default (K=4) is net-negative on the M2 Ultra; K=1 is strictly better everywhere, quality-free.** `[Sourced]` K>1 speculative loop execution (Phase-2 gotcha 9) trades extra speculative forwards for fewer CPU-GPU syncs; on the compute-bound Studio the syncs are cheap and the speculative overhead dominates, so K=4 loses on all three suites. K=1 also uses less memory (no run-ahead) and produces identical tokens. The K=4 default is an M1-era choice (where syncs are expensive) that does not fit the Studio. **This is the single largest quality-free lever found — +6–17% by changing one served constant — and it partially un-does the loop-speculation accept.** Open decision below (serving-default change ⇒ André's call). Cross-check: reproduces and now *settles* (single-process) the master-list's "+19% code" lead.
+
 ### Step 3 — Decompose the ~21% remainder with the WP-6c in-situ method
 
 - **What**: extend `ModuleAblation` with arms for norms, sampler/selection-set construction, and loop control (K-step flag readbacks); difference each **against the full forward** (§3b rule); sanity gate + control arm + behavioural assertion, as established.
