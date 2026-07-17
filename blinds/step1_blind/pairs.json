@@ -1,0 +1,132 @@
+{
+ "pairs": [
+  {
+   "eosBlock": "none",
+   "mask": "cod-static",
+   "prompt": "code-fizzbuzz",
+   "text": "Here's a Python function that implements the classic FizzBuzz problem:\n\n```python\ndef fizzbuzz(n):\n    \"\"\"\n    Returns a list of FizzBuzz strings for numbers 1 to n.\n    \n    For numbers divisible by 3: \"Fizz\"\n    For numbers divisible by 5: \"Buzz\"\n    For numbers divisible by both 3 and 5: \"FizzBuzz\"\n    For all other numbers: the number as a string\n    \n    Args:\n        n (int): The upper limit (inclusive)\n    \n    Returns:",
+   "tokens": "128",
+   "user": "Write a Python function fizzbuzz(n) that returns a list of the classic FizzBuzz strings for 1..n."
+  },
+  {
+   "eosBlock": "none",
+   "mask": "cod-static",
+   "prompt": "code-swift-struct",
+   "text": "Here's a Swift struct `Point` with `x` and `y` properties and a `distance(to:)` method:\n\n```swift\nstruct Point {\n    var x: Double\n    var y: Double\n    \n    func distance(to other: Point) -> Double {\n        let dx = other.x -.x\n        let dy = other.y - other.y\n        return sqrt(dx * dx + dy * dy)\n    }\n}\n\n// Example usage:\nlet point1 = Point(x: 0.0, y: 0.0)\nlet point2 =",
+   "tokens": "128",
+   "user": "Define a Swift struct Point with x and y Doubles and a method distance(to:) returning the Euclidean distance."
+  },
+  {
+   "eosBlock": "none",
+   "mask": "cod-static",
+   "prompt": "code-sql",
+   "text": "Here's a SQL query to find the top 5 customers by total spend in 2025:\n\n```sql\nSELECT \n    customer_id,\n    SUM(total) AS total_spend\nFROM orders\nWHERE YEAR(created_at) = 2025\nGROUP BY customer_id\nORDER BY total_spend DESC\nLIMIT 5;\n```\n\n**Alternative version using explicit date range:**\n\n```sql\nSELECT \n    customer_id,\n    SUM(total) AS total_spend\nFROM orders\nWHERE created_at >= '2025-01-01",
+   "tokens": "128",
+   "user": "Given a table orders(id, customer_id, total, created_at), write a SQL query for the top 5 customers by total spend in 2025."
+  },
+  {
+   "eosBlock": "none",
+   "mask": "cod-static",
+   "prompt": "code-regex",
+   "text": "Here's a regular expression that matches ISO-8601 dates in the format `YYYY-MM-DD`:\n\n```regex\n^\\d{4}-(0[1-9]|1[0-2])-(0[1-9]|[12]\\d|3[01])$\n```\n\n---\n\n### \ud83d\udd0d Explanation of Each Part:\n\n1. **`^`**  \n   - **Start of string anchor**: Ensures the match starts at the beginning of the string.\n\n2. **`\\d{4}`**  \n   -",
+   "tokens": "128",
+   "user": "Write a regular expression that matches ISO-8601 dates (YYYY-MM-DD) and explain each part briefly."
+  },
+  {
+   "eosBlock": "none",
+   "mask": "rea-a0.6",
+   "prompt": "reason-trains",
+   "text": "We are given:\n\n- Distance between the two trains: 240 km  \n- Speed of first train: 70 km/h  \n- Speed of second train: 50 km/h  \n- They are moving **toward each other**\n\n### Step 1: Add their speeds\nSince they are moving toward each other, their combined speed is:\n\n$$\n70\\,\\text{km/h} + 50\\,\\text{km/h} = 120\\,\\text{km/h}\n$$\n\n### Step 2: Use the formula time\n\n",
+   "tokens": "128",
+   "user": "Two trains are 240 km apart and drive toward each other, one at 70 km/h and one at 50 km/h. After how many hours do they meet? Show your reasoning briefly."
+  },
+  {
+   "eosBlock": "none",
+   "mask": "rea-a0.6",
+   "prompt": "reason-ages",
+   "text": "We are given:\n\n- Anna is **24 years old**\n- Ben is **18 years old**\n-\n statement statement:\n\n\n\nAnnaAnna is as old as Ben was when Anna was as old as Ben is now.\"\n\nWe are to check whether this statement is **consistent**.\n\n---\n\n### Step 1: Understand the statement\n\nLet\u2019s break down the statement:\n\n> \"Anna is twice as old as Ben was when Anna was as old as Ben is now.\"\n\nLet\u2019s define:\n\n- Anna's current age: 24\n",
+   "tokens": "128",
+   "user": "Anna is twice as old as Ben was when Anna was as old as Ben is now. Anna is 24 and Ben is 18. Check whether this statement is consistent and explain."
+  },
+  {
+   "eosBlock": "1",
+   "mask": "rea-a0.6",
+   "prompt": "reason-logic",
+   "text": "No. The fact that all roses are flowers and that some flowers fade quickly does not necessarily that that some roses fade quickly, because the flowers that fade quickly might not include any roses at all.<|role_end|><|endoftext|>",
+   "tokens": "41",
+   "user": "All roses are flowers. Some flowers fade quickly. Does it follow that some roses fade quickly? Answer yes or no and justify in two sentences."
+  },
+  {
+   "eosBlock": "none",
+   "mask": "rea-a0.6",
+   "prompt": "reason-units",
+   "text": "We need **3/4 cup** of milk and you only have a **1/3-cup** measure.\n\n### Step 1: Determine how many times you need to fill the 1/3-cup measure\n\nWe divide:\n\n$$\n\\frac{3}{4} \\div \\frac{1}{3} = \\frac{3}{4} \\times \\frac{3}{1} = \\frac{9}{4} = 2.25\n$$\n\nSo, you need to fill the 1/3-cup measure **2.25 times**.\n",
+   "tokens": "128",
+   "user": "A recipe needs 3/4 cup of milk. I only have a 1/3-cup measure. How many times must I fill it, and how much do I overshoot or undershoot?"
+  },
+  {
+   "eosBlock": "none",
+   "mask": "rea-a0.3",
+   "prompt": "reason-trains",
+   "text": "We are given:\n\n- Distance between the two trains: 240 km  \n- Speed of first train: 70 km/h  \n- Speed of second train: 50 km/h  \n- They are moving **toward each other**\n\n### Step 1: Relative speed\nWhen two objects move toward each other, their relative speed is the sum of their speeds:\n\n$$\n70 \\text{ km/h} + 50 \\text{ km/h} = 120 \\text{ km/h}\n$$\n\n### Step 2: Time to",
+   "tokens": "128",
+   "user": "Two trains are 240 km apart and drive toward each other, one at 70 km/h and one at 50 km/h. After how many hours do they meet? Show your reasoning briefly."
+  },
+  {
+   "eosBlock": "none",
+   "mask": "rea-a0.3",
+   "prompt": "reason-ages",
+   "text": "We are given:\n\n- Anna is **24 years old**\n- Ben is **18 years old**\n- The statement: *\"Anna is twice as old as Ben was when Anna was as old as Ben is now.\"*\n\nWe need to check whether this statement is **consistent**.\n\n---\n\n### Step 1: Understand the statement\n\nLet\u2019s break down the sentence:\n\n> \"Anna is twice as old as Ben was when Anna was as old as Ben is now.\"\n\nLet\u2019s define:\n\n- Anna\u2019s current age: 24\n- Ben",
+   "tokens": "128",
+   "user": "Anna is twice as old as Ben was when Anna was as old as Ben is now. Anna is 24 and Ben is 18. Check whether this statement is consistent and explain."
+  },
+  {
+   "eosBlock": "1",
+   "mask": "rea-a0.3",
+   "prompt": "reason-logic",
+   "text": "No. The fact that all roses are flowers and that some flowers fade quickly does not necessarily that that some roses fade quickly, because the flowers that fade quickly might not be roses at all.<|role_end|><|endoftext|>",
+   "tokens": "40",
+   "user": "All roses are flowers. Some flowers fade quickly. Does it follow that some roses fade quickly? Answer yes or no and justify in two sentences."
+  },
+  {
+   "eosBlock": "none",
+   "mask": "rea-a0.3",
+   "prompt": "reason-units",
+   "text": "We need **3/4 cup** of milk and you only have a **1/3-cup** measure.\n\n### Step 1: Determine how many 1/3-cup measures fit into 3/4 cup\n\nWe compute:\n\n$$\n\\frac{3/4}{1/3} = \\frac{3}{4} \\times \\frac{3}{1} = \\frac{9}{4} = 2.25\n$$\n\nSo, you need to fill the 1/3-cup measure **2.25 times**.\n\n### Step ",
+   "tokens": "128",
+   "user": "A recipe needs 3/4 cup of milk. I only have a 1/3-cup measure. How many times must I fill it, and how much do I overshoot or undershoot?"
+  },
+  {
+   "eosBlock": "none",
+   "mask": "cod-a0.3",
+   "prompt": "code-fizzbuzz",
+   "text": "Here's a Python function that implements the classic FizzBuzz problem:\n\n```python\ndef fizzbuzz(n):\n    \"\"\"\n    Returns a list of FizzBuzz strings for numbers 1 to n.\n    \n    For numbers divisible by 3: \"Fizz\"\n    For numbers divisible by 5: \"Buzz\"\n    For numbers divisible by both 3 and 5: \"FizzBuzz\"\n    For all other numbers: the number as a string\n    \n    Args:\n        n (int): The upper limit (inclusive)\n    \n    Returns:",
+   "tokens": "128",
+   "user": "Write a Python function fizzbuzz(n) that returns a list of the classic FizzBuzz strings for 1..n."
+  },
+  {
+   "eosBlock": "none",
+   "mask": "cod-a0.3",
+   "prompt": "code-swift-struct",
+   "text": "Here's a Swift struct `Point` with `x` and `y` properties and a `distance(to:)` method:\n\n```swift\nstruct Point {\n    var x: Double\n    var y: Double\n    \n    func distance(to point: Point) -> Double {\n        let dx = self.x - point.x\n        let dy = self.y - point.y\n        return sqrt(dx * dx + dy * dy)\n    }\n}\n\n// Example usage:\nlet point1 = Point(x: 0.0, y: 0.0)\nlet point2",
+   "tokens": "128",
+   "user": "Define a Swift struct Point with x and y Doubles and a method distance(to:) returning the Euclidean distance."
+  },
+  {
+   "eosBlock": "none",
+   "mask": "cod-a0.3",
+   "prompt": "code-sql",
+   "text": "Here's a SQL query to find the top 5 customers by total spend in 2025:\n\n```sql\nSELECT \n    customer_id,\n    SUM(total) AS total_spend\nFROM orders\nWHERE YEAR(created_at) = 2025\nGROUP BY customer_id\nORDER BY total_spend DESC\nLIMIT 5;\n```\n\n**Alternative version using different date functions:**\n\n```sql\nSELECT \n    customer_id,\n    SUM(total) AS total_spend\nFROM orders\nWHERE created_at >= '2025-01-01",
+   "tokens": "128",
+   "user": "Given a table orders(id, customer_id, total, created_at), write a SQL query for the top 5 customers by total spend in 2025."
+  },
+  {
+   "eosBlock": "none",
+   "mask": "cod-a0.3",
+   "prompt": "code-regex",
+   "text": "Here's a regular expression that matches ISO-8601 dates in the format `YYYY-MM-DD`:\n\n```regex\n^\\d{4}-(0[1-9]|1[0-2])-(0[1-9]|[12]\\d|3[01])$\n```\n\n---\n\n### \ud83d\udd0d Explanation of Each Part:\n\n1. **`^`**  \n   - **Start of string anchor**: Ensures the match starts at the beginning of the string.\n\n2. **`\\d{4}`**  \n   -",
+   "tokens": "128",
+   "user": "Write a regular expression that matches ISO-8601 dates (YYYY-MM-DD) and explain each part briefly."
+  }
+ ]
+}

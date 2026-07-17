@@ -1,0 +1,34 @@
+{
+  "code-fizzbuzz": {
+    "A": "cod-static",
+    "B": "cod-a0.3"
+  },
+  "code-regex": {
+    "A": "cod-a0.3",
+    "B": "cod-static"
+  },
+  "code-sql": {
+    "A": "cod-a0.3",
+    "B": "cod-static"
+  },
+  "code-swift-struct": {
+    "A": "cod-a0.3",
+    "B": "cod-static"
+  },
+  "reason-ages": {
+    "A": "rea-a0.6",
+    "B": "rea-a0.3"
+  },
+  "reason-logic": {
+    "A": "rea-a0.3",
+    "B": "rea-a0.6"
+  },
+  "reason-trains": {
+    "A": "rea-a0.6",
+    "B": "rea-a0.3"
+  },
+  "reason-units": {
+    "A": "rea-a0.6",
+    "B": "rea-a0.3"
+  }
+}
