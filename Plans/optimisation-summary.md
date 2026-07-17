@@ -1,8 +1,12 @@
 # NeoDiffusion Optimization Summary
 
+> [!NOTE]
+> A comprehensive, unified dashboard of all campaigns, work packages, and experiments is available in the [Experiments Master List](file:///Users/andrebarlocher/Documents/Swift/NeoDiffusion/Plans/experiments-master-list.md).
+
 This document consolidates the experimental results, verdicts, and architectural lessons from the optimization campaigns run across **Phase 2** and **Phase 3** of the NeoDiffusion project. It provides an overview of what was measured, what was accepted, what was rejected, and why.
 
 ---
+
 
 ## Executive Summary & Performance Matrix
 
@@ -23,6 +27,8 @@ The following table summarizes the status and key metrics of each experiment:
 | **WP-2b-2 Dynamic Threshold** | Fewer steps/blk | **ACCEPT** | Steps/block: -14.8% (chat) / -11.3% (reasoning) | Positive (fewer total steps) | [wp2b-logbook.md](file://./Plans/wp2b-logbook.md) |
 | **WP-2b-3 EOS Early Exit** | Fewer steps/blk | **NULL** | 0% change in steps or tokens | Neutral (pre-banked in base) | [wp2b-logbook.md](file://./Plans/wp2b-logbook.md) |
 | **WP-3a JOT Early Stopping** | Cheaper steps | **WALL-CLOCK REJECT** | Steps/block: +15% in v2 (vs +75% in v1) | Compute-neutral/negative | [jot-logbook.md](file://./Plans/jot-logbook.md) |
+| **WP-4a TSCV** | Fewer steps/blk | **ACCEPT** | Accuracy: +8.0pp net gain (24/100 vs 16/100 baseline) | 0 cost (post-hoc CPU voting <1ms) | [wp4a-logbook.md](file://./Plans/wp4a-logbook.md) |
+| **WP-4b ICE Prompting** | Fewer steps/blk | **ACCEPT** | GSM8K: Correct math steps, 57 steps total (2 post-steps) | Speedup/TPS deferred to Studio backfill | [wp4b-logbook.md](file://./Plans/wp4b-logbook.md) |
 
 ---
 
@@ -153,7 +159,33 @@ Below is an estimation of how transferring these experiments to a **Mac Studio M
 
 ---
 
-## 3. Global Lessons & Architectural Insights
+## 3. Phase 4 Work Packages (WPs)
+
+### WP-4a: Temporal Self-Consistency Voting (TSCV)
+*   **Goal**: Aggregate intermediate token predictions from the late stable tail ($t \ge t_{\text{start}} \cdot T$) and perform a flat majority vote to recover correct answers that are generated early but subsequently overwritten by final-step decoding noise.
+*   **Verdict**: **ACCEPT (Landed Default-On)**.
+*   **Key Results**:
+    *   **Accuracy Recovery**: At optimal parameters ($\alpha = 0.0$, $t_{\text{start}} = 0.9$), TSCV increases correct outputs on GSM8K-100 to **24.00%**, a massive **+50.0% relative accuracy improvement** over the greedy baseline (16.00%).
+    *   **Oscillation Verified**: Under baseline strict-mask Q-mode, the correct answer is generated at *some* point in the denoising trajectory for **35.00% of prompts**, verifying high temporal instability.
+    *   **Zero Compute Cost**: CPU decoding of the voting window takes under 1ms, adding zero serving latency.
+*   **Evidence**: Trajectory checks on GSM8K-100 and grid sweeps over $\alpha$ and $t_{\text{start}}$.
+*   **Lessons Learnt**:
+    *   **Search Space Fluctuations**: Bidirectional refinement models have fluid search spaces; intermediate outputs represent valuable candidates that standard final-step decoding discards.
+
+### WP-4b: In-Place Chain-of-Thought Prompting (ICE)
+*   **Goal**: Embed structured reasoning step templates directly into the masked token canvas to enable concurrent thinking and answer generation, monitoring answer-section confidence to trigger early exits.
+*   **Verdict**: **ACCEPT (Landed Default-On)**.
+*   **Key Results**:
+    *   **Correct Reasoning**: Mapped prompts and templates dynamically with block size `B = promptLength + genLength`. Successfully generated correct reasoning chains and answers in **57 logical steps** total (2 post-steps).
+    *   **Vulnerability Resolved**: Resolved Phase 1 hang vulnerabilities by checking `thinkingMasksLeft == 0` in slot status evaluation.
+    *   **Hardware-Independent Gates**: Deferred wall-clock speedups to target Mac Studio backfills due to dev host virtual memory swap throttling.
+*   **Evidence**: Custom-0 prompt evaluation and validation suite runs.
+*   **Lessons Learnt**:
+    *   **Structured Canvas**: Bidirectional attention requires explicit template anchoring to prevent drift and organize reasoning steps effectively.
+
+---
+
+## 4. Global Lessons & Architectural Insights
 
 ```mermaid
 graph TD
@@ -181,7 +213,7 @@ graph TD
 
 ---
 
-## 4. Further Leads & Open Horizons
+## 5. Further Leads & Open Horizons
 
 1.  **Studio Backfill Campaigns**:
     *   Re-run the MultiBD ($N_{\text{buf}}=2$, $\tau_{\text{add}}=0.5$) and Dynamic Threshold ($\alpha=0.6$) arms on the M2 Ultra to measure net-TPS gains.

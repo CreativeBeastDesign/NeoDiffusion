@@ -22,3 +22,10 @@ for cfg in debug release; do
         mkdir -p "$xctest" && cp -R "$D" "$xctest/" && echo "  -> $xctest/"
     fi
 done
+
+# NOTE (2026-07-14): the FlashBlock.metal -> .metallib compile step was removed here.
+# FlashBlock's kernels are compiled at runtime by MLXFast.metalKernel from the inline
+# source strings in Packages/DiffusionCore/Sources/FlashBlockRunner.swift — the root
+# FlashBlock.metal was a duplicate copy that nothing loaded, and the metallib it produced
+# was never opened. Compiling it only proved a *copy* compiled, which is worse than no
+# check at all once the two drift. See Plans/gather_qmm_handoff.md §4.1.

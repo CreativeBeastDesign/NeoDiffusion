@@ -1,3 +1,4 @@
+import DiffusionCore
 import Foundation
 
 /// Decoding parameters for the block-diffusion denoising loop (phase-2 §1 / gotcha 10).
@@ -124,6 +125,58 @@ public struct GenerationParams: Sendable, Equatable {
     /// meant to be swept at larger `blockLength` where expert arithmetic dominates.
     public var moeCapacityRatio: Float
 
+    /// Whether FlashBlock attention caching is enabled.
+    public var flashBlockEnabled: Bool
+    /// Dirty token threshold for FlashBlock cache refresh.
+    public var flashBlockTau: Int
+
+    /// Whether Temporal Self-Consistency Voting is enabled.
+    public var temporalVotingEnabled: Bool
+    /// Decay parameter α for exponential step-weighting in voting.
+    public var temporalVotingAlpha: Float
+    /// Cutoff ratio (t_start) below which intermediate outputs are discarded.
+    public var temporalVotingCutoff: Float
+
+    /// Whether In-Place Chain-of-Thought (ICE) is enabled.
+    public var iceEnabled: Bool
+    /// Confidence threshold above which ICE early exit is triggered.
+    public var iceTau: Float
+    /// Number of reasoning steps in the ICE template.
+    public var iceNt: Int
+    /// Length of the thinking section in ICE.
+    public var iceThinkingLength: Int
+
+    /// Whether Credit Decoding is enabled.
+    public var creditDecodingEnabled: Bool
+    /// Boost scale α for Credit Decoding.
+    public var creditAlpha: Float
+    /// Decay discount factor β for Credit Decoding.
+    public var creditBeta: Float
+    /// Exponent γ for concave transform in Credit Decoding.
+    public var creditGamma: Float
+
+    /// Module ablation for in-situ attribution. **Diagnostic only — always `.none` in serving.**
+    /// Defined in DiffusionCore (the modules it switches live there); see ``ModuleAblation``.
+    public var moduleAblation: ModuleAblation = .none
+
+    /// **Router reuse** (experimental, `0` = off). Recompute the MoE router only every N forwards
+    /// and reuse the previous decision in between.
+    ///
+    /// Motivated by measurement, not theory: the router costs **13.6% of the forward** and is
+    /// dispatch-bound (~76× its physical floor — `gather_qmm_handoff.md` §6.2), while consecutive
+    /// denoising steps were measured to share **80% of their expert set** (§8.4). If routing barely
+    /// changes step to step, recomputing it every step buys little. At N=2 the ceiling is ~6.8% of
+    /// the forward; at N=4, ~10%.
+    ///
+    /// The trade is quality: ~20% of expert choices per step are genuinely new, and reuse serves
+    /// those tokens the wrong experts. Needs a quality gate before it is anything but a probe.
+    ///
+    /// **Known approximation in this implementation**: recompute is keyed off the *global* forward
+    /// counter, not a per-block one, so a block boundary can occasionally land on a reuse step and
+    /// carry the previous block's routing for one forward. That makes the quality reading
+    /// pessimistic (conservative), not optimistic. Shape changes still force a recompute.
+    public var routerReuseSteps: Int = 0
+
     public init(
         threshold: Float,
         editingThreshold: Float,
@@ -152,7 +205,20 @@ public struct GenerationParams: Sendable, Equatable {
         jotFaithful: Bool = false,
         moeCapacityRatio: Float = 0,
         subBlockCommit: Bool = false,
-        subBlockMinPrefix: Int = 8
+        subBlockMinPrefix: Int = 8,
+        flashBlockEnabled: Bool = false,
+        flashBlockTau: Int = 4,
+        temporalVotingEnabled: Bool = false,
+        temporalVotingAlpha: Float = 0.0,
+        temporalVotingCutoff: Float = 0.9,
+        iceEnabled: Bool = false,
+        iceTau: Float = 0.9,
+        iceNt: Int = 3,
+        iceThinkingLength: Int = 96,
+        creditDecodingEnabled: Bool = false,
+        creditAlpha: Float = 0.5,
+        creditBeta: Float = 0.9,
+        creditGamma: Float = 0.5
     ) {
         self.threshold = threshold
         self.editingThreshold = editingThreshold
@@ -182,6 +248,19 @@ public struct GenerationParams: Sendable, Equatable {
         self.moeCapacityRatio = moeCapacityRatio
         self.subBlockCommit = subBlockCommit
         self.subBlockMinPrefix = subBlockMinPrefix
+        self.flashBlockEnabled = flashBlockEnabled
+        self.flashBlockTau = flashBlockTau
+        self.temporalVotingEnabled = temporalVotingEnabled
+        self.temporalVotingAlpha = temporalVotingAlpha
+        self.temporalVotingCutoff = temporalVotingCutoff
+        self.iceEnabled = iceEnabled
+        self.iceTau = iceTau
+        self.iceNt = iceNt
+        self.iceThinkingLength = iceThinkingLength
+        self.creditDecodingEnabled = creditDecodingEnabled
+        self.creditAlpha = creditAlpha
+        self.creditBeta = creditBeta
+        self.creditGamma = creditGamma
     }
 
     /// The two served modes from the LLaDA2.1-mini model card (phase-2 §1, gotcha 10).
@@ -199,8 +278,11 @@ public struct GenerationParams: Sendable, Equatable {
         }
     }
 
-    /// Build params for a served mode, filling the card thresholds and leaving the rest to
-    /// caller-supplied values (block length, gen length, special ids come from the model/config).
+    /// Build params for a served mode: fills the card thresholds and the core decoding knobs, and
+    /// leaves every optional feature (MultiBD / speculation / dynamic-τ / elastic / JOT / ICE /
+    /// credit / temporal voting) at its `init` default. Callers that want a feature set the
+    /// corresponding field on the returned value — e.g. `var p = .mode(.q, …); p.creditAlpha = 1`.
+    /// This keeps the factory small and means adding a WP touches only `init`, not this signature.
     public static func mode(
         _ mode: Mode,
         blockLength: Int,
@@ -210,25 +292,7 @@ public struct GenerationParams: Sendable, Equatable {
         maxPostSteps: Int = 16,
         numToTransfer: Int = 1,
         eosEarlyStop: Bool = false,
-        temperature: Float = 0.0,
-        nBuf: Int = 1,
-        tauAdd: Float = 2.0,
-        tauSemi: Float = 0.9,
-        speculation: SpeculationKind = .none,
-        tauSpan: Int = 1,
-        dynamicTauAlpha: Float = 0.0,
-        eosEarlyExit: Bool = false,
-        elasticCacheEnabled: Bool = false,
-        elasticGamma: Float = 0.9,
-        elasticBeta: Int = 16,
-        elasticStaticBoundary: Int? = nil,
-        jotEnabled: Bool = false,
-        jotK: Int = 2,
-        jotThreshold: Float = 0.9,
-        jotFaithful: Bool = false,
-        moeCapacityRatio: Float = 0,
-        subBlockCommit: Bool = false,
-        subBlockMinPrefix: Int = 8
+        temperature: Float = 0.0
     ) -> GenerationParams {
         let (mask, edit) = mode.thresholds
         return GenerationParams(
@@ -241,24 +305,11 @@ public struct GenerationParams: Sendable, Equatable {
             blockLength: blockLength,
             genLength: genLength,
             maskId: maskId,
-            eosId: eosId,
-            nBuf: nBuf,
-            tauAdd: tauAdd,
-            tauSemi: tauSemi,
-            speculation: speculation,
-            tauSpan: tauSpan,
-            dynamicTauAlpha: dynamicTauAlpha,
-            eosEarlyExit: eosEarlyExit,
-            elasticCacheEnabled: elasticCacheEnabled,
-            elasticGamma: elasticGamma,
-            elasticBeta: elasticBeta,
-            elasticStaticBoundary: elasticStaticBoundary,
-            jotEnabled: jotEnabled,
-            jotK: jotK,
-            jotThreshold: jotThreshold,
-            jotFaithful: jotFaithful,
-            moeCapacityRatio: moeCapacityRatio,
-            subBlockCommit: subBlockCommit,
-            subBlockMinPrefix: subBlockMinPrefix)
+            eosId: eosId)
     }
+}
+
+public enum ICEPhase: Sendable {
+    case reasoning
+    case answer
 }

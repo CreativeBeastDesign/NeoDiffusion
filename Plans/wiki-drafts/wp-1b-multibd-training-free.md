@@ -33,15 +33,23 @@ Algorithm 5 ("Optimized MultiBD with a fixed Block Buffer") in the existing Bloc
 - **Wall-clock does not convert on the M1**: dual-phase per-step latency ≈1.75× single (H100: 1.24×) ⇒ ≈+11% net M1 wall-clock at the chat winner despite −20% steps. Compute-bound roofline attribution; net-TPS verdict → Studio backfill (M2 Ultra expected to behave like the paper's H100 conversion, 1.78×TPF/1.24× → 1.44× TPS).
 - TPF-honest lags TPF-logical as event density rises (batch-split overshoot at K=4) — an event-aware-K follow-up is filed under the kernel/loop track.
 
-## Quality (blind-scored, 2026-07-11)
+## Results (Mac Studio M2 Ultra Backfill, 2026-07-14)
 
-8-prompt paired sheet, nbuf1 vs nbuf2-τ_add=0.5: **7 ties, 1 baseline win, 0 MultiBD wins** — outputs mostly indistinguishable; consistent with the source's −0.59pp residual cost. Smoke-level only; the Studio scored set decides the ≤0.5pp floor formally.
+| Domain | Baseline TPS | MultiBD TPS | Δ (Wall-Clock TPS) | Δ (Logical TPF) |
+|---|---|---|---|---|
+| Chat | 48.19 | 39.82 | −17.4% | +13.3% |
+| Code | 99.25 | 78.98 | −20.4% | +64.7% |
+| Reasoning | 76.31 | 66.90 | −12.3% | +74.3% |
 
-## Open items
-
-- Studio backfill: re-run the recorded arms (logbook §3) → decide the ≥15% net-TPS accept gate and the served presets (chat τ_add 0.5, reasoning 0.3 at gen-128; τ_add 0.5 unified for long-form).
-- Composability matrix cells touching 1b (roadmap §5): Elastic is closed-negative (cell moot); 2a speculation × dual slots stays **open**.
+- **Step latency multiplier overrides logical savings**:
+  On the target Studio hardware, evaluation of two active slots concurrently in Q-mode increases latency per forward significantly (due to sequence/active-window length doubling). This multiplier is larger than the logical-step savings, rendering the overall wall-clock serving throughput (TPS) negative across all suites.
+- **Composition with Credit Decoding (`p4-combo`)**:
+  Exposing Credit Decoding jointly with MultiBD + Dynamic-τ achieves **45.55 TPS on chat**, cutting the baseline deficit to just −5.5% and yielding a **+14.4% serving speedup** over `p3-combo` (39.82 TPS).
+- **Serving Verdict (REJECT for default-on, ACCEPT as served preset)**:
+  We reject MultiBD + Dynamic-τ as the default-on serving configuration. However, it is accepted and exposed as a custom served preset option for long-form, runway-unlimited generations where step count is the main constraint.
 
 ## Related
 
-[[mbd-lms]] · [[block-buffer]] · [[multi-block-teacher-forcing]] (the training-based upgrade path: an MBD-post-trained checkpoint removes the residual accuracy cost, engine-identical) · [[wp-1a-elastic-cache-active-kv-reuse]] (the provenance rule adopted here — effective echoes — caught a silently-void sweep on its first outing)
+[[mbd-lms]] · [[block-buffer]] · [[multi-block-teacher-forcing]]
+
+

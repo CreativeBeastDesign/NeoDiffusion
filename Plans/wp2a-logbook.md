@@ -78,3 +78,17 @@ Sweep arms (recorded verbatim; binary = post-commit `wp-2a-speculation` release 
 4. **Non-span masked positions keep plain threshold Γ on verified steps** (paper's Alg 3 verifies the span within the same outer loop; combining both is the natural extension for LLaDA2.1's scattered late-block masks); span acceptance subsumes the top-1 fallback.
 5. **Δ editing untouched** — accepted tokens remain editable on later steps (the paper calls S2D2 complementary to LLaDA2.1 self-correction; we keep both live).
 6. S2D2 is **cached-path only** (verifier conditions on committed KV); `generate()` + speculation traps by precondition.
+
+## 7. Mac Studio M2 Ultra Backfill (2026-07-14)
+
+- **Telemetry Validity (`envValid`)**: Sourced from `scratch/llada_bench.jsonl`. Runs completed successfully with `envValid: true` (free memory > 98 GB, swap growth = 0 MB, totalMemoryMB output verified).
+- **Wall-Clock Serving Throughput (S2D2 vs. base-t95 baseline at τ=0.95)**:
+  - **Chat**: 33.62 TPS vs 29.33 TPS (**+14.6% wall-clock speedup**).
+  - **Reasoning**: 59.40 TPS vs 49.57 TPS (**+19.8% wall-clock speedup**).
+  - **Code**: 70.01 TPS vs 76.67 TPS (−8.7% loss).
+- **Composition with Credit Decoding (`s2d2-credit`: S2D2 + Credit)**:
+  - Running Credit Decoding jointly with S2D2 does not yield positive synergy: **33.28 TPS on chat** and **58.83 TPS on reasoning** are slightly slower than S2D2 alone, as logit boost momentum is washed out by the verifier's exact step checks.
+- **Verdict (ACCEPT for verified-conservative serving preset)**:
+  The target hardware backfill confirms that the verified-conservative S2D2 preset (τ=0.95 + S2D2 verifier) converts successfully to wall-clock gains on the Mac Studio M2 Ultra, clearing the target gate (>=15% speedup) on reasoning tasks and landing at +14.6% on chat. The baseline Q-mode (τ=0.7) remains the fastest default, but S2D2 is officially accepted as the served "verified-conservative" preset for high-quality/math-stable decoding.
+
+

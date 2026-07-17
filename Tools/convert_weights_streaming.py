@@ -149,12 +149,21 @@ def convert_and_quantize_streaming(src_dir, dest_dir, bits=4, group_size=64,
     print(f"Writing streaming weights to {out_file}...")
 
     # Open input files lazily using MLX native loading (supports BF16)
-    open_shards = {}
+    # Keep at most one shard loaded in memory to avoid paging/GPU Timeout
+    current_shard_name = None
+    current_shard_tensors = None
+
     def get_input_tensor(k):
+        nonlocal current_shard_name, current_shard_tensors
         sf = weight_map[k]
-        if sf not in open_shards:
-            open_shards[sf] = mx.load(os.path.join(src_dir, sf))
-        return open_shards[sf][k]
+        if sf != current_shard_name:
+            if current_shard_tensors is not None:
+                del current_shard_tensors
+                gc.collect()
+                mx.metal.clear_cache()
+            current_shard_tensors = mx.load(os.path.join(src_dir, sf))
+            current_shard_name = sf
+        return current_shard_tensors[k]
 
     with open(out_file, "wb") as out_f:
         # Write uint64 header size
@@ -177,7 +186,7 @@ def convert_and_quantize_streaming(src_dir, dest_dir, bits=4, group_size=64,
             if should_quantize(src_name):
                 # Run GPU-accelerated quantization (per-tensor params: expert override)
                 bits_k, group_k = quant_params(src_name)
-                w_q, scales, biases = mx.quantize(x, group_size=group_k, bits=bits_k, mode="affine")
+                w_q, scales, biases = mx.quantize(x, group_size=group_k, bits=bits_k)
 
                 # CRITICAL: mx.eval forces compilation/execution immediately
                 # so memory is not held by a growing lazy execution graph
@@ -206,8 +215,10 @@ def convert_and_quantize_streaming(src_dir, dest_dir, bits=4, group_size=64,
             mx.metal.clear_cache() # Clear GPU memory allocations
 
     # Close handles
-    for handle in open_shards.values():
-        del handle
+    if current_shard_tensors is not None:
+        del current_shard_tensors
+        gc.collect()
+        mx.metal.clear_cache()
     print("Weight conversion complete!")
 
 if __name__ == "__main__":

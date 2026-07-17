@@ -1,5 +1,6 @@
 import Foundation
 import MLX
+import Metal
 
 /// Per-layer key/value store for the cached attention path (phase-2 §5 M5, deviation 1).
 ///
@@ -22,6 +23,15 @@ public final class LayerKVCache {
     public var pendingKeys: MLXArray?
     /// Last forward's active-block values `[1, nKV, B, D]`.
     public var pendingValues: MLXArray?
+
+    // FlashBlock runner and auxiliary buffers (WP-3b)
+    public var flashBlockRunner: FlashBlockRunner?
+    public var blockTables: MLXArray?
+    public var ctxLens: MLXArray?
+    
+    // Persistent FlashBlock cache tensors
+    public var attnOutPast: MLXArray?
+    public var logsumexp: MLXArray?
 
     public init() {}
 

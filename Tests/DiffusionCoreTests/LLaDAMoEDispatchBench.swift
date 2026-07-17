@@ -2,6 +2,7 @@ import XCTest
 import MLX
 import MLXNN
 import MLXRandom
+import Darwin
 @testable import DiffusionCore
 
 /// M6 Phase-A micro-benches (m6-logbook H2/H4, Finding 3): dispatch-variant ranking and
@@ -50,31 +51,50 @@ final class LLaDAMoEDispatchBench: XCTestCase {
     /// (ii) dequantize once + `gatherMM` (the F16 gather path),
     /// (iii) one dense `quantizedMatmul` over ALL experts (compute-everything upper
     ///      bound: [T, H] × [E·I, H]ᵀ — 32× the useful FLOPs for K=8).
-    func testGatherQMMVariants() throws {
+    func testGatherQMMVariantsMini() throws {
         try skipUnlessOptedIn()
+        print("==== BENCHMARKING MINI SHAPES ====")
+        try runGatherQMMVariants(E: 256, H: 2048, I: 512, T: 32, K: 8, modelLabel: "Mini")
+    }
+
+    func testGatherQMMVariantsFlash() throws {
+        try skipUnlessOptedIn()
+        print("==== BENCHMARKING FLASH SHAPES ====")
+        try runGatherQMMVariants(E: 256, H: 4096, I: 1024, T: 32, K: 8, modelLabel: "Flash")
+    }
+
+    private func runGatherQMMVariants(E: Int, H: Int, I: Int, T: Int, K: Int, modelLabel: String) throws {
+        let freeMemBefore = freeMemoryMB()
+        let swapBefore = swapUsedMB()
+        let thermalBefore = thermalStateName()
+
         MLXRandom.seed(11)
-        let w = MLXRandom.normal([Self.E, Self.I, Self.H]) * 0.05
+        let w = MLXRandom.normal([E, I, H]) * 0.05
         let (wq, scales, biases) = MLX.quantized(w, groupSize: 64, bits: 4)
         let wDeq = dequantized(
             wq, scales: scales, biases: biases, groupSize: 64, bits: 4)
-        let x = MLXRandom.normal([Self.T, 1, 1, Self.H]).asType(.float16)
-        let indices = MLXRandom.randInt(0 ..< Int32(Self.E), [Self.T, Self.K])
-        eval(wq, scales, biases, wDeq, x, indices)
+        let x = MLXRandom.normal([T, 1, 1, H]).asType(.float16)
+        let indices = MLXRandom.randInt(0 ..< Int32(E), [T, K])
+        if let biases {
+            eval(wq, scales, biases, wDeq, x, indices)
+        } else {
+            eval(wq, scales, wDeq, x, indices)
+        }
 
-        let tGather = time("gatherQuantizedMM (production path)") {
+        let tGather = time("\(modelLabel) - gatherQuantizedMM (production path)") {
             gatherQuantizedMM(
                 x, wq, scales: scales, biases: biases,
                 rhsIndices: indices, transpose: true, groupSize: 64, bits: 4)
         }
-        let tDeqGather = time("dequantized + gatherMM") {
+        let tDeqGather = time("\(modelLabel) - dequantized + gatherMM") {
             gatherMM(x.asType(wDeq.dtype), wDeq.swappedAxes(-1, -2), rhsIndices: indices)
         }
-        let tFullQMM = time("dense qmm over ALL experts (upper bound)") {
-            quantizedMatmul(
-                x.reshaped(Self.T, Self.H),
-                wq.reshaped(Self.E * Self.I, Self.H / 8),
-                scales: scales.reshaped(Self.E * Self.I, Self.H / 64),
-                biases: biases!.reshaped(Self.E * Self.I, Self.H / 64),
+        let tFullQMM = time("\(modelLabel) - dense qmm over ALL experts (upper bound)") {
+            quantizedMM(
+                x.reshaped(T, H),
+                wq.reshaped(E * I, H / 8),
+                scales: scales.reshaped(E * I, H / 64),
+                biases: biases!.reshaped(E * I, H / 64),
                 transpose: true, groupSize: 64, bits: 4)
         }
 
@@ -84,12 +104,20 @@ final class LLaDAMoEDispatchBench: XCTestCase {
             rhsIndices: indices, transpose: true, groupSize: 64, bits: 4)
         let b = gatherMM(x.asType(wDeq.dtype), wDeq.swappedAxes(-1, -2), rhsIndices: indices)
         let maxDelta = abs(a.asType(.float32) - b.asType(.float32)).max().item(Float.self)
-        print("[m6-bench] gather vs dequantized-gather max |Δ| = \(maxDelta)")
+        print("[\(modelLabel)-bench] gather vs dequantized-gather max |Δ| = \(maxDelta)")
         XCTAssertLessThan(maxDelta, 0.05)
 
         print(String(format:
-            "[m6-bench] H2 ratios: gather/fullQMM = %.1f, gather/deqGather = %.1f",
+            "[\(modelLabel)-bench] ratios: gather/fullQMM = %.1f, gather/deqGather = %.1f",
             tGather / tFullQMM, tGather / tDeqGather))
+
+        let freeMemAfter = freeMemoryMB()
+        let swapAfter = swapUsedMB()
+        let thermalAfter = thermalStateName()
+        let swapGrowth = swapAfter - swapBefore
+        let isValid = swapGrowth <= 256.0 && freeMemBefore >= 1024.0 && (thermalBefore == "nominal" || thermalBefore == "fair")
+        print(String(format: "Telemetry - swapBefore: %.1fMB, swapAfter: %.1fMB, swapGrowth: %.1fMB, freeMemBefore: %.1fMB, thermalBefore: %@, thermalAfter: %@, envValid: %@",
+            swapBefore, swapAfter, swapGrowth, freeMemBefore, thermalBefore, thermalAfter, isValid ? "true" : "false"))
     }
 
     /// H4 — module-level attribution at real shapes (warm): one quantized MoE block
@@ -135,4 +163,373 @@ final class LLaDAMoEDispatchBench: XCTestCase {
         eval(dense)
         _ = time("dense FFN (layer-0 shape, quantized)") { dense(x) }
     }
+
+    func testOccupancySweep() throws {
+        try skipUnlessOptedIn()
+        print("==== OCCUPANCY SWEEP: BATCH SIZE T ====")
+        let E = 256
+        let H = 4096
+        let I = 1024
+        let K = 8
+        
+        for T in [32, 128, 512, 2048] {
+            print("--- Running T = \(T) ---")
+            MLXRandom.seed(11)
+            let w = MLXRandom.normal([E, I, H]) * 0.05
+            let (wq, scales, biases) = MLX.quantized(w, groupSize: 64, bits: 4)
+            let x = MLXRandom.normal([T, 1, 1, H]).asType(.float16)
+            let indices = MLXRandom.randInt(0 ..< Int32(E), [T, K])
+            eval(wq, scales, biases, x, indices)
+            
+            let tGather = time("T=\(T) - gatherQuantizedMM") {
+                gatherQuantizedMM(
+                    x, wq, scales: scales, biases: biases,
+                    rhsIndices: indices, transpose: true, groupSize: 64, bits: 4)
+            }
+            let tFullQMM = time("T=\(T) - dense quantizedMM") {
+                quantizedMM(
+                    x.reshaped(T, H),
+                    wq.reshaped(E * I, H / 8),
+                    scales: scales.reshaped(E * I, H / 64),
+                    biases: biases!.reshaped(E * I, H / 64),
+                    transpose: true, groupSize: 64, bits: 4)
+            }
+            
+            let uniqueCount = Set(indices.asArray(Int32.self)).count
+            let weightsReadBytes = Double(uniqueCount * I * H) * 0.5
+            let scalesBiasesReadBytes = Double(uniqueCount * I * H) / 64.0 * 2.0 * 2.0
+            let totalReadMB = (weightsReadBytes + scalesBiasesReadBytes) / 1_048_576.0
+            let gatherBW = totalReadMB / (tGather * 1000.0)
+            
+            let denseReadBytes = Double(E * I * H) * 0.5
+            let denseScalesBiasesBytes = Double(E * I * H) / 64.0 * 2.0 * 2.0
+            let denseReadMB = (denseReadBytes + denseScalesBiasesBytes) / 1_048_576.0
+            let denseBW = denseReadMB / (tFullQMM * 1000.0)
+            
+            print(String(format: "[occupancy-bench] T=%d: UniqueExperts=%d, Gather=%.2f ms (%.2f GB/s), Dense=%.2f ms (%.2f GB/s)",
+                T, uniqueCount, tGather * 1000.0, gatherBW, tFullQMM * 1000.0, denseBW))
+        }
+    }
+
+    func testDivergenceAB() throws {
+        try skipUnlessOptedIn()
+        print("==== DIRECT CAUSAL TEST FOR DIVERGENCE (A/B) ====")
+        let E = 256
+        let H = 4096
+        let I = 1024
+        let T = 512
+        let K = 8
+        
+        MLXRandom.seed(11)
+        let w = MLXRandom.normal([E, I, H]) * 0.05
+        let (wq, scales, biases) = MLX.quantized(w, groupSize: 64, bits: 4)
+        let x = MLXRandom.normal([T, 1, 1, H]).asType(.float16)
+        
+        let indicesUnsorted = MLXRandom.randInt(0 ..< Int32(E), [T, K])
+        let indicesSorted = sorted(indicesUnsorted, axis: 0)
+        eval(wq, scales, biases, x, indicesUnsorted, indicesSorted)
+        
+        let tUnsorted = time("Unsorted routing") {
+            gatherQuantizedMM(
+                x, wq, scales: scales, biases: biases,
+                rhsIndices: indicesUnsorted, transpose: true, groupSize: 64, bits: 4, sortedIndices: false)
+        }
+        
+        let tSorted = time("Sorted routing") {
+            gatherQuantizedMM(
+                x, wq, scales: scales, biases: biases,
+                rhsIndices: indicesSorted, transpose: true, groupSize: 64, bits: 4, sortedIndices: true)
+        }
+        
+        let uniqueCount = Set(indicesUnsorted.asArray(Int32.self)).count
+        let weightsReadBytes = Double(uniqueCount * I * H) * 0.5
+        let scalesBiasesReadBytes = Double(uniqueCount * I * H) / 64.0 * 2.0 * 2.0
+        let totalReadMB = (weightsReadBytes + scalesBiasesReadBytes) / 1_048_576.0
+        
+        let bwUnsorted = totalReadMB / (tUnsorted * 1000.0)
+        let bwSorted = totalReadMB / (tSorted * 1000.0)
+        
+        print(String(format: "[A/B-bench] Unsorted: %.2f ms (%.2f GB/s), Sorted: %.2f ms (%.2f GB/s)",
+            tUnsorted * 1000.0, bwUnsorted, tSorted * 1000.0, bwSorted))
+        print(String(format: "[A/B-bench] Speedup from sorting: %.2fx", tUnsorted / tSorted))
+    }
+
+    /// Telemetry helper: Free memory in MB
+    private func freeMemoryMB() -> Double {
+        var stats = vm_statistics64()
+        var count = mach_msg_type_number_t(MemoryLayout<vm_statistics64>.size / MemoryLayout<integer_t>.size)
+        let kerr = withUnsafeMutablePointer(to: &stats) {
+            $0.withMemoryRebound(to: integer_t.self, capacity: Int(count)) {
+                host_statistics64(mach_host_self(), HOST_VM_INFO64, $0, &count)
+            }
+        }
+        guard kerr == KERN_SUCCESS else { return 0.0 }
+        var pageSize: Int = 0
+        var sizeSize = MemoryLayout<Int>.size
+        sysctlbyname("hw.pagesize", &pageSize, &sizeSize, nil, 0)
+        return Double(stats.free_count) * Double(pageSize) / 1_048_576
+    }
+
+    /// Telemetry helper: Swap used in MB
+    private func swapUsedMB() -> Double {
+        var usage = xsw_usage()
+        var size = MemoryLayout<xsw_usage>.size
+        sysctlbyname("vm.swapusage", &usage, &size, nil, 0)
+        return Double(usage.xsu_used) / 1_048_576
+    }
+
+    /// Telemetry helper: Thermal state name
+    private func thermalStateName() -> String {
+        switch ProcessInfo.processInfo.thermalState {
+        case .nominal: return "nominal"
+        case .fair: return "fair"
+        case .serious: return "serious"
+        case .critical: return "critical"
+        @unknown default: return "unknown"
+        }
+    }
+
+    private func runSortingOverheadSweepHelper(E: Int, H: Int, I: Int, K: Int, modelLabel: String) {
+        print("\n--- Evaluating \(modelLabel) Shapes (E=\(E), H=\(H), I=\(I), K=\(K)) ---")
+        MLXRandom.seed(11)
+        let w = MLXRandom.normal([E, I, H]) * 0.05
+        let (wq, scales, biases) = MLX.quantized(w, groupSize: 64, bits: 4)
+        if let biases {
+            eval(wq, scales, biases)
+        } else {
+            eval(wq, scales)
+        }
+
+        let TSweep = [32, 48, 64, 80, 96, 128, 256, 512, 1024, 2048]
+        for T in TSweep {
+            let x = MLXRandom.normal([T, 1, 1, H]).asType(.float16)
+            let indicesUnsorted = MLXRandom.randInt(0 ..< Int32(E), [T, K])
+            let indicesSorted = sorted(indicesUnsorted.flattened()).reshaped([T, K])
+            
+            if let biases {
+                eval(x, indicesUnsorted, indicesSorted, wq, scales, biases)
+            } else {
+                eval(x, indicesUnsorted, indicesSorted, wq, scales)
+            }
+
+            // Warmup
+            let _ = gatherQuantizedMM(x, wq, scales: scales, biases: biases, rhsIndices: indicesUnsorted, transpose: true, groupSize: 64, bits: 4, sortedIndices: false)
+            let _ = gatherQuantizedMM(x, wq, scales: scales, biases: biases, rhsIndices: indicesSorted, transpose: true, groupSize: 64, bits: 4, sortedIndices: true)
+            
+            let indicesFlat = indicesUnsorted.flattened()
+            let _ = argSort(indicesFlat, axis: -1)
+            eval(x)
+
+            // 1. Measure unsorted execution
+            let tUnsorted = time("  gatherQuantizedMM (unsorted)") {
+                gatherQuantizedMM(x, wq, scales: scales, biases: biases, rhsIndices: indicesUnsorted, transpose: true, groupSize: 64, bits: 4, sortedIndices: false)
+            }
+
+            // 2. Measure sorted execution (pure GPU matmul)
+            let tSorted = time("  gatherQuantizedMM (sorted)") {
+                gatherQuantizedMM(x, wq, scales: scales, biases: biases, rhsIndices: indicesSorted, transpose: true, groupSize: 64, bits: 4, sortedIndices: true)
+            }
+
+            // 3. Measure GPU sorting overhead
+            let tSort = time("  GPU sorting overhead (argSort)") {
+                let sortOrder = argSort(indicesFlat, axis: -1)
+                let sortedIndicesArray = indicesFlat[sortOrder]
+                let tokenIndices = sortOrder / Int32(K)
+                return concatenated([sortedIndicesArray, tokenIndices])
+            }
+
+            let netTime = tSorted + tSort
+            let netSpeedup = tUnsorted / netTime
+
+            print(String(format: "  T=%4d | Unsorted: %7.4f ms | Sorted Matmul: %7.4f ms | Sort Overhead: %7.4f ms | Net Time: %7.4f ms (Net Speedup: %.3fx)",
+                         T, tUnsorted * 1000.0, tSorted * 1000.0, tSort * 1000.0, netTime * 1000.0, netSpeedup))
+        }
+    }
+
+    func testSortingOverheadSweep() throws {
+        guard ProcessInfo.processInfo.environment["NEODIFFUSION_M6_BENCH"] != nil else {
+            print("Skipping testSortingOverheadSweep (set NEODIFFUSION_M6_BENCH=1 to run)")
+            return
+        }
+
+        print("\n=== EXPERIMENT: Quantized MoE GPU Sorting Overhead & Break-Even Sweep ===")
+        let freeMemBefore = freeMemoryMB()
+        let swapBefore = swapUsedMB()
+        let thermalBefore = thermalStateName()
+
+        print(String(format: "envValid pre-conditions: Free Memory = %.1f MB (target >= 1024), Swap Used = %.1f MB, Thermal = %@", freeMemBefore, swapBefore, thermalBefore))
+
+        // Sweep Mini Shapes (H=2048, I=512)
+        runSortingOverheadSweepHelper(E: 256, H: 2048, I: 512, K: 8, modelLabel: "Mini")
+
+        // Sweep Flash Shapes (H=4096, I=1024)
+        runSortingOverheadSweepHelper(E: 256, H: 4096, I: 1024, K: 8, modelLabel: "Flash")
+
+        let freeMemAfter = freeMemoryMB()
+        let swapAfter = swapUsedMB()
+        let thermalAfter = thermalStateName()
+        let envValid = (swapAfter - swapBefore <= 256.0) && (freeMemBefore >= 1024.0) && (thermalAfter == "nominal" || thermalAfter == "fair")
+
+        print(String(format: "\nenvValid post-conditions: Free Memory = %.1f MB, Swap Growth = %.1f MB, Thermal = %@, envValid = %@", freeMemAfter, swapAfter - swapBefore, thermalAfter, envValid ? "TRUE" : "FALSE"))
+    }
+
+    func testSegmentedMMComparison() throws {
+        guard ProcessInfo.processInfo.environment["NEODIFFUSION_M6_BENCH"] != nil else {
+            print("Skipping testSegmentedMMComparison (set NEODIFFUSION_M6_BENCH=1 to run)")
+            return
+        }
+
+        print("\n=== EXPERIMENT: segmentedMM vs gatherMM Comparison (Unquantized) ===")
+        let E = 256
+        let H = 4096
+        let I = 1024
+        let K = 8
+
+        let freeMemBefore = freeMemoryMB()
+        let swapBefore = swapUsedMB()
+        let thermalBefore = thermalStateName()
+
+        print(String(format: "envValid pre-conditions: Free Memory = %.1f MB (target >= 1024), Swap Used = %.1f MB, Thermal = %@", freeMemBefore, swapBefore, thermalBefore))
+
+        let TSweep = [32, 48, 64, 80, 96, 128, 256, 512, 1024, 2048]
+        for T in TSweep {
+            print("\nEvaluating T = \(T)")
+            MLXRandom.seed(42)
+            
+            let w = MLXRandom.normal([E, H, I]).asType(.float16)
+            let x = MLXRandom.normal([T, 1, 1, H]).asType(.float16)
+            
+            let indicesUnsorted = MLXRandom.randInt(0 ..< Int32(E), [T, K])
+            let indicesSorted = sorted(indicesUnsorted.flattened()).reshaped([T, K])
+            eval(w, x, indicesUnsorted, indicesSorted)
+
+            // Warmup
+            let _ = gatherMM(x, w, rhsIndices: indicesUnsorted)
+            let _ = gatherMM(x, w, rhsIndices: indicesSorted, sortedIndices: true)
+            eval(w, x)
+
+            // 1. Benchmark gatherMM (unsorted)
+            let tUnsorted = time("  gatherMM (unsorted)") {
+                gatherMM(x, w, rhsIndices: indicesUnsorted)
+            }
+
+            // 2. Benchmark gatherMM (sorted)
+            let tSorted = time("  gatherMM (sorted)") {
+                gatherMM(x, w, rhsIndices: indicesSorted, sortedIndices: true)
+            }
+
+            // 3. Benchmark segmentedMM
+            let sortedIndicesCPU = indicesSorted.asArray(Int32.self)
+            var segmentRanges: [Int32] = []
+            var currentExpert = Int32(-1)
+            var currentStart = Int32(0)
+            for i in 0..<sortedIndicesCPU.count {
+                let exp = sortedIndicesCPU[i]
+                if exp != currentExpert {
+                    if currentExpert != -1 {
+                        segmentRanges.append(currentStart)
+                        segmentRanges.append(Int32(i))
+                    }
+                    currentExpert = exp
+                    currentStart = Int32(i)
+                }
+            }
+            if currentExpert != -1 {
+                segmentRanges.append(currentStart)
+                segmentRanges.append(Int32(sortedIndicesCPU.count))
+            }
+            
+            let numSegments = segmentRanges.count / 2
+            let segments = MLXArray(segmentRanges, [numSegments, 2])
+            
+            let T_total = T * K
+            let segA = MLXRandom.normal([I, T_total]).asType(.float16)
+            let segB = MLXRandom.normal([T_total, H]).asType(.float16)
+            eval(segA, segB, segments)
+            
+            // Warmup segmentedMM
+            let _ = segmentedMM(segA, segB, segments: segments)
+            eval(segA, segB)
+
+            let tSegmented = time("  segmentedMM primitive") {
+                segmentedMM(segA, segB, segments: segments)
+            }
+
+            print(String(format: "  Unsorted: %.4f ms", tUnsorted * 1000.0))
+            print(String(format: "  Sorted:   %.4f ms (speedup: %.2fx vs unsorted)", tSorted * 1000.0, tUnsorted / tSorted))
+            print(String(format: "  segmentedMM primitive: %.4f ms", tSegmented * 1000.0))
+        }
+
+        let freeMemAfter = freeMemoryMB()
+        let swapAfter = swapUsedMB()
+        let thermalAfter = thermalStateName()
+        let envValid = (swapAfter - swapBefore <= 256.0) && (freeMemBefore >= 1024.0) && (thermalAfter == "nominal" || thermalAfter == "fair")
+
+        print(String(format: "\nenvValid post-conditions: Free Memory = %.1f MB, Swap Growth = %.1f MB, Thermal = %@, envValid = %@", freeMemAfter, swapAfter - swapBefore, thermalAfter, envValid ? "TRUE" : "FALSE"))
+    }
+
+    private func runTiersBench(tiers: [(String, [Int])], H: Int, I: Int, modelLabel: String) {
+        print("\n--- Running Production Tiers Bench for \(modelLabel) Shapes (H=\(H), I=\(I)) ---")
+        
+        let moeBlock = LLaDA2SparseMoEBlock(
+            hiddenSize: H,
+            moeIntermediateSize: I,
+            numExperts: 256,
+            numSharedExperts: 0,
+            numExpertsPerTok: 8,
+            nGroup: 1,
+            topkGroup: 1,
+            routedScalingFactor: 1.0
+        )
+        
+        MLXNN.quantize(
+            model: moeBlock,
+            filter: { path, module -> (groupSize: Int, bits: Int, mode: QuantizationMode)? in
+                if module is SwitchLinear {
+                    return (64, 4, .affine)
+                }
+                return nil
+            }
+        )
+        
+        for (tierLabel, Ts) in tiers {
+            print("\n  [\(tierLabel)]")
+            for T in Ts {
+                let x = MLXRandom.normal([T, H]).asType(.float16)
+                eval(x)
+                
+                // Warmup
+                let _ = moeBlock(x)
+                eval(x)
+                
+                // Measure execution
+                let tBlock = time("    T=\(T)") {
+                    moeBlock(x)
+                }
+                print(String(format: "    T=%4d: %.4f ms", T, tBlock * 1000.0))
+            }
+        }
+    }
+
+    func testProductionTiersDistribution() throws {
+        guard ProcessInfo.processInfo.environment["NEODIFFUSION_M6_BENCH"] != nil else {
+            print("Skipping testProductionTiersDistribution (set NEODIFFUSION_M6_BENCH=1 to run)")
+            return
+        }
+        
+        print("\n=== EXPERIMENT: Production Tiers Distribution Bench ===")
+        // Tier 1: Short chat turns: T=32, T=64, T=128
+        // Tier 2: Multi-turn chat: T=512, T=1024
+        // Tier 3: Coding assistant: T=2048, T=4096
+        
+        let tiers = [
+            ("Tier 1: Short chat turns", [32, 64, 128]),
+            ("Tier 2: Multi-turn chat with history", [512, 1024]),
+            ("Tier 3: Coding assistant sessions", [2048, 4096])
+        ]
+        
+        runTiersBench(tiers: tiers, H: 2048, I: 512, modelLabel: "Mini")
+        runTiersBench(tiers: tiers, H: 4096, I: 1024, modelLabel: "Flash")
+    }
 }
+

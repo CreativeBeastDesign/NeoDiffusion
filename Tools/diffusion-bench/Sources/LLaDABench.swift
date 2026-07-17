@@ -32,6 +32,11 @@ func swapUsedMB() -> Double {
 
 /// Host free-page memory in MB (the "Pages free" figure — deliberately conservative:
 /// macOS keeps this low under healthy load too, hence the 1 GB validity threshold).
+/// Physical RAM in MB. Anchors the host-relative free-memory floor in `EnvSnapshot.isValid`.
+func totalMemoryMB() -> Double {
+    Double(ProcessInfo.processInfo.physicalMemory) / 1_048_576
+}
+
 func freeMemoryMB() -> Double {
     var stats = vm_statistics64()
     var count = mach_msg_type_number_t(
@@ -65,7 +70,8 @@ func sysctlString(_ name: String) -> String {
     guard size > 0 else { return "unknown" }
     var buf = [CChar](repeating: 0, count: size)
     sysctlbyname(name, &buf, &size, nil, 0)
-    return String(cString: buf)
+    let bytes = buf.prefix(while: { $0 != 0 }).map(UInt8.init(bitPattern:))
+    return String(decoding: bytes, as: UTF8.self)
 }
 
 /// Snapshot of the environment around one generation.
@@ -73,14 +79,31 @@ struct EnvSnapshot: Codable {
     let swapUsedMBBefore: Double
     let swapUsedMBAfter: Double
     let freeMemoryMBBefore: Double
+    let totalMemoryMB: Double
     let thermalBefore: String
     let thermalAfter: String
 
-    /// Frozen validity rule (m6-logbook §5 rule 5): a timed row is environment-valid iff
-    /// swap growth ≤ 256 MB, ≥ 1 GB free pages at start, and thermal ≤ fair at start.
+    /// Fraction of physical RAM that must be free at row start. The original rule (m6-logbook
+    /// §5 rule 5) used an absolute 1 GB floor, set on the 16 GB dev M1 — i.e. 1/16 of that
+    /// host's RAM. Expressing it as the ratio it always implicitly was keeps the M1 threshold
+    /// bit-identical (16384/16 = 1024 MB) while making it meaningful on the 192 GB Studio
+    /// (12 GB), where an absolute 1 GB floor is unreachable noise.
+    static let minFreeMemoryFraction = 1.0 / 16.0
+
+    var minFreeMemoryMB: Double { totalMemoryMB * Self.minFreeMemoryFraction }
+
+    /// Validity rule (m6-logbook §5 rule 5, **amended 2026-07-14** — see that logbook entry for
+    /// the failure that forced it): a timed row is environment-valid iff swap growth ≤ 256 MB,
+    /// free pages at start ≥ 1/16 of physical RAM, and thermal ≤ fair at start.
+    ///
+    /// The free floor is host-relative because the absolute one silently passed paged-out rows.
+    /// On the Studio, 7 rows ran at ~1 TPS against an arm mean of ~38 (the CLAUDE.md §gotcha
+    /// paging pathology) yet scored valid: the host sat at a *flat* 3791 MB swap, so growth was
+    /// 0, and 4.4 GB free cleared a 1 GB floor 4× over. Swap growth cannot see a machine that
+    /// was already saturated before the row started; only the free-page level can.
     var isValid: Bool {
         swapUsedMBAfter - swapUsedMBBefore <= 256
-            && freeMemoryMBBefore >= 1024
+            && freeMemoryMBBefore >= minFreeMemoryMB
             && (thermalBefore == "nominal" || thermalBefore == "fair")
     }
 
@@ -89,8 +112,9 @@ struct EnvSnapshot: Codable {
         if swapUsedMBAfter - swapUsedMBBefore > 256 {
             parts.append(String(format: "swap +%.0f MB", swapUsedMBAfter - swapUsedMBBefore))
         }
-        if freeMemoryMBBefore < 1024 {
-            parts.append(String(format: "free %.0f MB", freeMemoryMBBefore))
+        if freeMemoryMBBefore < minFreeMemoryMB {
+            parts.append(String(format: "free %.0f MB < %.0f MB floor (1/16 of %.0f MB RAM)",
+                                freeMemoryMBBefore, minFreeMemoryMB, totalMemoryMB))
         }
         if thermalBefore != "nominal" && thermalBefore != "fair" {
             parts.append("thermal \(thermalBefore)")
@@ -108,6 +132,13 @@ nonisolated(unsafe) var llaDAProcessFirstGeneration = true
 struct LLaDAPromptCase: Codable {
     let id: String
     let user: String
+    let answer: String?
+
+    init(id: String, user: String, answer: String? = nil) {
+        self.id = id
+        self.user = user
+        self.answer = answer
+    }
 }
 
 struct LLaDAPromptSuite: Codable {
@@ -115,11 +146,32 @@ struct LLaDAPromptSuite: Codable {
     let prompts: [LLaDAPromptCase]
 }
 
+func extractLastNumber(from text: String) -> String? {
+    let pattern = "-?\\d+"
+    guard let regex = try? NSRegularExpression(pattern: pattern) else { return nil }
+    let nsString = text as NSString
+    let results = regex.matches(in: text, range: NSRange(location: 0, length: nsString.length))
+    guard let lastResult = results.last else { return nil }
+    return nsString.substring(with: lastResult.range)
+}
+
 struct LLaDAArm {
     let name: String
     let mode: GenerationParams.Mode
     let cached: Bool
     let mask: BlockDiffusionMask.Semantics
+
+    /// Per-arm `GenerationParams` overrides, applied **after** the CLI-derived defaults so an arm
+    /// always wins over a flag.
+    ///
+    /// Why this exists (m6-logbook Finding 7 + the WP-3/WP-4 backfill post-mortem): every other
+    /// lever (`jotEnabled`, `creditDecodingEnabled`, `nBuf`, …) is a **process-global CLI flag**, so
+    /// A/B-ing them forced one process per arm — making every comparison *cross-process*, where
+    /// thermal drift is ±6–10%. That is why sub-10% effects (e.g. credit decoding's +1.8%) were not
+    /// resolvable: the same comparison moved ~4pp between two clean runs, including a sign flip.
+    /// Within one process, run-to-run CV is ~0.33%. Arms that carry their own overrides can be
+    /// interleaved in a single process, which is the only way to see an effect that small.
+    var overrides: @Sendable (inout GenerationParams) -> Void = { _ in }
 }
 
 struct LLaDARunResult: Codable {
@@ -199,6 +251,20 @@ struct LLaDARunResult: Codable {
     let moeCapacityRatio: Float
     let subBlockCommit: Bool
     let subBlockMinPrefix: Int
+    // ICE fields
+    let iceEnabled: Bool
+    let iceTau: Float
+    let iceNt: Int
+    let iceThinkingLength: Int
+    // Credit Decoding fields
+    let creditDecodingEnabled: Bool
+    let creditAlpha: Float
+    let creditBeta: Float
+    let creditGamma: Float
+    // In-situ module attribution (diagnostic). "none" on every served row. Rows must be
+    // self-describing (m6-logbook rule 3) — an ablated row's TPS is meaningless and its text is
+    // garbage, so the label has to travel with the data.
+    let moduleAblation: String
     // Warmup / process / environment classification (m6-logbook Findings 1/2/7):
     // the process's first generation carries ~19 s one-off cost; cross-process
     // comparisons carry thermal drift; env fields + validity label per the frozen rule.
@@ -217,15 +283,32 @@ func runLLaDABench() async throws {
         ?? "\(repoRoot)/models/llada2-1-mini-4bit")
     let tokenizerDir = URL(fileURLWithPath: argValue("--tokenizer")
         ?? "\(repoRoot)/models/llada2-1-mini")
-    let runs = Int(argValue("--runs") ?? "3") ?? 3
-    let cooldown = Int(argValue("--cooldown") ?? "30") ?? 30
+    let baselineCheck = hasFlag("--baseline-check")
+    let iceSweep = hasFlag("--ice-sweep")
+    let runs = (baselineCheck || iceSweep) ? 1 : (Int(argValue("--runs") ?? "3") ?? 3)
+    let cooldown = (baselineCheck || iceSweep) ? 2 : (Int(argValue("--cooldown") ?? "30") ?? 30)
     let jsonPath = argValue("--json") ?? "\(repoRoot)/scratch/llada_bench.jsonl"
+    // Case B causal probe: swap 4-bit experts for pre-dequantized FP16 (4x the bytes, zero dequant
+    // work, identical FLOPs). ~30 GB — Studio only. See ExpertDequantization.
+    let dequantExperts = hasFlag("--dequantize-experts")
     let genLength = Int(argValue("--gen-length") ?? "128") ?? 128
-    let blockLength = Int(argValue("--block-length") ?? "32") ?? 32
-    let speculationK = Int(argValue("--speculation-k") ?? "4") ?? 4
+    let iceEnabled = hasFlag("--ice") || iceSweep
+    let iceTau = Float(argValue("--ice-tau") ?? "0.9") ?? 0.9
+    let iceNt = Int(argValue("--ice-nt") ?? "3") ?? 3
+    let blockLength: Int
+    if iceEnabled {
+        blockLength = genLength
+    } else {
+        blockLength = Int(argValue("--block-length") ?? "32") ?? 32
+    }
+    let speculationKInput = Int(argValue("--speculation-k") ?? "4") ?? 4
+    let speculationK = (baselineCheck || iceSweep) ? 1 : speculationKInput
     let eosEarlyStop = !hasFlag("--no-early-stop")
     let instrument = !hasFlag("--no-instrument")
     let maskDiagnostic = hasFlag("--mask-diagnostic")
+    var temporalVoting = hasFlag("--temporal-voting")
+    let votingAlpha = Float(argValue("--voting-alpha") ?? "0.0") ?? 0.0
+    let votingCutoff = Float(argValue("--voting-cutoff") ?? "0.9") ?? 0.9
     
     let elasticCache = hasFlag("--elastic-cache")
     let elasticGamma = Float(argValue("--elastic-gamma") ?? "0.9") ?? 0.9
@@ -249,6 +332,12 @@ func runLLaDABench() async throws {
     // WP-2b: dynamic τ (2b-2) + EOS early exit (2b-3). Rows record engine echoes (rule F7).
     let dynTauAlpha = Float(argValue("--dyn-tau-alpha") ?? "0.0") ?? 0.0
     let eosEarlyExit = hasFlag("--eos-early-exit")
+
+    // Credit Decoding parsing
+    let creditDecodingEnabled = hasFlag("--credit")
+    let creditAlpha = Float(argValue("--credit-alpha") ?? "0.5") ?? 0.5
+    let creditBeta = Float(argValue("--credit-beta") ?? "0.9") ?? 0.9
+    let creditGamma = Float(argValue("--credit-gamma") ?? "0.5") ?? 0.5
     // Optional Γ/Δ threshold overrides (WP-2a conservative-baseline probe: the S2D2 papers
     // benchmark against τ_M2T=0.95-style decoding; the Q-mode default is 0.7).
     let thresholdMaskOverride = argValue("--threshold-mask").flatMap(Float.init)
@@ -276,6 +365,14 @@ func runLLaDABench() async throws {
     precondition(!subBlockCommit || jotFaithful,
         "--sub-block-commit requires --jot-faithful (Option C keys off the JOT frozen prefix)")
 
+    // FlashBlock attention caching (WP-3b)
+    let flashBlockEnabled = hasFlag("--flashblock")
+    let flashBlockTau = Int(argValue("--flashblock-tau") ?? "4") ?? 4
+    precondition(!flashBlockEnabled || speculationK == 1,
+        "--flashblock requires --speculation-k 1 (Metal command queue runs synchronously)")
+    precondition(!flashBlockEnabled || !elasticCache,
+        "--flashblock and --elastic are mutually exclusive")
+
     // Prompt suites: fixed cases checked into Tools/diffusion-bench/PromptSuites (M6).
     // --prompt TEXT replaces them with a single ad-hoc case.
     var suites: [LLaDAPromptSuite]
@@ -283,8 +380,8 @@ func runLLaDABench() async throws {
         suites = [LLaDAPromptSuite(
             name: "custom", prompts: [LLaDAPromptCase(id: "custom-0", user: text)])]
     } else {
-        let wanted = (argValue("--suites") ?? "chat,reasoning,code")
-            .split(separator: ",").map(String.init)
+        let wantedSuites = (baselineCheck || iceSweep) ? (argValue("--suites") ?? "gsm8k_100") : (argValue("--suites") ?? "chat,reasoning,code")
+        let wanted = wantedSuites.split(separator: ",").map(String.init)
         suites = try wanted.map { name in
             let url = URL(fileURLWithPath:
                 "\(repoRoot)/Tools/diffusion-bench/PromptSuites/\(name).json")
@@ -305,10 +402,144 @@ func runLLaDABench() async throws {
         arms = [
             LLaDAArm(name: "q-cached", mode: .q, cached: true, mask: .strict),
             LLaDAArm(name: "s-cached", mode: .s, cached: true, mask: .strict),
+            LLaDAArm(name: "wp3b-vanilla", mode: .q, cached: true, mask: .strict) {
+                $0.flashBlockEnabled = false
+            },
+            LLaDAArm(name: "wp3b-flashblock", mode: .q, cached: true, mask: .strict) {
+                $0.flashBlockEnabled = true
+                $0.flashBlockTau = 4
+            },
+            // Dyn-τ × MultiBD 2×2 factorial (WP-2b-2 × WP-1b). Control is q-cached, which is
+            // already the (α=0, nBuf=1) cell — run all four in ONE process:
+            //   diffusion-bench llada --arms q-cached,dt-tau,dt-mbd,dt-tau-mbd \
+            //     --runs 3 --gen-length 128 --json scratch/dyntau_factorial.jsonl
+            // Why the factorial and not a lone dyntau arm: dyn-τ has never been measured on the
+            // Studio without MultiBD — α=0.6 appears only in p3-combo/p4-combo, both nBuf=2,
+            // because nBuf was a process-global flag. MultiBD is independently −17% TPS, so the
+            // existing combo number cannot separate the two. These four cells give dyn-τ's main
+            // effect, MultiBD's main effect, and the interaction.
+            // τ_add=0.5 is WP-1b's chat winner (wp1b-logbook F4: front-block interference is
+            // +0.0 steps at τ_add ≥ 0.5). Reasoning's winner is 0.3 — held at 0.5 here for
+            // one-variable discipline; a τ_add sweep is a separate experiment.
+            LLaDAArm(name: "dt-tau", mode: .q, cached: true, mask: .strict) {
+                $0.dynamicTauAlpha = 0.6
+            },
+            LLaDAArm(name: "dt-mbd", mode: .q, cached: true, mask: .strict) {
+                $0.nBuf = 2
+                $0.tauAdd = 0.5
+            },
+            LLaDAArm(name: "dt-tau-mbd", mode: .q, cached: true, mask: .strict) {
+                $0.nBuf = 2
+                $0.tauAdd = 0.5
+                $0.dynamicTauAlpha = 0.6
+            },
+            // Lever-refresh arms (2026-07-16, `lf-*`): each accepted preset as a per-arm override so
+            // it interleaves against the SAME-process baseline (drift-free, ~0.33% CV) instead of the
+            // cross-process ±6–10% the original campaigns suffered. Grouped by speculationK — K is an
+            // engine constructor arg, NOT a GenerationParams field, so it can't be an override.
+            //   K=4 process (drift-free credit + combos):
+            //     diffusion-bench llada --arms q-cached,lf-credit-preset,lf-credit-default,lf-p3combo,lf-p4combo \
+            //       --runs 3 --suites chat,reasoning,code --json scratch/leverfresh_k4.jsonl
+            //   K=1 process (drift-free JOT; q-cached here IS the K=1 JOT baseline):
+            //     diffusion-bench llada --arms q-cached,lf-jot,lf-jotcredit --speculation-k 1 \
+            //       --runs 3 --suites reasoning,code --json scratch/leverfresh_k1.jsonl
+            // Credit is run at BOTH the (mis-)documented "preset" (α=1.0/γ=1.0) and the code defaults
+            // (α=0.5/γ=0.5). RESOLVED 2026-07-16: 0.5/0.5 is the SHIPPED config (git 7bb761f, never
+            // 1.0/1.0); the 1.0/1.0 in the old master-list header was a phase-4 grid candidate, not
+            // shipped. `lf-credit-default` (0.5/0.5) is the real one; `lf-credit-preset` (1.0/1.0) is
+            // kept only as the negative control that exposed the doc error.
+            LLaDAArm(name: "lf-credit-preset", mode: .q, cached: true, mask: .strict) {
+                $0.creditDecodingEnabled = true
+                $0.creditAlpha = 1.0; $0.creditBeta = 0.9; $0.creditGamma = 1.0
+            },
+            LLaDAArm(name: "lf-credit-default", mode: .q, cached: true, mask: .strict) {
+                $0.creditDecodingEnabled = true   // leaves α/β/γ at the .mode() defaults 0.5/0.9/0.5
+            },
+            LLaDAArm(name: "lf-p3combo", mode: .q, cached: true, mask: .strict) {
+                $0.nBuf = 2; $0.tauAdd = 0.5; $0.dynamicTauAlpha = 0.6
+            },
+            LLaDAArm(name: "lf-p4combo", mode: .q, cached: true, mask: .strict) {
+                $0.nBuf = 2; $0.tauAdd = 0.5; $0.dynamicTauAlpha = 0.6
+                $0.creditDecodingEnabled = true
+                $0.creditAlpha = 1.0; $0.creditBeta = 0.9; $0.creditGamma = 1.0
+            },
+            LLaDAArm(name: "lf-jot", mode: .q, cached: true, mask: .strict) {
+                $0.jotEnabled = true; $0.jotFaithful = true; $0.jotK = 2
+            },
+            LLaDAArm(name: "lf-jotcredit", mode: .q, cached: true, mask: .strict) {
+                $0.jotEnabled = true; $0.jotFaithful = true; $0.jotK = 2
+                $0.creditDecodingEnabled = true
+                $0.creditAlpha = 1.0; $0.creditBeta = 0.9; $0.creditGamma = 1.0
+            },
+            // In-situ module attribution (gather_qmm_handoff.md §5.5). Diagnostic arms: ablated
+            // arms emit garbage on purpose — the metric is ms/forward
+            // (denoiseSeconds/forwardsEvaluated), never TPS. Run them together in ONE process so
+            // the deltas are within-process (~0.33% CV) rather than cross-process (±6–10% drift):
+            //   diffusion-bench llada --arms attr-full,attr-no-routed,attr-no-moe,attr-no-attn \
+            //     --runs 3 --no-early-stop --json scratch/attribution.jsonl
+            // attr-full is the CONTROL: it must reproduce q-cached's ms/forward (≈27.5 ms on the
+            // Studio). If it does not, the harness changed the default path — stop, do not read
+            // any delta.
+            LLaDAArm(name: "attr-full", mode: .q, cached: true, mask: .strict),
+            LLaDAArm(name: "attr-no-routed", mode: .q, cached: true, mask: .strict) {
+                $0.moduleAblation = .moeRoutedExperts
+            },
+            // Splits attr-no-routed's 56.2%: router still runs, only the GEMMs are skipped, so
+            // `full − no-experts` isolates gatherQuantizedMM itself.
+            LLaDAArm(name: "attr-no-experts", mode: .q, cached: true, mask: .strict) {
+                $0.moduleAblation = .moeExpertGEMMs
+            },
+            LLaDAArm(name: "attr-no-moe", mode: .q, cached: true, mask: .strict) {
+                $0.moduleAblation = .moeAll
+            },
+            LLaDAArm(name: "attr-no-attn", mode: .q, cached: true, mask: .strict) {
+                $0.moduleAblation = .attention
+            },
+            // Splits the router: `no-topk` keeps matmul+sigmoid but drops the two argSorts.
+            //   attr-no-experts − attr-no-topk  = selection (argSort) cost
+            //   attr-no-topk    − attr-no-routed = matmul/sigmoid cost
+            LLaDAArm(name: "attr-no-topk", mode: .q, cached: true, mask: .strict) {
+                $0.moduleAblation = .moeRouterNoTopK
+            },
+            // Splits the 25.2% "remainder": full − no-lmhead = the [hidden -> 157184] projection.
+            LLaDAArm(name: "attr-no-lmhead", mode: .q, cached: true, mask: .strict) {
+                $0.moduleAblation = .lmHead
+            },
+            // Coalescing probe (§8.2): same 256 picks, but only 8 distinct experts instead of ~57.
+            // full - fixed  ==  the cost of the extra 49 distinct experts' bytes.
+            LLaDAArm(name: "attr-fixed-experts", mode: .q, cached: true, mask: .strict) {
+                $0.moduleAblation = .moeFixedExperts
+            },
+            // Router reuse (§8.4): recompute routing every N forwards, reuse in between.
+            // Ceiling is the router's 13.6%: N=2 -> ~6.8%, N=4 -> ~10%. Quality is the open
+            // question — ~20% of expert picks per step are genuinely new (measured Jaccard 80%).
+            LLaDAArm(name: "reuse-2", mode: .q, cached: true, mask: .strict) { $0.routerReuseSteps = 2 },
+            LLaDAArm(name: "reuse-4", mode: .q, cached: true, mask: .strict) { $0.routerReuseSteps = 4 },
+            // Router's TRUE in-context marginal cost: compute routing once per block, reuse for
+            // every other step, GEMMs still running. q-cached - reuse-999 == what a perfect fused
+            // router could ever save. (Trajectory is garbage; only ms/forward is read.)
+            LLaDAArm(name: "reuse-999", mode: .q, cached: true, mask: .strict) { $0.routerReuseSteps = 999 },
+            // Block-length sweep. The decisive question for the amortisation lever is how fast
+            // steps/block grows when the block grows — hardware-independent, and unmeasured.
+            // As arms (not a CLI flag) so all three run in ONE process and the wall-clock
+            // comparison is within-process (~0.3% CV) rather than cross-process (±6–10%).
+            LLaDAArm(name: "bl-32", mode: .q, cached: true, mask: .strict) { $0.blockLength = 32 },
+            LLaDAArm(name: "bl-64", mode: .q, cached: true, mask: .strict) { $0.blockLength = 64 },
+            LLaDAArm(name: "bl-128", mode: .q, cached: true, mask: .strict) { $0.blockLength = 128 },
         ]
         if let filter = argValue("--arms") {
             let wanted = Set(filter.split(separator: ",").map(String.init))
+            let unknown = wanted.subtracting(Set(arms.map(\.name)))
+            if !unknown.isEmpty {
+                // Fail loudly: silently filtering to an empty arm set produces a "successful" run
+                // with no rows, which is indistinguishable from a clean null result.
+                FileHandle.standardError.write(Data(
+                    "unknown arm(s): \(unknown.sorted().joined(separator: ", ")). known: \(arms.map(\.name).joined(separator: ", "))\n".utf8))
+                exit(2)
+            }
             arms = arms.filter { wanted.contains($0.name) }
+        } else {
+            arms = arms.filter { !$0.name.hasPrefix("attr-") && !$0.name.hasPrefix("bl-") && !$0.name.hasPrefix("reuse-") && !$0.name.hasPrefix("wp3b-") && !$0.name.hasPrefix("dt-") && !$0.name.hasPrefix("lf-") }
         }
     }
     for arm in arms {
@@ -331,6 +562,13 @@ func runLLaDABench() async throws {
         container.quantizeLMHead()
         print("lm_head quantized to 4-bit (g64) in memory (M8 E5 axis)")
     }
+    if dequantExperts {
+        let n = ExpertDequantization.dequantizeRoutedExperts(container.model)
+        let peak = Double(GPU.peakMemory) / 1_073_741_824
+        print(String(format: "routed experts DEQUANTIZED to FP16 in memory: %d projections, "
+                     + "peak %.1f GB — gatherMM replaces gatherQuantizedMM (Case B causal probe; "
+                     + "4x the bytes, zero dequant work, identical FLOPs)", n, peak))
+    }
     let tokenizer = try await DiffusionTokenizer.from(modelFolder: tokenizerDir)
     let loadSeconds = Date().timeIntervalSince(loadStart)
     print(String(format: "loaded in %.1fs | arms: %@ | runs/arm: %d | gen-length: %d "
@@ -340,6 +578,7 @@ func runLLaDABench() async throws {
 
     let engine = DiffusionEngine(
         model: container.model, speculationK: speculationK, instrument: instrument)
+    var currentCommittedTokens: [Int] = []
     let isoFormatter = ISO8601DateFormatter()
     var jsonLines: [String] = []
 
@@ -370,25 +609,103 @@ func runLLaDABench() async throws {
         }
     }
 
-    func params(for mode: GenerationParams.Mode) -> GenerationParams {
+    // MoE routing-distribution capture (gather_qmm_handoff §5.7's load-bearing unknown: how many
+    // DISTINCT experts a forward really touches). Pairs each forward's per-layer expert selection
+    // with its denoising phase (block / step / mask ratio), which also tests the noise-aware-routing
+    // hypothesis for free. Per-layer readbacks — wall-clock from such a run is meaningless.
+    if let dumpRoutingPath = argValue("--dump-routing") {
+        FileManager.default.createFile(atPath: dumpRoutingPath, contents: nil)
+        guard let routingHandle = FileHandle(forWritingAtPath: dumpRoutingPath) else {
+            fatalError("cannot open --dump-routing path \(dumpRoutingPath)")
+        }
+        precondition(speculationKInput == 1,
+            "--dump-routing requires --speculation-k 1: with K>1 a forward covers several steps, "
+            + "so gate records cannot be paired 1:1 with an onTrace step.")
+        let trace = RoutingTrace()
+        moeRoutingTrace = trace
+        print("routing dump enabled -> \(dumpRoutingPath) (per-layer readbacks; timings INVALID)")
+        engine.onTrace = { t in
+            // One drain per step == one record per MoE layer, in layer order.
+            let perLayer = trace.drain()
+            let maskedCount = t.masked.reduce(0) { $0 + ($1 ? 1 : 0) }
+            let rec: [String: Any] = [
+                "promptId": tracePromptId,
+                "block": t.blockIndex,
+                "step": t.stepInBlock,
+                "activeLen": t.masked.count,
+                "maskedCount": maskedCount,
+                // Denoising phase proxy: 1.0 = all masked (high noise), 0.0 = settled (low noise).
+                "maskRatio": t.masked.isEmpty ? 0
+                    : Double(maskedCount) / Double(t.masked.count),
+                "layers": perLayer.map { $0.map(Int.init) },
+            ]
+            if let data = try? JSONSerialization.data(withJSONObject: rec),
+               let line = String(data: data, encoding: .utf8) {
+                routingHandle.write(Data((line + "\n").utf8))
+            }
+        }
+    }
+
+    func params(
+        for mode: GenerationParams.Mode,
+        blockLengthOverride: Int? = nil,
+        temporalVotingOverride: Bool? = nil,
+        iceEnabledOverride: Bool? = nil,
+        iceTauOverride: Float? = nil,
+        iceNtOverride: Int? = nil,
+        promptLength: Int? = nil,
+        arm: LLaDAArm? = nil
+    ) -> GenerationParams {
+        let effIceEnabled = iceEnabledOverride ?? iceEnabled
+        let effIceNt = iceNtOverride ?? iceNt
+        let pLen = promptLength ?? 0
+        let effBlockLen = effIceEnabled ? (pLen + genLength) : (blockLengthOverride ?? blockLength)
+        
         var p = GenerationParams.mode(
-            mode, blockLength: blockLength, genLength: genLength,
-            maskId: tokenizer.maskId, eosId: tokenizer.eosId, eosEarlyStop: eosEarlyStop,
-            nBuf: nBuf, tauAdd: tauAdd, tauSemi: tauSemi,
-            speculation: speculation, tauSpan: tauSpan,
-            dynamicTauAlpha: dynTauAlpha, eosEarlyExit: eosEarlyExit,
-            elasticCacheEnabled: elasticCache, elasticGamma: elasticGamma, elasticBeta: elasticBeta,
-            elasticStaticBoundary: elasticStaticBoundary,
-            jotEnabled: jotEnabled, jotK: jotK, jotThreshold: jotThreshold,
-            jotFaithful: jotFaithful, moeCapacityRatio: moeCapacityRatio,
-            subBlockCommit: subBlockCommit, subBlockMinPrefix: subBlockMinPrefix)
+            mode, blockLength: effBlockLen, genLength: genLength,
+            maskId: tokenizer.maskId, eosId: tokenizer.eosId, eosEarlyStop: eosEarlyStop)
+        // MultiBD (WP-1b)
+        p.nBuf = nBuf; p.tauAdd = tauAdd; p.tauSemi = tauSemi
+        // Speculation (WP-2a)
+        p.speculation = speculation; p.tauSpan = tauSpan
+        // Dynamic-τ / EOS early exit (WP-2b)
+        p.dynamicTauAlpha = dynTauAlpha; p.eosEarlyExit = eosEarlyExit
+        // Elastic-Cache (WP-1a)
+        p.elasticCacheEnabled = elasticCache; p.elasticGamma = elasticGamma
+        p.elasticBeta = elasticBeta; p.elasticStaticBoundary = elasticStaticBoundary
+        // JOT (WP-3a)
+        p.jotEnabled = jotEnabled; p.jotK = jotK; p.jotThreshold = jotThreshold
+        p.jotFaithful = jotFaithful; p.moeCapacityRatio = moeCapacityRatio
+        p.subBlockCommit = subBlockCommit; p.subBlockMinPrefix = subBlockMinPrefix
+        // FlashBlock (WP-3b)
+        p.flashBlockEnabled = flashBlockEnabled
+        p.flashBlockTau = flashBlockTau
+        // Temporal voting (WP-4a)
+        p.temporalVotingEnabled = temporalVotingOverride ?? temporalVoting
+        p.temporalVotingAlpha = votingAlpha; p.temporalVotingCutoff = votingCutoff
+        // ICE (WP-4c)
+        p.iceEnabled = effIceEnabled; p.iceTau = iceTauOverride ?? iceTau
+        p.iceNt = effIceNt; p.iceThinkingLength = pLen + effIceNt * 32
+        // Credit decoding (WP-4d)
+        p.creditDecodingEnabled = creditDecodingEnabled; p.creditAlpha = creditAlpha
+        p.creditBeta = creditBeta; p.creditGamma = creditGamma
+        // Threshold overrides
         if let t = thresholdMaskOverride { p.threshold = t }
         if let t = thresholdEditOverride { p.editingThreshold = t }
+        // Per-arm overrides last: an arm always wins over a process-global CLI flag. This is what
+        // lets several arms be interleaved in ONE process (see LLaDAArm.overrides for why that
+        // matters — cross-process drift is ±6–10%, within-process CV ~0.33%).
+        arm?.overrides(&p)
         return p
     }
 
-    func generate(_ arm: LLaDAArm, promptIds: [Int])
-        -> (output: DiffusionEngine.Output, seconds: Double, peakGB: Double,
+    func generate(
+        _ arm: LLaDAArm, promptIds: [Int],
+        temporalVotingOverride: Bool? = nil,
+        iceEnabledOverride: Bool? = nil,
+        iceTauOverride: Float? = nil,
+        iceNtOverride: Int? = nil
+    ) -> (output: DiffusionEngine.Output, seconds: Double, peakGB: Double,
             env: EnvSnapshot, warmup: Bool) {
         let warmup = llaDAProcessFirstGeneration
         llaDAProcessFirstGeneration = false
@@ -397,31 +714,132 @@ func runLLaDABench() async throws {
         let thermalBefore = thermalStateName()
         GPU.resetPeakMemory()
         let start = Date()
-        // Per-block wall-clock (H1 diagnostic: first-block cost includes prefill + kernel
-        // compile; steady-state is the later blocks). streamBlock fires at each commit.
         var lastCommit = start
         var blockIndex = 0
-        let logBlock: ([Int]) -> Void = { _ in
+        let logBlock: ([Int]) -> Void = { blockIds in
             let now = Date()
             print(String(format: "    block %d committed at +%.1fs (Δ %.1fs)",
                          blockIndex, now.timeIntervalSince(start),
                          now.timeIntervalSince(lastCommit)))
             lastCommit = now
             blockIndex += 1
+            currentCommittedTokens.append(contentsOf: blockIds)
         }
+        
+        let effIceEnabled = iceEnabledOverride ?? iceEnabled
+        let effIceNt = iceNtOverride ?? iceNt
+        let effTempVoting = temporalVotingOverride ?? temporalVoting
+        let pLen = promptIds.count
+        let effBlockLen = effIceEnabled ? (pLen + genLength) : blockLength
+        
+        var iceTemplate: [Int]? = nil
+        if effIceEnabled {
+            let t1 = tokenizer.encode(text: "Step 1: ")
+            let t2 = tokenizer.encode(text: "Step 2: ")
+            let t3 = tokenizer.encode(text: "Step 3: ")
+            let t4 = tokenizer.encode(text: "Step 4: ")
+            let tAns = tokenizer.encode(text: "Therefore, the answer is ")
+            
+            var template = Array(repeating: tokenizer.maskId, count: effBlockLen)
+            template.replaceSubrange(0 ..< pLen, with: promptIds)
+            
+            if effIceNt == 3 {
+                template.replaceSubrange(pLen ..< pLen + t1.count, with: t1)
+                template.replaceSubrange(pLen + 32 ..< pLen + 32 + t2.count, with: t2)
+                template.replaceSubrange(pLen + 64 ..< pLen + 64 + t3.count, with: t3)
+                template.replaceSubrange(pLen + 96 ..< pLen + 96 + tAns.count, with: tAns)
+            } else if effIceNt == 2 {
+                template.replaceSubrange(pLen ..< pLen + t1.count, with: t1)
+                template.replaceSubrange(pLen + 32 ..< pLen + 32 + t2.count, with: t2)
+                template.replaceSubrange(pLen + 64 ..< pLen + 64 + tAns.count, with: tAns)
+            } else if effIceNt == 4 {
+                template.replaceSubrange(pLen ..< pLen + t1.count, with: t1)
+                template.replaceSubrange(pLen + 25 ..< pLen + 25 + t2.count, with: t2)
+                template.replaceSubrange(pLen + 50 ..< pLen + 50 + t3.count, with: t3)
+                template.replaceSubrange(pLen + 75 ..< pLen + 75 + t4.count, with: t4)
+                template.replaceSubrange(pLen + 100 ..< pLen + 100 + tAns.count, with: tAns)
+            }
+            iceTemplate = template
+        }
+
+        let targetParams = params(
+            for: arm.mode,
+            temporalVotingOverride: effTempVoting,
+            iceEnabledOverride: effIceEnabled,
+            iceTauOverride: iceTauOverride,
+            iceNtOverride: effIceNt,
+            promptLength: pLen,
+            arm: arm
+        )
+
         let output = arm.cached
-            ? engine.generateCached(prompt: promptIds, params: params(for: arm.mode),
+            ? engine.generateCached(prompt: promptIds, params: targetParams,
+                                    iceTemplate: iceTemplate,
                                     streamBlock: logBlock)
-            : engine.generate(prompt: promptIds, params: params(for: arm.mode),
-                              maskSemantics: arm.mask, streamBlock: logBlock)
+            : engine.generate(prompt: promptIds, params: targetParams,
+                              maskSemantics: arm.mask,
+                              iceTemplate: iceTemplate,
+                              streamBlock: logBlock)
         let seconds = Date().timeIntervalSince(start)
+        var finalOutput = output
+        if effTempVoting, !baselineCheck, let trajectory = output.trajectorySequences, !trajectory.isEmpty {
+            let T = trajectory.count
+            let startIdx = Int(Float(T) * votingCutoff)
+            if startIdx < T {
+                var answerWeights: [String: Double] = [:]
+                var answerToStep: [String: Int] = [:]
+                for t in startIdx ..< T {
+                    let seq = trajectory[t]
+                    let decoded = tokenizer.decode(tokens: seq)
+                    if let answer = extractLastNumber(from: decoded) {
+                        let weight: Double
+                        if votingAlpha == 0.0 {
+                            weight = 1.0
+                        } else {
+                            let stepFraction = Float(t) / Float(T)
+                            weight = exp(Double(votingAlpha) * Double(1.0 - stepFraction))
+                        }
+                        answerWeights[answer, default: 0.0] += weight
+                        if answerToStep[answer] == nil {
+                            answerToStep[answer] = t
+                        }
+                    }
+                }
+                if let winningAnswer = answerWeights.max(by: { $0.value < $1.value })?.key,
+                   let winningStepIdx = answerToStep[winningAnswer] {
+                    let winningSeq = trajectory[winningStepIdx]
+                    let promptLength = promptIds.count
+                    if winningSeq.count > promptLength {
+                        let generated = Array(winningSeq[promptLength...])
+                        let genEnd = min(genLength, generated.count)
+                        let generatedSlice = Array(generated[0 ..< genEnd])
+                        let firstEos = generatedSlice.firstIndex(of: tokenizer.eosId) ?? genLength
+                        let votedTokens = Array(generatedSlice.prefix(firstEos + 1))
+                        
+                        finalOutput = DiffusionEngine.Output(
+                            tokens: votedTokens,
+                            finalSequence: winningSeq,
+                            blockCommits: output.blockCommits,
+                            stepsPerBlock: output.stepsPerBlock,
+                            syncPoints: output.syncPoints,
+                            metrics: output.metrics,
+                            trajectorySequences: output.trajectorySequences
+                        )
+                        print(String(format: "      [TSCV] Voted answer: '%@' (weight %.2f, step %d/%d) vs final: '%@'",
+                                     winningAnswer, answerWeights[winningAnswer] ?? 0.0, winningStepIdx, T,
+                                     extractLastNumber(from: tokenizer.decode(tokens: output.tokens)) ?? "N/A"))
+                    }
+                }
+            }
+        }
         let env = EnvSnapshot(
             swapUsedMBBefore: swapBefore,
             swapUsedMBAfter: swapUsedMB(),
             freeMemoryMBBefore: freeBefore,
+            totalMemoryMB: totalMemoryMB(),
             thermalBefore: thermalBefore,
             thermalAfter: thermalStateName())
-        return (output, seconds, Double(GPU.peakMemory) / 1_073_741_824, env, warmup)
+        return (finalOutput, seconds, Double(Memory.peakMemory) / 1_073_741_824, env, warmup)
     }
 
     func encodePrompt(_ user: String) throws -> [Int] {
@@ -440,7 +858,7 @@ func runLLaDABench() async throws {
         let posts = output.metrics.postStepsPerBlock.reduce(0, +)
         let blocks = output.stepsPerBlock.count
         // Effective thresholds (overrides included), not the mode label's — rule F7.
-        let effectiveParams = params(for: arm.mode)
+        let effectiveParams = params(for: arm.mode, arm: arm)
         let thresholds = (mask: effectiveParams.threshold, edit: effectiveParams.editingThreshold)
         let result = LLaDARunResult(
             arm: arm.name, run: run, suite: suite, promptId: prompt.id,
@@ -513,6 +931,15 @@ func runLLaDABench() async throws {
             moeCapacityRatio: output.metrics.effectiveMoeCapacityRatio,
             subBlockCommit: output.metrics.effectiveJotFaithful && subBlockCommit,
             subBlockMinPrefix: subBlockMinPrefix,
+            iceEnabled: output.metrics.effectiveIceEnabled,
+            iceTau: output.metrics.effectiveIceTau,
+            iceNt: output.metrics.effectiveIceNt,
+            iceThinkingLength: output.metrics.effectiveIceThinkingLength,
+            creditDecodingEnabled: output.metrics.effectiveCreditDecodingEnabled,
+            creditAlpha: output.metrics.effectiveCreditAlpha,
+            creditBeta: output.metrics.effectiveCreditBeta,
+            creditGamma: output.metrics.effectiveCreditGamma,
+            moduleAblation: output.metrics.effectiveModuleAblation.rawValue,
             warmupIncluded: warmup,
             processId: Int(ProcessInfo.processInfo.processIdentifier),
             host: sysctlString("hw.model"),
@@ -539,6 +966,316 @@ func runLLaDABench() async throws {
     func flushJSON() {
         guard !jsonLines.isEmpty else { return }
         print("JSONL appended to \(jsonPath) (\(jsonLines.count) lines)")
+    }
+
+    // Baseline check execution path
+    if baselineCheck {
+        temporalVoting = true
+        print("---- starting GSM8K Temporal Oscillation Baseline Check & TSCV Param Sweep ----")
+        var totalEvaluated = 0
+        var finalCorrectCount = 0
+        var everCorrectCount = 0
+        var details: [[String: Any]] = []
+
+        let alphas: [Float] = [0.0, 0.2, 0.5, 1.0, 2.0]
+        let cutoffs: [Float] = [0.5, 0.6, 0.7, 0.8, 0.9]
+        var gridCorrectCounts: [String: Int] = [:]
+
+        var currentExpectedAnswer = ""
+        var currentStepAnswers: [String] = []
+        var wasEverCorrect = false
+        var totalDenoisingSteps = 0
+
+        engine.onTrace = { t in
+            let activeTokens = t.argmaxToken
+            let fullSequence = currentCommittedTokens + activeTokens
+            let decoded = tokenizer.decode(tokens: fullSequence)
+            if let extracted = extractLastNumber(from: decoded) {
+                currentStepAnswers.append(extracted)
+                if extracted == currentExpectedAnswer {
+                    wasEverCorrect = true
+                }
+            } else {
+                currentStepAnswers.append("N/A")
+            }
+            totalDenoisingSteps += 1
+        }
+
+        for suite in suites {
+            for prompt in suite.prompts {
+                guard let expected = prompt.answer else {
+                    print("Warning: Prompt \(prompt.id) has no ground truth answer. Skipping.")
+                    continue
+                }
+                let promptIds = try encodePrompt(prompt.user)
+                let prefillBlocks = promptIds.count / blockLength
+                
+                // Initialize committed tokens with the prefilled prompt blocks
+                currentCommittedTokens = Array(promptIds[0 ..< prefillBlocks * blockLength])
+                currentExpectedAnswer = expected
+                currentStepAnswers = []
+                wasEverCorrect = false
+                totalDenoisingSteps = 0
+
+                let arm = LLaDAArm(name: "q-cached", mode: .q, cached: true, mask: .strict)
+                let (output, seconds, _, _, _) = generate(arm, promptIds: promptIds)
+                
+                let finalOutputText = tokenizer.decode(tokens: output.tokens)
+                let finalAnswer = extractLastNumber(from: finalOutputText) ?? "N/A"
+                let isFinalCorrect = (finalAnswer == expected)
+                if isFinalCorrect {
+                    wasEverCorrect = true
+                }
+
+                totalEvaluated += 1
+                if isFinalCorrect { finalCorrectCount += 1 }
+                if wasEverCorrect { everCorrectCount += 1 }
+
+                // Evaluate all alpha/cutoff combinations post-hoc on the collected trajectory
+                if let trajectory = output.trajectorySequences, !trajectory.isEmpty {
+                    let T = trajectory.count
+                    for alpha in alphas {
+                        for cutoff in cutoffs {
+                            let startIdx = Int(Float(T) * cutoff)
+                            if startIdx < T {
+                                var answerWeights: [String: Double] = [:]
+                                for t in startIdx ..< T {
+                                    let seq = trajectory[t]
+                                    let decoded = tokenizer.decode(tokens: seq)
+                                    if let answer = extractLastNumber(from: decoded) {
+                                        let stepFraction = Float(t) / Float(T)
+                                        let weight = exp(Double(alpha) * Double(1.0 - stepFraction))
+                                        answerWeights[answer, default: 0.0] += weight
+                                    }
+                                }
+                                let votedAnswer = answerWeights.max(by: { $0.value < $1.value })?.key ?? "N/A"
+                                if votedAnswer == expected {
+                                    let key = String(format: "%.1f_%.1f", alpha, cutoff)
+                                    gridCorrectCounts[key, default: 0] += 1
+                                }
+                            }
+                        }
+                    }
+                }
+
+                print(String(
+                    format: "[%@] Final: %@ | Expected: %@ | Correct: %@ | Ever Correct: %@ | Steps: %d | Time: %.1fs",
+                    prompt.id, finalAnswer, expected, isFinalCorrect ? "Yes" : "No", wasEverCorrect ? "Yes" : "No",
+                    totalDenoisingSteps, seconds))
+
+                details.append([
+                    "promptId": prompt.id,
+                    "question": prompt.user,
+                    "expected": expected,
+                    "finalAnswer": finalAnswer,
+                    "finalCorrect": isFinalCorrect,
+                    "everCorrect": wasEverCorrect,
+                    "steps": totalDenoisingSteps,
+                    "trajectory": currentStepAnswers
+                ])
+                
+                if cooldown > 0 {
+                    try await Task.sleep(nanoseconds: UInt64(cooldown) * 1_000_000_000)
+                }
+            }
+        }
+
+        let finalPass = totalEvaluated > 0 ? Double(finalCorrectCount) / Double(totalEvaluated) * 100.0 : 0.0
+        let everPass = totalEvaluated > 0 ? Double(everCorrectCount) / Double(totalEvaluated) * 100.0 : 0.0
+        let gap = everPass - finalPass
+
+        print("====================================================")
+        print("     GSM8K TEMPORAL OSCILLATION BASELINE CHECK      ")
+        print("====================================================")
+        print(String(format: "Total Prompts Evaluated: %d", totalEvaluated))
+        print(String(format: "Final-Pass@1 Accuracy:   %.2f%% (%d / %d)", finalPass, finalCorrectCount, totalEvaluated))
+        print(String(format: "Ever-Pass@1 Accuracy:    %.2f%% (%d / %d)", everPass, everCorrectCount, totalEvaluated))
+        print(String(format: "Temporal Oscillation Gap: +%.2f%%", gap))
+        print("====================================================")
+        print("")
+        print("====================================================")
+        print("     TSCV PARAMETER SWEEP ACCURACY GRID             ")
+        print("====================================================")
+        print("Alpha \\ Cutoff |  0.5  |  0.6  |  0.7  |  0.8  |  0.9  |")
+        print("------------------------------------------------------------")
+        for alpha in alphas {
+            var rowStr = String(format: "  alpha = %.1f   |", alpha)
+            for cutoff in cutoffs {
+                let key = String(format: "%.1f_%.1f", alpha, cutoff)
+                let count = gridCorrectCounts[key, default: 0]
+                let acc = totalEvaluated > 0 ? Double(count) / Double(totalEvaluated) * 100.0 : 0.0
+                rowStr += String(format: " %5.2f%% |", acc)
+            }
+            print(rowStr)
+        }
+        print("====================================================")
+
+        var gridResults: [String: Double] = [:]
+        for alpha in alphas {
+            for cutoff in cutoffs {
+                let key = String(format: "%.1f_%.1f", alpha, cutoff)
+                let count = gridCorrectCounts[key, default: 0]
+                gridResults[key] = totalEvaluated > 0 ? Double(count) / Double(totalEvaluated) * 100.0 : 0.0
+            }
+        }
+
+        let resultsMeta: [String: Any] = [
+            "totalEvaluated": totalEvaluated,
+            "finalPassAccuracy": finalPass,
+            "everPassAccuracy": everPass,
+            "oscillationGap": gap,
+            "sweepGrid": gridResults,
+            "details": details
+        ]
+        let resultsJSONPath = "\(repoRoot)/scratch/baseline_check_results.json"
+        if let data = try? JSONSerialization.data(withJSONObject: resultsMeta, options: [.prettyPrinted, .sortedKeys]) {
+            try? data.write(to: URL(fileURLWithPath: resultsJSONPath))
+            print("Saved detailed results and parameter sweep to \(resultsJSONPath)")
+        }
+        return
+    }
+
+    // ICE parameter sweep execution path
+    if iceSweep {
+        print("---- starting GSM8K ICE Parameter Sweep & TSCV Joint Evaluation ----")
+        print("TIME ESTIMATE: This ICE parameter sweep evaluates 7 configurations on 100 prompts. Expected total runtime: ~12-15 minutes.")
+        
+        struct SweepArm {
+            let name: String
+            let iceEnabled: Bool
+            let iceTau: Float
+            let iceNt: Int
+            let temporalVoting: Bool
+            let votingAlpha: Float
+            let votingCutoff: Float
+        }
+        
+        let sweepArms = [
+            SweepArm(name: "Baseline (No ICE, No TSCV)", iceEnabled: false, iceTau: 0.9, iceNt: 3, temporalVoting: false, votingAlpha: 0.0, votingCutoff: 0.9),
+            SweepArm(name: "ICE-SP (tau=0.8, Nt=3)", iceEnabled: true, iceTau: 0.8, iceNt: 3, temporalVoting: false, votingAlpha: 0.0, votingCutoff: 0.9),
+            SweepArm(name: "ICE-PP (tau=0.9, Nt=3)", iceEnabled: true, iceTau: 0.9, iceNt: 3, temporalVoting: false, votingAlpha: 0.0, votingCutoff: 0.9),
+            SweepArm(name: "ICE-PP (tau=0.95, Nt=3)", iceEnabled: true, iceTau: 0.95, iceNt: 3, temporalVoting: false, votingAlpha: 0.0, votingCutoff: 0.9),
+            SweepArm(name: "ICE-PP (tau=0.9, Nt=2)", iceEnabled: true, iceTau: 0.9, iceNt: 2, temporalVoting: false, votingAlpha: 0.0, votingCutoff: 0.9),
+            SweepArm(name: "ICE-PP (tau=0.9, Nt=4)", iceEnabled: true, iceTau: 0.9, iceNt: 4, temporalVoting: false, votingAlpha: 0.0, votingCutoff: 0.9),
+            SweepArm(name: "ICE+TSCV (tau=0.9, Nt=3)", iceEnabled: true, iceTau: 0.9, iceNt: 3, temporalVoting: true, votingAlpha: 0.0, votingCutoff: 0.9)
+        ]
+        
+        var correctCounts = [String: Int]()
+        var totalSteps = [String: Int]()
+        var totalSeconds = [String: Double]()
+        var totalEvaluated = 0
+        var details = [[String: Any]]()
+        
+        for suite in suites {
+            for prompt in suite.prompts {
+                guard let expected = prompt.answer else {
+                    print("Warning: Prompt \(prompt.id) has no ground truth answer. Skipping.")
+                    continue
+                }
+                let promptIds = try encodePrompt(prompt.user)
+                totalEvaluated += 1
+                
+                print(String(format: "\n========================================\nPrompt %d/%d: '%@' | Expected: %@\n========================================",
+                             totalEvaluated, suite.prompts.count, prompt.id, expected))
+                
+                var promptDetails: [String: Any] = [
+                    "promptId": prompt.id,
+                    "expected": expected
+                ]
+                
+                var armResults = [String: Any]()
+                
+                for arm in sweepArms {
+                    if cooldown > 0 {
+                        try await Task.sleep(nanoseconds: UInt64(cooldown) * 1_000_000_000)
+                    }
+                    
+                    let lArm = LLaDAArm(name: arm.name, mode: .q, cached: true, mask: .strict)
+                    let pB = arm.iceEnabled ? genLength : blockLength
+                    let prefillBlocks = promptIds.count / pB
+                    currentCommittedTokens = Array(promptIds[0 ..< (prefillBlocks * pB)])
+                    
+                    let (output, seconds, _, env, warmup) = generate(
+                        lArm,
+                        promptIds: promptIds,
+                        temporalVotingOverride: arm.temporalVoting,
+                        iceEnabledOverride: arm.iceEnabled,
+                        iceTauOverride: arm.iceTau,
+                        iceNtOverride: arm.iceNt
+                    )
+                    
+                    let text = tokenizer.decode(tokens: output.tokens)
+                    let finalAnswer = extractLastNumber(from: text) ?? "N/A"
+                    let isCorrect = (finalAnswer == expected)
+                    let steps = output.metrics.logicalStepsTotal
+                    
+                    if isCorrect {
+                        correctCounts[arm.name, default: 0] += 1
+                    }
+                    totalSteps[arm.name, default: 0] += steps
+                    totalSeconds[arm.name, default: 0.0] += seconds
+                    
+                    print(String(format: "  [%-30@] Correct: %-3@ | Steps: %-3d | Time: %5.1fs | Answer: %@",
+                                 arm.name, isCorrect ? "Yes" : "No", steps, seconds, finalAnswer))
+                    
+                    armResults[arm.name] = [
+                        "answer": finalAnswer,
+                        "correct": isCorrect,
+                        "steps": steps,
+                        "time": seconds,
+                        "warmup": warmup,
+                        "envValid": env.isValid
+                    ]
+                }
+                
+                promptDetails["arms"] = armResults
+                details.append(promptDetails)
+            }
+        }
+        
+        print("\n====================================================")
+        print("          GSM8K ICE PARAMETER SWEEP RESULTS         ")
+        print("====================================================")
+        print("| Configuration                  | Accuracy | Steps/Prompt | Rel Speedup |")
+        print("|--------------------------------|----------|--------------|-------------|")
+        
+        let baselineSteps = Double(totalSteps["Baseline (No ICE, No TSCV)", default: 1]) / Double(totalEvaluated)
+        
+        for arm in sweepArms {
+            let count = correctCounts[arm.name, default: 0]
+            let acc = totalEvaluated > 0 ? Double(count) / Double(totalEvaluated) * 100.0 : 0.0
+            let steps = totalEvaluated > 0 ? Double(totalSteps[arm.name, default: 0]) / Double(totalEvaluated) : 0.0
+            let speedup = steps > 0 ? (baselineSteps - steps) / baselineSteps * 100.0 : 0.0
+            
+            print(String(format: "| %-30@ | %6.2f%% | %12.1f | %10.1f%% |",
+                         arm.name, acc, steps, speedup))
+        }
+        print("====================================================")
+        
+        var armFinalResults = [String: [String: Any]]()
+        for arm in sweepArms {
+            let count = correctCounts[arm.name, default: 0]
+            let acc = totalEvaluated > 0 ? Double(count) / Double(totalEvaluated) * 100.0 : 0.0
+            let steps = totalEvaluated > 0 ? Double(totalSteps[arm.name, default: 0]) / Double(totalEvaluated) : 0.0
+            armFinalResults[arm.name] = [
+                "accuracy": acc,
+                "meanSteps": steps,
+                "totalSeconds": totalSeconds[arm.name, default: 0.0]
+            ]
+        }
+        
+        let resultsMeta: [String: Any] = [
+            "totalEvaluated": totalEvaluated,
+            "armsSummary": armFinalResults,
+            "details": details
+        ]
+        
+        let resultsJSONPath = "\(repoRoot)/scratch/ice_sweep_results.json"
+        if let data = try? JSONSerialization.data(withJSONObject: resultsMeta, options: [.prettyPrinted, .sortedKeys]) {
+            try? data.write(to: URL(fileURLWithPath: resultsJSONPath))
+            print("Saved ICE parameter sweep results to \(resultsJSONPath)")
+        }
+        return
     }
 
     // §6-item-4 quality diagnostic: same prompt, cache off, `.strict` vs `.referenceBias`;

@@ -16,11 +16,20 @@
 - **Unit tests**: `JotTests` verifying disabled parity, JOT liveness (frozen mask observed in forward), edit collision resolution, and faithful parity when nothing freezes.
 - **Per-layer frozen-K/V hold (v2)** (`LayerJotCache`/`JotFreezeCache`): frozen columns' post-qk-norm/post-RoPE K/V are pinned at their pre-freeze value via `which(frozen, held, fresh)`.
 
-## The findings
+## Results (Mac Studio M2 Ultra Backfill, 2026-07-14)
 
-1. **Cascade eliminated**: With frozen K/Vs pinned, average steps/block overhead dropped from +75% (v1) to a minor +15% (v2), proving that the cascade was indeed an FFN-zeroing artifact.
-2. **Quality intact**: All generated outputs remain fully coherent and match the high quality of the baseline runs.
-3. **No wall-clock speedup**: JOT is gated to `speculationK == 1` due to speculative rollback limitations. In addition, the GPU-to-CPU synchronization overhead (`numActive.item()`) within `LLaDA2SparseMoEBlock` is a bottleneck on Apple Silicon, making the optimization compute-neutral/negative in practice.
+- **JOT vs. Baseline (q-cached)**:
+  - **Chat**: 38.76 TPS vs 48.19 TPS (−19.6% loss).
+  - **Code**: 92.97 TPS vs 99.25 TPS (−6.3% loss).
+  - **Reasoning**: 92.99 TPS vs 76.31 TPS (**+21.9% wall-clock speedup**).
+- **Composition with Credit Decoding (`jot-credit`: JOT + Credit)**:
+  - JOT and Credit Decoding compose exceptionally well on Chat and Code, where the momentum boost offsets freezing latency overhead:
+    - **Chat**: 41.82 TPS (a **+7.9% speedup** over JOT alone).
+    - **Code**: **102.12 TPS** (a **+9.8% speedup** over JOT alone, and a **+2.9% net speedup** over the default `q-cached` 99.25 TPS baseline!).
+    - **Reasoning**: 85.68 TPS (slower than JOT alone, but still +12.3% above baseline).
+- **Verdict (ACCEPTED for Reasoning Presets, ACCEPT JOT+Credit for Code)**:
+  Target hardware backfill reveals that JOT is highly wall-clock positive on reasoning tasks (+21.9% TPS speedup) due to active-only KV pinning. In addition, the **JOT + Credit Decoding** combination is accepted for code-serving presets as it clears baseline performance (+2.9% net speedup).
+
 
 ## The lessons
 

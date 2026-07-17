@@ -3,7 +3,7 @@ import Hub
 import Tokenizers
 
 /// A helper class wrapping swift-transformers AutoTokenizer for the LLaDA2 MoE Model.
-public class DiffusionTokenizer {
+public final class DiffusionTokenizer: @unchecked Sendable {
     public let tokenizer: any Tokenizer
     
     /// Special token IDs mandated by the model architecture:

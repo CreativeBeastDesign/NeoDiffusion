@@ -1,6 +1,7 @@
 import Foundation
 import MLX
 import MLXNN
+import Metal
 
 /// Self-attention block matching the reference `LLaDA2MoeAttention` (phase-2 §2.3):
 /// fused QKV (split order 16 Q / 4 K / 4 V on the head axis), optional per-head-dim
@@ -129,30 +130,12 @@ public final class LLaDA2Attention: Module {
         return dense(output)
     }
 
-    /// Faithful-JOT cache-aware attention (WP-3a v2). Identical to the cached forward above,
-    /// except the active window's K/V for **frozen** columns are held at their pre-freeze value
-    /// (`jot`), so every other position attends to a *constant* contribution from finalized
-    /// tokens. This is the representation-consistency fix for the v1 FFN-zeroing cascade: v1 let a
-    /// frozen token's K/V drift every step; here they never change once frozen.
-    ///
-    /// Hold/capture rule (`frozen` is the *entering-step* mask, matching the value passed to the
-    /// forward): `activeKeys = which(frozen, jot.keys, freshKeys)`, then `jot.keys = activeKeys`.
-    /// A column that is still active (`frozen == false`) refreshes to its fresh K/V *and* is
-    /// captured; once it freezes (enters as `true` on the following step) the captured value is
-    /// held unchanged — i.e. exactly its last full-compute (converged) representation. A column
-    /// that later unfreezes resumes refreshing automatically. On the first step `jot` is empty and
-    /// every column takes the fresh value.
-    ///
-    /// The frozen column's *fresh* K/V (computed here from a hidden state whose MoE was skipped)
-    /// is never used — it is overwritten by the hold — so the MoE skip in
-    /// ``LLaDA2SparseMoEBlock`` stays harmless: the skipped hidden is invisible to neighbours.
-    ///
-    /// - Parameters:
-    ///   - jot: this layer's frozen-K/V hold, updated in place.
-    ///   - frozen: entering-step frozen mask `[1, L]` Bool over the active window.
+    /// Faithful-JOT cache-aware attention (WP-3a v2) + FlashBlock (WP-3b).
     public func callAsFunction(
         _ x: MLXArray, cos: MLXArray, sin: MLXArray, cache: LayerKVCache,
-        jot: LayerJotCache, frozen: MLXArray, mask: MLXArray? = nil
+        jot: LayerJotCache, frozen: MLXArray, mask: MLXArray? = nil,
+        flashBlockEnabled: Bool = false, flashBlockTau: Int = 4,
+        isFirstStepOfBlock: Bool = false, dirtyPerSeq: [Int] = [0]
     ) -> MLXArray {
         let B = x.dim(0)
         let L = x.dim(1)
@@ -182,6 +165,87 @@ public final class LLaDA2Attention: Module {
 
         cache.pendingKeys = activeKeys
         cache.pendingValues = activeValues
+
+        let committedLen = cache.committedLength
+
+        if flashBlockEnabled && committedLen > 0 {
+            // Lazy init FlashBlockRunner on the cache
+            if cache.flashBlockRunner == nil {
+                let config = FlashBlockConfig(
+                    numSeqs: B,
+                    blockLen: L,
+                    numQHeads: numHeads,
+                    numKVHeads: numKVHeads,
+                    headDim: headDim,
+                    pageSize: 256,
+                    maxPagesPerSeq: 64,
+                    blockM: 32,
+                    blockN: 32,
+                    tau: flashBlockTau
+                )
+                do {
+                    cache.flashBlockRunner = try FlashBlockRunner(config: config)
+                    
+                    // Allocate blockTables as a static MLXArray: [0, 1, 2, ..., 63] (32-bit int)
+                    cache.blockTables = MLXArray(0..<Int32(64)).expandedDimensions(axis: 0) // shape [1, 64]
+                } catch {
+                    fatalError("Failed to initialize FlashBlockRunner: \(error)")
+                }
+            }
+            
+            guard let runner = cache.flashBlockRunner else {
+                fatalError("FlashBlockRunner is nil")
+            }
+            
+            // Transpose inputs to FlashBlock layout: [Nq, H, D] where Nq = B * L
+            let qContiguous = queries.transposed(0, 2, 1, 3).reshaped(B * L, numHeads, headDim).contiguous()
+            let kContiguous = activeKeys.transposed(0, 2, 1, 3).reshaped(B * L, numKVHeads, headDim).contiguous()
+            let vContiguous = activeValues.transposed(0, 2, 1, 3).reshaped(B * L, numKVHeads, headDim).contiguous()
+            
+            // Get caches
+            guard let cacheKeys = cache.keys, let cacheValues = cache.values else {
+                fatalError("ExactPrefixCache keys/values are empty but we are in decoding loop")
+            }
+            
+            let cacheKeysContiguous = cacheKeys.transposed(0, 2, 1, 3).reshaped(committedLen, numKVHeads, headDim).contiguous()
+            let cacheValuesContiguous = cacheValues.transposed(0, 2, 1, 3).reshaped(committedLen, numKVHeads, headDim).contiguous()
+            
+            // Set up ctx lens as a [1] int32 array
+            let ctxLens = MLXArray([Int32(committedLen)])
+            
+            // Set up dirty mask: uchar [numSeqs, blockLen] (1 - frozen)
+            let dirtyMask = (MLXArray.ones(like: frozen) - frozen.asType(.int32)).asType(.uint8).contiguous()
+            
+            // Get past caches (A_out, L_out). If first step of block, allocate them
+            let attnOutPast = cache.attnOutPast ?? MLXArray.zeros([B * L, numHeads, headDim], dtype: .float32)
+            let logsumexp = cache.logsumexp ?? MLXArray.zeros([B * L, numHeads], dtype: .float32)
+            
+            // Decide step kind
+            let stepKind = runner.chooseStepKind(dirtyPerSeq: dirtyPerSeq, isFirstStepOfBlock: isFirstStepOfBlock)
+            
+            // Call forward on the runner (runs fully asynchronously on MLX stream!)
+            let results = runner.forward(
+                kind: stepKind,
+                Q: qContiguous,
+                Kcur: kContiguous,
+                Vcur: vContiguous,
+                kCache: cacheKeysContiguous,
+                vCache: cacheValuesContiguous,
+                blockTables: cache.blockTables!,
+                ctxLens: ctxLens,
+                attnOutPast: attnOutPast,
+                logsumexp: logsumexp,
+                dirtyMask: dirtyMask
+            )
+            
+            // Save past caches back to LayerKVCache
+            cache.attnOutPast = results.attnOutPast
+            cache.logsumexp = results.logsumexp
+            
+            // Wrap the output back into the expected MLX array shape [B, L, H * D]
+            let output = results.O.reshaped(B, L, numHeads * headDim)
+            return dense(output)
+        }
 
         let attended = Self.attend(
             queries: queries, keys: keys, values: values, scale: scale, mask: mask)

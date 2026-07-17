@@ -85,3 +85,16 @@ S mode: 225→187 (α=0.3) → 170 (α=0.6) chat; 90→89→82 reasoning; post/b
 3. **Early exit trigger = settled EOS, not "high-confidence EOS prediction"**: the fill requires the EOS to have been *written* by Γ/Δ (already past τ_mask/τ_edit), i.e. the confidence gate is the decoding threshold itself; a separate τ_eos is added only if the text-change rate is nonzero (André's condition).
 4. **Early exit fills rather than terminates**: remaining masked positions after the first EOS are filled with EOS in-graph and the loop exits through the normal settle break next step (one extra forward vs a hard break — K-invariant and preserves the commit-cleanliness contract; a hard in-graph break would need new break plumbing for ~1 forward/generation).
 5. **τ(t) applies to Γ only**; τ_edit static (§3 decision).
+
+## 7. Mac Studio M2 Ultra Backfill (2026-07-14)
+
+- **Telemetry Validity (`envValid`)**: Sourced from `scratch/llada_bench.jsonl`. Runs completed successfully with `envValid: true` (free memory > 98 GB, swap growth = 0 MB, totalMemoryMB output verified).
+- **Wall-Clock Serving Throughput (dyntau/p3-combo vs baseline)**:
+  - Dynamic τ (α=0.6) was evaluated as part of the `p3-combo` arm, achieving −14.8% (chat) and −11.3% (reasoning) step reduction. However, the MultiBD slot latency multiplier overrides this, yielding a net-negative wall-clock TPS (-12.3% to -20.4%).
+  - Composition with Credit Decoding (`p4-combo`): adding Credit Decoding to MultiBD + Dynamic-τ recovers serving performance on chat, reaching **45.55 TPS** (only −5.5% behind baseline).
+- **Suffix Pruning (2b-1) and EOS Early Exit (2b-3)**:
+  - Suffix pruning is closed N/A.
+  - EOS early exit is verified as a complete mechanistic null under clean environment testing.
+- **Verdict (ACCEPTED for serving presets only, default off)**:
+  Dynamic τ (α=0.6) is accepted as a serving preset option (available within the `p3-combo` preset) for step-limited long-form generations, but is disabled by default for generic real-time serving.
+

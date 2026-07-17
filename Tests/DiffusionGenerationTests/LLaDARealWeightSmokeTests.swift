@@ -75,7 +75,7 @@ final class LLaDARealWeightSmokeTests: XCTestCase {
             output.metrics.forwardsEvaluated, output.syncPoints,
             output.metrics.prefillSeconds, output.metrics.denoiseSeconds,
             output.metrics.commitSeconds,
-            Double(GPU.peakMemory) / 1_073_741_824,
+            Double(Memory.peakMemory) / 1_073_741_824,
             output.tokens.count < params.genLength ? "yes" : "no"))
 
         // Task-level sanity, labelled as such (one-prompt eyeball tier — the Sumi campaign's

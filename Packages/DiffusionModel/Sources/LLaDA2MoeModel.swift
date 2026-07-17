@@ -47,22 +47,51 @@ public class LLaDA2MoeModel: Module {
     ///     block, the block-causal active-window mask for a two-block window (WP-1b)
     public func callAsFunction(
         _ activeIds: MLXArray, positionIds: MLXArray, caches: [LayerKVCache],
-        mask: MLXArray? = nil, frozen: MLXArray? = nil
+        mask: MLXArray? = nil, frozen: MLXArray? = nil, ablation: ModuleAblation = .none,
+        reuseRouter: Bool = false
     ) -> MLXArray {
-        let hidden = model(activeIds, positionIds: positionIds, caches: caches, mask: mask, frozen: frozen)
-        return lmHead(hidden).asType(.float32)
+        let hidden = model(activeIds, positionIds: positionIds, caches: caches, mask: mask,
+                           frozen: frozen, ablation: ablation, reuseRouter: reuseRouter)
+        return applyLMHead(hidden, ablation: ablation)
     }
 
-    /// Faithful-JOT cache-aware forward (WP-3a v2): active-window hidden states through the cached
+    /// LM head, with the `.lmHead` diagnostic ablation (see ``ModuleAblation``). Substitutes a
+    /// broadcast constant of the same `[.., vocab]` shape — not materialised — so the delta from
+    /// `.none` is the [hidden → vocab] projection's own cost.
+    func applyLMHead(_ hidden: MLXArray, ablation: ModuleAblation) -> MLXArray {
+        guard ablation == .lmHead else { return lmHead(hidden).asType(.float32) }
+        // The substitute MUST depend on `hidden`.
+        //
+        // The first version returned a plain constant. That made the logits independent of the
+        // transformer stack, so **MLX dead-code-eliminated the entire model** — every layer,
+        // embedding included — and the arm reported lm_head at 86% of the forward (impossible;
+        // gather_qmm alone is 42.9%). Caught by the §5.7 sanity gate, not by a test: a timing
+        // check cannot tell "this module is free" from "this module was deleted", which is the
+        // same trap `.moeExpertGEMMs` was explicitly built to avoid.
+        //
+        // Summing hidden's channels is O(H) per position — negligible against a
+        // [hiddenSize × 157184] projection — and keeps the whole stack alive.
+        var shape = hidden.shape
+        shape[shape.count - 1] = lmHead.weight.dim(0)  // [vocabSize, hiddenSize]
+        let probe = hidden.sum(axis: -1, keepDims: true).asType(.float32)  // [..., 1]
+        return broadcast(probe, to: shape)
+    }
+
+    /// Faithful-JOT cache-aware forward (WP-3a v2) + FlashBlock (WP-3b): active-window hidden states through the cached
     /// stack with per-layer frozen-K/V holds, then the FP32 output head. Returns `[1, A, vocab]`.
     public func callAsFunction(
         _ activeIds: MLXArray, positionIds: MLXArray, caches: [LayerKVCache],
-        jotCaches: [LayerJotCache], frozen: MLXArray, mask: MLXArray? = nil, capacity: Int? = nil
+        jotCaches: [LayerJotCache], frozen: MLXArray, mask: MLXArray? = nil, capacity: Int? = nil,
+        flashBlockEnabled: Bool = false, flashBlockTau: Int = 4, isFirstStepOfBlock: Bool = false,
+        dirtyPerSeq: [Int] = [0], ablation: ModuleAblation = .none
     ) -> MLXArray {
         let hidden = model(
             activeIds, positionIds: positionIds, caches: caches,
-            jotCaches: jotCaches, frozen: frozen, mask: mask, capacity: capacity)
-        return lmHead(hidden).asType(.float32)
+            jotCaches: jotCaches, frozen: frozen, mask: mask, capacity: capacity,
+            flashBlockEnabled: flashBlockEnabled, flashBlockTau: flashBlockTau,
+            isFirstStepOfBlock: isFirstStepOfBlock, dirtyPerSeq: dirtyPerSeq,
+            ablation: ablation)
+        return applyLMHead(hidden, ablation: ablation)
     }
 
     /// Elastic-Cache aware model forward pass (WP-1a).
@@ -160,23 +189,27 @@ public class LLaDA2MoeInnerModel: Module {
     /// (its `pending*` set to this window's K/V) for a later commit.
     public func callAsFunction(
         _ activeIds: MLXArray, positionIds: MLXArray, caches: [LayerKVCache],
-        mask: MLXArray? = nil, frozen: MLXArray? = nil
+        mask: MLXArray? = nil, frozen: MLXArray? = nil, ablation: ModuleAblation = .none,
+        reuseRouter: Bool = false
     ) -> MLXArray {
         precondition(caches.count == layers.count, "one cache per layer required")
         var hidden = wordEmbeddings(activeIds)
         let (cos, sin) = rotaryEmbedding.cosSin(positionIds: positionIds)
         for (layer, cache) in zip(layers, caches) {
-            hidden = layer(hidden, cos: cos, sin: sin, cache: cache, mask: mask, frozen: frozen)
+            hidden = layer(hidden, cos: cos, sin: sin, cache: cache, mask: mask, frozen: frozen,
+                           ablation: ablation, reuseRouter: reuseRouter)
         }
         return norm(hidden)
     }
 
-    /// Faithful-JOT cache-aware inner forward (WP-3a v2): as the M5 cached forward, but each layer
+    /// Faithful-JOT cache-aware inner forward (WP-3a v2) + FlashBlock (WP-3b): as the M5 cached forward, but each layer
     /// holds frozen columns' K/V via its ``LayerJotCache`` so finalized tokens keep a constant
     /// representation. `jotCaches` and `caches` are both aligned with `layers` and updated in place.
     public func callAsFunction(
         _ activeIds: MLXArray, positionIds: MLXArray, caches: [LayerKVCache],
-        jotCaches: [LayerJotCache], frozen: MLXArray, mask: MLXArray? = nil, capacity: Int? = nil
+        jotCaches: [LayerJotCache], frozen: MLXArray, mask: MLXArray? = nil, capacity: Int? = nil,
+        flashBlockEnabled: Bool = false, flashBlockTau: Int = 4, isFirstStepOfBlock: Bool = false,
+        dirtyPerSeq: [Int] = [0], ablation: ModuleAblation = .none
     ) -> MLXArray {
         precondition(caches.count == layers.count, "one cache per layer required")
         precondition(jotCaches.count == layers.count, "one jot cache per layer required")
@@ -185,7 +218,10 @@ public class LLaDA2MoeInnerModel: Module {
         for i in 0 ..< layers.count {
             hidden = layers[i](
                 hidden, cos: cos, sin: sin, cache: caches[i],
-                jot: jotCaches[i], frozen: frozen, mask: mask, capacity: capacity)
+                jot: jotCaches[i], frozen: frozen, mask: mask, capacity: capacity,
+                flashBlockEnabled: flashBlockEnabled, flashBlockTau: flashBlockTau,
+                isFirstStepOfBlock: isFirstStepOfBlock, dirtyPerSeq: dirtyPerSeq,
+                ablation: ablation)
         }
         return norm(hidden)
     }

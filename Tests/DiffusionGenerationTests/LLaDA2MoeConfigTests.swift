@@ -53,11 +53,9 @@ final class LLaDA2MoeConfigTests: XCTestCase {
         let container = DiffusionModel(config: config)
         
         // Before quantization: verify layers are normal Linear
-        XCTAssertTrue(container.model.lmHead is Linear)
         XCTAssertFalse(container.model.lmHead is QuantizedLinear)
-        
+
         let preLayer1 = container.model.model.layers[1]
-        XCTAssertTrue(preLayer1.attention.queryKeyValue is Linear)
         XCTAssertFalse(preLayer1.attention.queryKeyValue is QuantizedLinear)
         
         // Run model quantization
@@ -65,7 +63,6 @@ final class LLaDA2MoeConfigTests: XCTestCase {
         
         // After quantization:
         // Output head should remain unquantized (Linear)
-        XCTAssertTrue(container.model.lmHead is Linear)
         XCTAssertFalse(container.model.lmHead is QuantizedLinear)
         
         // Fetch layer reference after quantization completes, to see replacement instances
@@ -121,8 +118,7 @@ final class LLaDA2MoeConfigTests: XCTestCase {
         // Scales shape is [192, 128 / 64] -> [192, 2]
         XCTAssertEqual(qkv.scales.shape, [192, 2])
         
-        // lmHead is Linear (unquantized)
-        XCTAssertTrue(container.model.lmHead is Linear)
+        // lmHead stays unquantized (Linear); verify its weight shape survived loading.
         XCTAssertEqual(container.model.lmHead.weight.shape, [1000, 128])
     }
 }

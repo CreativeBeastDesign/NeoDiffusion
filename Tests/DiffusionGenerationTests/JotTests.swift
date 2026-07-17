@@ -245,11 +245,45 @@ final class JotTests: XCTestCase {
         XCTAssertEqual(output.tokens[14], 0)
     }
 
-    func testBoolIndexing() throws {
-        let x = MLXArray(0..<10).reshaped([5, 2])
-        let mask = MLXArray([true, false, true, false, true])
-        let indexed = x[mask]
-        print("Indexed array shape:", indexed.shape)
-        XCTAssertEqual(indexed.shape, [3, 2])
+    func testFlashBlockParity() throws {
+        try XCTSkipUnless(
+            [64, 96, 128].contains(manifest.config.headDim),
+            "FlashBlockRunner requires headDim in {64,96,128}; toy fixture uses \(manifest.config.headDim)")
+        for c in traces.cases {
+            var pFlash = c.params.toGenerationParams()
+            pFlash.flashBlockEnabled = true
+            pFlash.flashBlockTau = 0
+            
+            var pBase = c.params.toGenerationParams()
+            pBase.flashBlockEnabled = false
+            
+            let flash = DiffusionEngine(model: model, speculationK: 1)
+                .generateCached(prompt: c.prompt, params: pFlash)
+            let base = DiffusionEngine(model: model, speculationK: 1)
+                .generateCached(prompt: c.prompt, params: pBase)
+                
+            XCTAssertEqual(flash.finalSequence, base.finalSequence, "\(c.name): flashBlock (tau=0) != cached baseline")
+        }
+    }
+
+    func testFlashBlockParityTau999() throws {
+        try XCTSkipUnless(
+            [64, 96, 128].contains(manifest.config.headDim),
+            "FlashBlockRunner requires headDim in {64,96,128}; toy fixture uses \(manifest.config.headDim)")
+        for c in traces.cases {
+            var pFlash = c.params.toGenerationParams()
+            pFlash.flashBlockEnabled = true
+            pFlash.flashBlockTau = 999
+            
+            var pBase = c.params.toGenerationParams()
+            pBase.flashBlockEnabled = false
+            
+            let flash = DiffusionEngine(model: model, speculationK: 1)
+                .generateCached(prompt: c.prompt, params: pFlash)
+            let base = DiffusionEngine(model: model, speculationK: 1)
+                .generateCached(prompt: c.prompt, params: pBase)
+                
+            XCTAssertEqual(flash.finalSequence, base.finalSequence, "\(c.name): flashBlock (tau=999) != cached baseline")
+        }
     }
 }

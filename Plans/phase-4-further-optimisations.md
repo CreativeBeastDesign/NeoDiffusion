@@ -55,6 +55,11 @@ $$\text{Output } a^* = \operatorname{argmax}_a \sum_{t=t_{\text{start}}}^T e^{\a
 *   **Compute Cost**: **Zero additional forward passes**. The algorithm reuses intermediate states already computed by the generator, introducing only minimal CPU overhead for string clustering.
 *   **Memory Footprint**: Requires keeping a history of intermediate text outputs, which is negligible (few KB).
 
+### 4. Implementation notes (dev host, 2026-07-12)
+*   **Split of concerns.** The engine (`DiffusionEngine`) only *captures* the trajectory: when `temporalVotingEnabled`, an `onTrace` hook records `committedIds + argmax` per logical step into `Output.trajectorySequences`. The clustering + weighted vote lives entirely in the bench (`LLaDABench`).
+*   **"Semantic equivalence" is currently last-number match.** `extractLastNumber` reduces each intermediate decode to its final number and votes over those — i.e. TSCV as implemented is a **math-answer** mechanism, not general semantic clustering. General equivalence (e.g. normalized-string or embedding clusters) is future work.
+*   **Pairs naturally with the single-block ICE config.** With default block-32 decoding, the trajectory for an early block only contains that block's argmax (later blocks aren't predicted yet), so intermediate answers are truncated; the useful signal is strongest when the whole answer lives in one block (as in the ICE path).
+
 ---
 
 ## WP-4b: Guided Diffusion
@@ -107,6 +112,11 @@ $$\text{avg\_conf}_{\text{answer}} = \frac{1}{L_{\text{answer}}} \sum_{i \in \te
 ### 3. Apple Silicon Implications
 *   **Compute Reductions**: Since knowledge-intensive tasks (MMLU) exhibit rapid answer convergence, ICE can reduce steps/block by up to 10–50× on mobile/on-device reasoning tasks, cutting thermal throttling risks.
 
+### 4. Implementation notes (dev host, 2026-07-12)
+*   **Single-block-only in the current implementation.** The reasoning template is injected into one active block via `iceTemplate`, and the bench sizes that block to `promptLen + genLength` — so ICE is not composed with normal block-32 decoding or with MultiBD. Generalizing to multi-block reasoning is future work.
+*   **Prompt vs scaffold distinction.** Real prompt positions are tracked as `promptMask` (so `promptCount` and every generated-position denominator stay correct); only the scaffold template ids ("Step 1:", …) are marked `frozen`. Both are protected from Δ-editing, but only the scaffold is a frozen slot for JOT / capacity-gather purposes. (Corrected 2026-07-12 — the initial implementation mislabeled prompt positions as frozen with `promptCount = 0`.)
+*   The `thinkingMasksLeft == 0` forced early-exit is load-bearing: without it the block could settle (mask-free over the thinking region) while the answer region is still masked, committing masks. The early-exit wins the same-step tie against `frontBreak`.
+
 ---
 
 ## WP-4d: Credit Decoding
@@ -133,6 +143,11 @@ $$\tilde{f}_\theta(x_t)_i^v = f_\theta(x_t)_i^v + \alpha \cdot \log(1 + C_{i,v}^
 
 ### 3. Apple Silicon Implications
 *   **Metal Implementation**: The credit accumulation matrix must be kept in unified memory and updated via a fused sampler kernel to prevent CPU-GPU synchronization bubbles.
+
+### 4. Implementation notes (dev host, 2026-07-12)
+*   **Boost scoped to the Γ (unmasking) pathway — deviation from a naive all-logits boost.** The credit-enhanced logits set only a *masked* position's confidence for the τ_mask test and the token written when it unmasks. Δ-editing, JOT freezing, the ICE answer-confidence signal, and all diagnostics run on the **raw** predictions. Rationale: dInfer's credit mechanism targets masked-position decoding; applying it to every logit also re-biases decisions on already-decoded positions, which is outside the mechanism and entangles credit with the other Phase-3/4 levers. `DiffusionEngine.windowStep` splits `x0/x0p` (raw) from `unmaskConf/unmaskTok` (enhanced) accordingly.
+*   **Status: implemented + unit-verified, not accepted.** Cached/uncached parity, K-invariance, and synthetic liveness pass. Logical-step reduction is directionally measured but pre-dates the scoping fix and must be re-run; wall-clock is confounded by dev-host paging; no blind quality gate has been run. See `Plans/wiki-drafts/wp-4d-credit-decoding.md`.
+*   **Credit matrix is dense `[1, A, V]`** though structurally sparse (only each position's historical top candidate accrues credit); a scatter `[1, A]` representation is the pending optimisation.
 
 ---
 
