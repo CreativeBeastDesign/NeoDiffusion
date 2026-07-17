@@ -149,8 +149,9 @@ public final class FlashBlockRunner {
                         const uint j = e / uint(HEAD_DIM);
                         const uint d = e % uint(HEAD_DIM);
                         if (int(j) < actual) {
+                            const int safe_j = min(int(j), actual - 1);
                             const uint src =
-                                ((page_id * uint(PAGE_SIZE) + uint(tn) + j) * uint(P.num_kv_heads) + kh)
+                                ((page_id * uint(PAGE_SIZE) + uint(tn) + safe_j) * uint(P.num_kv_heads) + kh)
                                 * uint(HEAD_DIM) + d;
                             Ktile[e] = K_page[src];
                             Vtile[e] = V_page[src];
@@ -225,7 +226,8 @@ public final class FlashBlockRunner {
                     const uint j = e / uint(HEAD_DIM);
                     const uint d = e % uint(HEAD_DIM);
                     if (int(j) < actual) {
-                        const uint src_row = seq * uint(B) + uint(tn) + j;
+                        const int safe_j = min(int(j), actual - 1);
+                        const uint src_row = seq * uint(B) + uint(tn) + safe_j;
                         const uint src =
                             (src_row * uint(P.num_kv_heads) + kh) * uint(HEAD_DIM) + d;
                         Ktile[e] = K_cur[src];

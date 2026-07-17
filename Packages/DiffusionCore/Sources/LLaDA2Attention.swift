@@ -180,7 +180,7 @@ public final class LLaDA2Attention: Module {
                     pageSize: 256,
                     maxPagesPerSeq: 64,
                     blockM: 32,
-                    blockN: 64,
+                    blockN: 32,
                     tau: flashBlockTau
                 )
                 do {
