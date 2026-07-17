@@ -358,7 +358,7 @@ public final class LLaDA2SparseMoEBlock: Module {
                 .asType(x.dtype)
             if let sharedExperts { combined = combined + sharedExperts(flat) }
             return combined.reshaped(shape)
-        case .none, .attention, .lmHead:
+        case .none, .attention, .lmHead, .layerNorms:
             break  // handled elsewhere (decoder layer / model head); the MoE runs normally.
         }
 

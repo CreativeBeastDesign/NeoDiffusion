@@ -88,7 +88,7 @@ final class ModuleAblationTests: XCTestCase {
             let base = DiffusionEngine(model: model, speculationK: 4)
                 .generateCached(prompt: c.prompt, params: p)
 
-            for ablation: ModuleAblation in [.moeRoutedExperts, .moeExpertGEMMs, .moeFixedExperts, .moeAll, .attention] {
+            for ablation: ModuleAblation in [.moeRoutedExperts, .moeExpertGEMMs, .moeFixedExperts, .moeAll, .attention, .layerNorms] {
                 var pa = p
                 pa.moduleAblation = ablation
                 let out = DiffusionEngine(model: model, speculationK: 4)

@@ -93,4 +93,14 @@ public enum ModuleAblation: String, Sendable, Codable, CaseIterable {
     /// Skip the attention residual add. Delta from ``none`` is attention's **total** cost including
     /// KV-cache growth (the cache never fills in this arm) — not "attention math only".
     case attention
+
+    /// Replace the two per-layer RMSNorms (`input_layernorm`, `post_attention_layernorm`) with
+    /// identity across all 20 layers — 40 of the model's ~41 RMSNorm sites. Delta from ``none``
+    /// splits the norms term out of the ~21% "remainder" (final-plan Step 3). **Scope caveat**
+    /// (stated, not corrected): this excludes the per-head qk-norm (inside `attention`) and the
+    /// single final norm, so it is a norms *lower bound* — the two layer norms dominate the count.
+    /// Skipping normalization scales the residual stream to garbage; harmless, since the metric is
+    /// ms/forward. Not eliminable: the un-normalized `x`/`hidden` still flow into attention and the
+    /// FFN, so both run in full.
+    case layerNorms
 }

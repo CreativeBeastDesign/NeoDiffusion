@@ -61,13 +61,16 @@ public final class LLaDA2DecoderLayer: Module {
         // `.attention` skips the attention residual add. The KV cache therefore never grows in
         // that arm, so the delta measures attention's *total* cost including cache growth — not
         // attention math in isolation. Intended; see ModuleAblation.
+        // `.layerNorms` replaces the two per-layer RMSNorms with identity (Step 3 norms probe).
+        let inNorm: (MLXArray) -> MLXArray = ablation == .layerNorms ? { $0 } : { self.inputLayernorm($0) }
+        let postNorm: (MLXArray) -> MLXArray = ablation == .layerNorms ? { $0 } : { self.postAttentionLayernorm($0) }
         var hidden: MLXArray
         if ablation == .attention {
             hidden = x
         } else {
-            hidden = x + attention(inputLayernorm(x), cos: cos, sin: sin, cache: cache, mask: mask)
+            hidden = x + attention(inNorm(x), cos: cos, sin: sin, cache: cache, mask: mask)
         }
-        let ffnInput = postAttentionLayernorm(hidden)
+        let ffnInput = postNorm(hidden)
         let ffnOutput: MLXArray
         switch mlp {
         case let dense as LLaDA2MLP: ffnOutput = dense(ffnInput)
@@ -99,16 +102,19 @@ public final class LLaDA2DecoderLayer: Module {
         // `.attention` skips the attention residual add entirely. Note this also means the KV
         // cache never grows in that arm, so the measured delta is attention's *total* cost
         // including cache growth — not attention math in isolation. Intended; see ModuleAblation.
+        // `.layerNorms` replaces the two per-layer RMSNorms with identity (Step 3 norms probe).
+        let inNorm: (MLXArray) -> MLXArray = ablation == .layerNorms ? { $0 } : { self.inputLayernorm($0) }
+        let postNorm: (MLXArray) -> MLXArray = ablation == .layerNorms ? { $0 } : { self.postAttentionLayernorm($0) }
         var hidden: MLXArray
         if ablation == .attention {
             hidden = x
         } else {
             hidden = x + attention(
-                inputLayernorm(x), cos: cos, sin: sin, cache: cache, jot: jot, frozen: frozen, mask: mask,
+                inNorm(x), cos: cos, sin: sin, cache: cache, jot: jot, frozen: frozen, mask: mask,
                 flashBlockEnabled: flashBlockEnabled, flashBlockTau: flashBlockTau,
                 isFirstStepOfBlock: isFirstStepOfBlock, dirtyPerSeq: dirtyPerSeq)
         }
-        let ffnInput = postAttentionLayernorm(hidden)
+        let ffnInput = postNorm(hidden)
         let ffnOutput: MLXArray
         switch mlp {
         case let dense as LLaDA2MLP: ffnOutput = dense(ffnInput)
