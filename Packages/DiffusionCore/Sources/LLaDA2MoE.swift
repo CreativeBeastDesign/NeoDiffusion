@@ -397,11 +397,16 @@ public final class LLaDA2SparseMoEBlock: Module {
         var combined: MLXArray
         // Adaptive Dispatcher (WP-6a):
         // Resolves SIMD divergence on routed experts by sorting indices flat on the GPU.
-        // Crossover break-even point is shape-dependent (Mini: 192, Flash: 128) due to GEMM sizes.
-        // At low T (e.g. single-request decode/prefill chunked at B=32/64), we bypass sorting to
-        // avoid sorting overhead. At larger T (e.g. future batch serving, speculative loops, or
-        // increased blockLength configuration), we automatically trigger the globally-sorted GPU path.
-        let crossover = flat.dim(1) >= 4096 ? 128 : 192
+        // Crossover break-even T (sort-overhead vs GEMM-divergence savings). Re-measured on the
+        // M2 Ultro under MLX core 0.31.1 (final-plan P10/F-h, 2026-07-17): BOTH Mini (H=2048) and
+        // Flash (H=4096) now break even at ~128 — the Mini crossover fell from 192 (measured under
+        // 0.31.4, where T=128 was a 0.972× regression) to a 1.070× win at T=128, so the old
+        // shape-branch (`>=4096 ? 128 : 192`) is obsolete and collapses to a constant. Caveat:
+        // measured with uniform-random indices — valid for the break-even shift, not the real-routing
+        // absolute point. Dormant at the served blockLength=32 (T=32, where sorting still loses).
+        // At low T (single-request decode/prefill at B=32/64) we bypass sorting; at larger T (batch
+        // serving, speculative loops, larger blockLength) we trigger the globally-sorted GPU path.
+        let crossover = 128
         if T >= crossover {
             let K_size = indices.dim(1)
             let indicesFlat = indices.flattened()

@@ -29,7 +29,7 @@ def fizzbuzz(n):
     Returns:
 ```
 
-C: __  I: __  F: __
+C: 5  I: 5  F: -
 
 
 ### Output B
@@ -53,10 +53,10 @@ def fizzbuzz(n):
     Returns:
 ```
 
-C: __  I: __  F: __
+C: 5  I: 5  F: -
 
 
-**Overall (A/B/tie)**: __
+**Overall (A/B/tie)**: tie
 
 
 ## code-regex
@@ -84,7 +84,7 @@ Here's a regular expression that matches ISO-8601 dates in the format `YYYY-MM-D
    -
 ```
 
-C: __  I: __  F: __
+C: 5  I: 4  F: 5
 
 
 ### Output B
@@ -107,10 +107,10 @@ Here's a regular expression that matches ISO-8601 dates in the format `YYYY-MM-D
    -
 ```
 
-C: __  I: __  F: __
+C: 5  I: 4  F: 5
 
 
-**Overall (A/B/tie)**: __
+**Overall (A/B/tie)**: tie
 
 
 ## code-sql
@@ -144,7 +144,7 @@ FROM orders
 WHERE created_at >= '2025-01-01
 ```
 
-C: __  I: __  F: __
+C: 5  I: 5  F: 4
 
 
 ### Output B
@@ -173,10 +173,10 @@ FROM orders
 WHERE created_at >= '2025-01-01
 ```
 
-C: __  I: __  F: __
+C: 5  I: 5  F: 5
 
 
-**Overall (A/B/tie)**: __
+**Overall (A/B/tie)**: B
 
 
 ## code-swift-struct
@@ -206,7 +206,7 @@ let point1 = Point(x: 0.0, y: 0.0)
 let point2
 ```
 
-C: __  I: __  F: __
+C: 5  I: 5  F: 5
 
 
 ### Output B
@@ -231,10 +231,10 @@ let point1 = Point(x: 0.0, y: 0.0)
 let point2 =
 ```
 
-C: __  I: __  F: __
+C: 3  I: 5  F: 2
 
 
-**Overall (A/B/tie)**: __
+**Overall (A/B/tie)**: A
 
 
 ## reason-ages
@@ -272,7 +272,7 @@ Let’s define:
 
 ```
 
-C: __  I: __  F: __
+C: 2  I: 3  F: -
 
 
 ### Output B
@@ -300,10 +300,10 @@ Let’s define:
 - Ben
 ```
 
-C: __  I: __  F: __
+C: 5  I: 4  F: -
 
 
-**Overall (A/B/tie)**: __
+**Overall (A/B/tie)**: B
 
 
 ## reason-logic
@@ -317,7 +317,7 @@ C: __  I: __  F: __
 No. The fact that all roses are flowers and that some flowers fade quickly does not necessarily that that some roses fade quickly, because the flowers that fade quickly might not be roses at all.<|role_end|><|endoftext|>
 ```
 
-C: __  I: __  F: __
+C: 4  I: 5  F: 5
 
 
 ### Output B
@@ -326,10 +326,10 @@ C: __  I: __  F: __
 No. The fact that all roses are flowers and that some flowers fade quickly does not necessarily that that some roses fade quickly, because the flowers that fade quickly might not include any roses at all.<|role_end|><|endoftext|>
 ```
 
-C: __  I: __  F: __
+C: 4  I: 5  F: 5
 
 
-**Overall (A/B/tie)**: __
+**Overall (A/B/tie)**: tie
 
 
 ## reason-trains
@@ -359,7 +359,7 @@ $$
 
 ```
 
-C: __  I: __  F: __
+C: 5  I: 4  F: 5
 
 
 ### Output B
@@ -382,10 +382,10 @@ $$
 ### Step 2: Time to
 ```
 
-C: __  I: __  F: __
+C: 5  I: 4  F: 5
 
 
-**Overall (A/B/tie)**: __
+**Overall (A/B/tie)**: B
 
 
 ## reason-units
@@ -410,7 +410,7 @@ So, you need to fill the 1/3-cup measure **2.25 times**.
 
 ```
 
-C: __  I: __  F: __
+C: 5  I: 4  F: 5
 
 
 ### Output B
@@ -431,7 +431,7 @@ So, you need to fill the 1/3-cup measure **2.25 times**.
 ### Step 
 ```
 
-C: __  I: __  F: __
+C: 5  I: 4  F: 5
 
 
-**Overall (A/B/tie)**: __
+**Overall (A/B/tie)**: A

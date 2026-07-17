@@ -169,3 +169,16 @@ Three things follow, and they resolve §8's open questions rather than complicat
 **F16 — α=0.3 is the systematically lower-churn point (post/blk 1.10–1.18 vs 1.35–1.70), i.e. the lower corruption risk per F9.** (sourced) This reframes the preset question. It is no longer "α=0.6 or off per suite"; it is a genuine quality/speed trade *within* the accepted suites: reasoning α=0.6 buys +4.8pp TPS (14.1 vs 9.3) at +0.6 post/blk of churn over α=0.3. Whether that edge is real quality-neutral throughput or churn that a sheet would catch is exactly what the Studio blind sheet must now decide.
 
 **Revised blind-sheet scope (supersedes §8's "reasoning α=0.6 only")**: the Studio sheet should score **reasoning at α=0.3 and α=0.6** (to price the churn trade) **and code at α=0.3** (newly a live preset candidate, never scored). Chat needs no sheet — it is closed. This is the item André approved 2026-07-17.
+
+## 10. Step-1 blind sheet SCORED → α=0.3 is the answer; α=0.6 rejected everywhere (2026-07-17)
+
+**Scores** (`blinds/step1_blind/`, André, scored against sealed key; two A/B comparisons in one 8-prompt sheet):
+
+- **reasoning, α=0.3 vs α=0.6**: **α0.3 2 wins, α0.6 1, 1 tie.** α0.6 visibly corrupted `reason-ages` ("statement statement:", "AnnaAnna is as old" — C:2 I:3 vs α0.3's C:5 I:4); α0.3 also won `reason-trains`; α0.6 won only `reason-units`; `reason-logic` tie.
+- **code, static vs α=0.3**: **1 win each, 2 ties.** The two byte-identical pairs (`fizzbuzz`, `regex`) tied as expected; the one static win (`code-sql`) is a minor F4-vs-5; α0.3's win (`code-swift-struct`) is because *static* emitted buggy Swift ("other.x -.x", "other.y - other.y"). No systematic α0.3 degradation.
+
+**F17 — α=0.3 wins the quality gate; α=0.6's TPS edge on reasoning is churn, not free throughput.** (sourced) §9 had reasoning α=0.6 ahead on TPS (+14.1% vs +9.3%) and F16 flagged its post/blk 1.70 as a corruption risk; the sheet confirms it — α=0.6 corrupts 1/4 reasoning prompts and loses the comparison to α=0.3. **Reasoning flips from α=0.6 (the speed winner) to α=0.3 (the quality winner).** Code α=0.3 is quality-neutral vs its baseline. Chat is closed (dead on TPS, §9). Net served shape: **dyn-τ α=0.3 for reasoning and code, off for chat; α=0.6 rejected on every suite** (chat dead, reasoning corrupts). The lower-churn point wins outright — F16's prediction, now scored.
+
+**F18 — the Studio sheet contradicts the dev sheet on reasoning α=0.6, confirming F14.** (sourced) The dev sheet (§8) scored reasoning α=0.6 at 4/4 ties (clean); the Studio sheet shows it corrupting. Dev-host quality does not transfer verbatim — the same caveat that reversed the chat *step* sign (F14) also moves the *quality* verdict. The Studio sheet is the one that governs a served preset.
+
+**Disposition**: `dynamicTauAlpha` stays landed, **global default off** (chat α=0.3 quality is unscored and chat TPS is only +0.5%, so there is no case for forcing it globally). **α=0.3 is validated as a per-suite preset for reasoning and code** — the served-preset end state, to be wired where the server can select by request class. The Step-1 quality gate is CLOSED.
