@@ -1,0 +1,108 @@
+{
+ "sourceTraces": "scratch/wp2a_traces.jsonl",
+ "graphs": {
+  "D3": {
+   "formulas": [
+    [
+     2
+    ],
+    [
+     3
+    ],
+    [
+     4
+    ]
+   ],
+   "coveredSteps": 794,
+   "coverageOfDraftable": 0.6131274131274131,
+   "projectedForwardSavings": 0.27550312283136713
+  },
+  "D5": {
+   "formulas": [
+    [
+     2
+    ],
+    [
+     3
+    ],
+    [
+     4
+    ],
+    [
+     5
+    ],
+    [
+     6
+    ]
+   ],
+   "coveredSteps": 927,
+   "coverageOfDraftable": 0.7158301158301158,
+   "projectedForwardSavings": 0.32165163081193615
+  },
+  "D8": {
+   "formulas": [
+    [
+     2
+    ],
+    [
+     3
+    ],
+    [
+     4
+    ],
+    [
+     5
+    ],
+    [
+     6
+    ],
+    [
+     7
+    ],
+    [
+     2,
+     3
+    ],
+    [
+     8
+    ]
+   ],
+   "coveredSteps": 1014,
+   "coverageOfDraftable": 0.783011583011583,
+   "projectedForwardSavings": 0.3518390006939625
+  }
+ },
+ "perCategory": {
+  "chat": {
+   "steps": 545,
+   "draftable": 255,
+   "tokenMiss": 217,
+   "editAbort": 37
+  },
+  "reason": {
+   "steps": 308,
+   "draftable": 119,
+   "tokenMiss": 120,
+   "editAbort": 32
+  },
+  "code": {
+   "steps": 1139,
+   "draftable": 541,
+   "tokenMiss": 401,
+   "editAbort": 89
+  },
+  "de": {
+   "steps": 890,
+   "draftable": 380,
+   "tokenMiss": 356,
+   "editAbort": 111
+  }
+ },
+ "jot": {
+  "k": 4,
+  "positions": 3459,
+  "stable": 518,
+  "collisions": 25
+ },
+ "hash": "9eb8d6295c91"
+}
