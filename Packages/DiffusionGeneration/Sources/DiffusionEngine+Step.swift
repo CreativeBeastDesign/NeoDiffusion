@@ -45,6 +45,13 @@ extension DiffusionEngine {
         let frontPostAtBreak: Int
         /// The frozen-prefix length to commit early (valid on `.prefixCommit`; 0 otherwise).
         var prefixCommitN: Int = 0
+        // Step 3 (final-plan §2): sub-phase wall-clock summed over the phase's applied logical
+        // steps, non-zero only under `instrument`. forward/sampler/selection come from windowStep;
+        // loopControl is the batch readback (the one real sync). 0 on the served path.
+        var forwardSeconds: Double = 0
+        var samplerSeconds: Double = 0
+        var selectionSeconds: Double = 0
+        var loopControlSeconds: Double = 0
     }
 
     /// Run the current slot set until a scheduling event. Builds up to K speculative
@@ -80,6 +87,23 @@ extension DiffusionEngine {
         var syncPoints = 0
         var forwardsEvaluated = 0
         var tokensProcessed = 0
+        // Step 3 sub-phase accumulators (final-plan §2), summed across every windowStep the phase
+        // builds (honest overshoot accounting — matches `forwardsEvaluated += K`). Non-zero only
+        // under `instrument`. `makePhaseResult` stamps them onto whichever event returns.
+        var forwardSecondsAcc = 0.0
+        var samplerSecondsAcc = 0.0
+        var selectionSecondsAcc = 0.0
+        var loopControlSecondsAcc = 0.0
+        func makePhaseResult(
+            event: PhaseEvent, frontPostAtBreak: Int, prefixCommitN: Int = 0
+        ) -> PhaseResult {
+            PhaseResult(
+                event: event, syncPoints: syncPoints, forwards: forwardsEvaluated,
+                tokensProcessed: tokensProcessed, frontPostAtBreak: frontPostAtBreak,
+                prefixCommitN: prefixCommitN,
+                forwardSeconds: forwardSecondsAcc, samplerSeconds: samplerSecondsAcc,
+                selectionSeconds: selectionSecondsAcc, loopControlSeconds: loopControlSecondsAcc)
+        }
 
         var windowActive = S == 1 ? slots[0].active
             : concatenated(slots.map(\.active), axis: 1)
@@ -141,6 +165,9 @@ extension DiffusionEngine {
                     frozenMask: specFrozenMask,
                     isAnswerPhase: isAnswerPhase,
                     credit: specCredit)
+                forwardSecondsAcc += s.forwardSeconds
+                samplerSecondsAcc += s.samplerSeconds
+                selectionSecondsAcc += s.selectionSeconds
                 snapshots.append(s.resultWindow)
                 avgConfsPerStep.append(s.avgConfAnswer)
                 nextWindows.append(s.nextWindow)
@@ -165,6 +192,12 @@ extension DiffusionEngine {
             }
 
             // Single blocking readback of the 2K stacked event flags + ICE confidences.
+            // Step 3: this is loop-control — the K-step readback machinery (final-plan §2, the
+            // §13.1 escape-hatch gate). Under `instrument` the compute above is already evaluated
+            // (the sub-phase timers forced it), so this window measures the concatenation + the
+            // blocking memcpy itself, plus any post-`nextWindow` per-step glue (JOT-collision /
+            // EOS-fill / stats / activation — all near-no-ops on the served default path).
+            let loopControlStart = instrument ? Date() : nil
             let flags = concatenated(breakFlags + activationFlags, axis: 0)  // [2K] Bool
             let confs = concatenated(avgConfsPerStep, axis: 0)              // [K] Float
             eval(flags)
@@ -184,6 +217,9 @@ extension DiffusionEngine {
             }
 
             let flagVals = flags.asArray(Bool.self)
+            if let loopControlStart {
+                loopControlSecondsAcc += Date().timeIntervalSince(loopControlStart)
+            }
             syncPoints += 1
             forwardsEvaluated += K * (verifyThisBatch ? 2 : 1)
             tokensProcessed += K * (S * B + (verifyThisBatch ? 2 * B : 0))
@@ -260,10 +296,7 @@ extension DiffusionEngine {
                 applyWindow(nextWindows[j], posts: postsPerStep[j], jotStableCount: jotStableCountsPerStep[j], prevPredictions: prevPredictionsPerStep[j], frozenMask: frozenMasksPerStep[j], credit: creditPerStep[j])
                 addSteps(j + 1)
                 slots[0].isAnswerPhase = true
-                return PhaseResult(
-                    event: .iceEarlyExit, syncPoints: syncPoints,
-                    forwards: forwardsEvaluated, tokensProcessed: tokensProcessed,
-                    frontPostAtBreak: 0)
+                return makePhaseResult(event: .iceEarlyExit, frontPostAtBreak: 0)
             }
 
             // Break wins a same-step tie: the commit re-derives activation from fresh state.
@@ -277,19 +310,13 @@ extension DiffusionEngine {
                 // deviation, WP-1b logbook). On a settle break `resultWindow == nextWindow`.
                 applyWindow(snapshots[j], posts: postsPerStep[j], jotStableCount: jotStableCountsPerStep[j], prevPredictions: prevPredictionsPerStep[j], frozenMask: frozenMasksPerStep[j], credit: finalCredit)
                 addSteps(j + 1)
-                return PhaseResult(
-                    event: .frontBreak, syncPoints: syncPoints,
-                    forwards: forwardsEvaluated, tokensProcessed: tokensProcessed,
-                    frontPostAtBreak: frontPost)
+                return makePhaseResult(event: .frontBreak, frontPostAtBreak: frontPost)
             }
             if let j = firstActivation {
                 applyStats(j + 1)
                 applyWindow(nextWindows[j], posts: postsPerStep[j], jotStableCount: jotStableCountsPerStep[j], prevPredictions: prevPredictionsPerStep[j], frozenMask: frozenMasksPerStep[j], credit: creditPerStep[j])
                 addSteps(j + 1)
-                return PhaseResult(
-                    event: .activation, syncPoints: syncPoints,
-                    forwards: forwardsEvaluated, tokensProcessed: tokensProcessed,
-                    frontPostAtBreak: 0)
+                return makePhaseResult(event: .activation, frontPostAtBreak: 0)
             }
 
             // Option C (WP-3a §11): sub-block prefix commit. Reached only when no break/activation
@@ -304,10 +331,8 @@ extension DiffusionEngine {
                         applyStats(j + 1)
                         applyWindow(nextWindows[j], posts: postsPerStep[j], jotStableCount: jotStableCountsPerStep[j], prevPredictions: prevPredictionsPerStep[j], frozenMask: frozenMasksPerStep[j], credit: creditPerStep[j])
                         addSteps(j + 1)
-                        return PhaseResult(
-                            event: .prefixCommit, syncPoints: syncPoints,
-                            forwards: forwardsEvaluated, tokensProcessed: tokensProcessed,
-                            frontPostAtBreak: 0, prefixCommitN: n)
+                        return makePhaseResult(
+                            event: .prefixCommit, frontPostAtBreak: 0, prefixCommitN: n)
                     }
                 }
             }
@@ -355,6 +380,14 @@ extension DiffusionEngine {
         let frozenPrefixLen: MLXArray
         let avgConfAnswer: MLXArray  // [1] Float — ICE answer confidence
         let nextCredit: MLXArray?    // [1, A, V] Credit Decoding scores carried forward
+        // Step 3 (final-plan §2): forward-remainder decomposition. Wall-clock spent in each
+        // sub-phase of the step, non-zero ONLY under `instrument` (each requires a forced `eval`
+        // at the sub-graph boundary — see the eval-inflation caveat in the phase timers). All 0
+        // on the served path (no eval added), so production stays byte-identical. Loop-control is
+        // NOT here — it lives in `denoisePhase` around the batch readback.
+        let forwardSeconds: Double
+        let samplerSeconds: Double
+        let selectionSeconds: Double
     }
 
     /// One denoising step over the concatenated active window, fully in-graph. Generalizes the
@@ -407,12 +440,22 @@ extension DiffusionEngine {
         }
         let budgetBreak = nextPosts[0] .> MLXArray(Int32(params.maxPostSteps))  // scalar Bool
 
+        // Step 3 sub-phase timers (final-plan §2). Non-zero only under `instrument`; each forces an
+        // `eval` at a true sub-graph boundary so the lazy graph splits where the phase does. On the
+        // served path (`!instrument`) these stay 0 and NO eval is added — production is untouched.
+        var forwardSeconds = 0.0
+        var samplerSeconds = 0.0
+        var selectionSeconds = 0.0
+
         // One forward over the full window, logits for the active columns only.
         let window = prefixLen > 0 ? concatenated([prefix, windowActive], axis: 1) : windowActive
+        let forwardStart = instrument ? Date() : nil
         let logits = forward(window, A, params.jotEnabled ? frozenMask : nil)                     // [1, A, V] FP32
+        if let forwardStart { eval(logits); forwardSeconds = Date().timeIntervalSince(forwardStart) }
 
         // Raw model predictions. These govern EDITING (Δ), JOT freezing, the ICE answer-
         // confidence signal, and every diagnostic — none of which credit is allowed to bias.
+        let samplerStart = instrument ? Date() : nil
         let probs = softmax(logits, axis: -1)
         let x0 = argMax(logits, axis: -1).asType(.int32)
         let x0p = probs.max(axis: -1)
@@ -423,7 +466,17 @@ extension DiffusionEngine {
             logits: logits, x0: x0, x0p: x0p, activeLen: A, credit: credit, params: params)
 
         let avgConfAnswer = iceAnswerConfidence(x0p: x0p, activeLen: A, params: params)
+        if let samplerStart {
+            eval(probs, x0, x0p, unmaskConf, unmaskTok, avgConfAnswer)
+            if let nextCredit { eval(nextCredit) }
+            samplerSeconds = Date().timeIntervalSince(samplerStart)
+        }
 
+        // Selection-set (Γ/Δ) construction begins here — the fusion candidate (final-plan §2, the
+        // phase-3 §4.3 gate). Spans τ_mask thresholding + top-1 fallback + Δ-edit + JOT eval, up to
+        // the post-update window. (A verifier forward, if speculation were active, would fall in
+        // this window — the Step-3 measurement runs speculation-off, so it does not.)
+        let selectionStart = instrument ? Date() : nil
         let negInf = MLXArray(-Float.infinity)
         // Γ (masked-position) confidence uses the credit-enhanced value; every other consumer of
         // confidence below uses raw x0p (unmaskConf == x0p when credit is disabled).
@@ -548,6 +601,13 @@ extension DiffusionEngine {
 
         let finalTransfer = gamma .|| delta .|| jot.newlyFrozen
         var nextWindow = which(finalTransfer, writeTok, windowActive)
+        // Selection-set boundary: eval the post-update window (forces gamma/delta/writeTok/jot and
+        // their whole sub-graph). JOT collision-resolution + EOS-fill + activation/stats below fall
+        // into the residual bucket (all near-no-ops on the served default path).
+        if let selectionStart {
+            eval(nextWindow)
+            selectionSeconds = Date().timeIntervalSince(selectionStart)
+        }
 
         // JOT collision resolution (after the update): if Δ edited a frozen position, unfreeze it,
         // reset its stability count, and re-mask it. Returns the possibly-remasked window.
@@ -615,7 +675,10 @@ extension DiffusionEngine {
             nextFrozenMask: nextFrozenMaskFinal,
             frozenPrefixLen: frozenPrefixLen,
             avgConfAnswer: avgConfAnswer,
-            nextCredit: nextCredit)
+            nextCredit: nextCredit,
+            forwardSeconds: forwardSeconds,
+            samplerSeconds: samplerSeconds,
+            selectionSeconds: selectionSeconds)
     }
 
     // MARK: - windowStep lazy helpers

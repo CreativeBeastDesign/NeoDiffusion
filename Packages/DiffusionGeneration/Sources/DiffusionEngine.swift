@@ -164,6 +164,20 @@ public final class DiffusionEngine {
         /// speculative batch ends in a blocking readback.
         public let singleActiveDenoiseSeconds: Double
         public let dualActiveDenoiseSeconds: Double
+        // MARK: Step 3 forward-remainder decomposition (final-plan §2)
+        /// `denoiseSeconds` split into engine-loop sub-phases, summed over the run. Real ONLY under
+        /// `instrument: true` (each sub-phase forces an `eval` at its sub-graph boundary; 0 on the
+        /// served path). **These are eval-INFLATED absolute ms** — a sync is paid per sub-phase that
+        /// production never pays, and the cost is host-/phase-dependent. Interpret as relative
+        /// SHARES within the instrumented loop, cross-checked against `denoiseSeconds`, never as
+        /// production ms (same lesson as the microbench). Residual (embed/positional/glue) is
+        /// `denoiseSeconds − forward − sampler − selection − loopControl`, derived at analysis time.
+        /// `loopControl` is the K-step batch-readback machinery (the §13.1 escape-hatch gate);
+        /// `forward+sampler+selection` decides selection-set fusion (phase-3 §4.3).
+        public let forwardSeconds: Double
+        public let samplerSeconds: Double
+        public let selectionSeconds: Double
+        public let loopControlSeconds: Double
         // MARK: WP-2a speculation diagnostics
         /// Per block, per logical step: tokens written by the speculation policy that step
         /// (accepted draft prefix + the correction token; 0 on non-speculated steps or when

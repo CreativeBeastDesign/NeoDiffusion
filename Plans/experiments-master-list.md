@@ -71,6 +71,7 @@ Every logged experiment row must record:
 | **WP-6e Router Reuse** | Reuse routing across steps (80% expert-set overlap measured). | Mac Studio M2 Ultra | `routerReuseSteps` $\in \{2, 4, 999\}$ | **REFUTED** — and killed the fused-router idea | steps/block **1.35×** at $N{=}2$. `reuse-999` sizes the router's true marginal cost at **0.48 ms = 1.7%** (ablation said 13.2% — **7.7× overstated**). | $N{=}2$: **−14.3%**; $N{=}4$: **−24.1%** | [gather_qmm §11](file:///Users/andrebarlocher/Documents/Swift/NeoDiffusion/Plans/gather_qmm_handoff.md) |
 | **WP-6f Case B Probes** | Is `gather_qmm` bandwidth-bound? Is dequant the bottleneck? | Mac Studio M2 Ultra | `.moeFixedExperts` probe; `--dequantize-experts` (FP16, 31.5 GB) | **CASE B ALIVE — the only surviving lever** | 7× fewer bytes ⇒ **25% SLOWER** (not bandwidth-bound). FP16 (4× bytes, no dequant) is **1.50× slower** ⇒ quantization vindicated. **~7.5 ms (~27%) of the 4-bit gather is not moving bytes.** | 4-bit 11.92 ms @162 GB/s vs FP16 17.86 ms @433 GB/s | [gather_qmm §10, §12](file:///Users/andrebarlocher/Documents/Swift/NeoDiffusion/Plans/gather_qmm_handoff.md) |
 | **WP-6g Routing Distribution** | Measure the distinct-expert count the roofline hinges on. | Mac Studio M2 Ultra | `--dump-routing`, 246 forwards, `speculationK=1` | **Complete — overturned two models** | **57.3** distinct experts/layer (models predicted 162 / 111). Phase-dependent: **49.6** (high noise) → **64.2** (low). Step-to-step Jaccard **80%**. | n/a (per-layer readbacks; timings invalid by construction) | [gather_qmm §8](file:///Users/andrebarlocher/Documents/Swift/NeoDiffusion/Plans/gather_qmm_handoff.md) |
+| **Step 3 Engine-Phase Decomposition** (F-n) | Split the denoising step *outside* the forward (sampler / Γ-Δ selection / loop-control) to decide selection-set fusion + the §13.1 escape-hatch. | Mac Studio M2 Ultra | `instrument`-gated engine timers, `speculationK=1`, gen-128, 3 runs × 3 suites | **CLOSED — both gated items NEGATIVE** | Phase shares of `denoiseSeconds` (median, identical across suites): **forward 94.8%** · sampler 1.6% · selection 1.3% · loop-control 2.0% · residual 0.3%. Variance 0.5% PASS. | n/a (eval-inflated per-phase shares, not production ms; forward 94.8% ≈ P9 26 ms ÷ 27.5 ms step) | [step3 draft](file:///Users/andrebarlocher/Documents/Swift/NeoDiffusion/Plans/wiki-drafts/step3-engine-phase-decomposition.md) · [final-plan §2 Step 3 F-n](file:///Users/andrebarlocher/Documents/Swift/NeoDiffusion/Plans/final_optimisations_plans.md) |
 
 ---
 
@@ -209,7 +210,7 @@ Every logged experiment row must record:
 *   **Key Results**:
     *   `[Sourced]`: **Control passes** — `attr-full` reproduces the served `q-cached` baseline to **+0.1–1.4%** across four independent rounds, in different processes on different days.
     *   `[Sourced]`: **Sanity gate passes** — terms all positive, summing to exactly 100% (the gate WP-6b failed at 161%).
-    *   `[Sourced]`: Budget: `gather_qmm` **42.9%**, router **1.7%** (§WP-6e), shared expert 4.2%, attention **14.3%** (incl. KV growth), lm_head ~3%, remainder (norms + sampler + loop) ~21%.
+    *   `[Sourced]`: Budget: `gather_qmm` **42.9%**, router **1.7%** (§WP-6e), shared expert 4.2%, attention **14.3%** (incl. KV growth), lm_head ~3%, remainder (norms + sampler + loop) ~21%. **(Step 3/F-n later split this: the sampler+selection+loop part is only ~5% of the whole *step* — the ~21% is overwhelmingly norms+embed+lm_head, i.e. forward-internal.)**
     *   `[Sourced]`: routed-MoE replicated at **56.2%** then **56.3%** across independent runs — 0.1pp apart.
     *   `[Sourced]`: **Explains WP-3b retroactively**: FlashBlock optimises attention, which is only **14.3%** of the forward. Even flawless reuse cannot exceed that.
 *   **Verdict**: **Method established**; the budget is the project's first trustworthy forward decomposition. **Caveat: the deltas are marginals, not a partition** — see §4.3.
@@ -250,6 +251,18 @@ Every logged experiment row must record:
     *   `[Sourced]`: The "bypass MoE for the committed prefix" idea is **already implemented** — `ExactPrefixCache` means the MoE only ever sees the active window (**sixth** instance of the Redundancy Rule).
 *   **Verdict**: **Complete.** Overturned the roofline input and directly enabled WP-6f's verdict. As an *optimisation* it is weak (the working set is ~1.9 GB/forward regardless of phase); as a *measurement* it was decisive.
 
+### Step 3: Engine-Phase Decomposition (F-n) — **the CPU-side loop is ~5% of the step**
+*   **Objective**: WP-6c decomposed the *forward*; two roadmap items were gated on splitting the denoising step *outside* it (sampler, Γ/Δ selection-set, K-step loop-control). Forward-level ablation could not reach these (**F-m**: `ModuleAblation` operates inside the forward, and norms are un-ablatable on real weights — 20 skipped RMSNorms → inf/NaN → the loop hangs). Solution: `instrument`-gated wall-clock timers in the engine loop, each forcing an `eval()` at a true sub-graph boundary.
+*   **Host Environment**: Mac Studio M2 Ultra (4-bit served path); `--arms q-cached --speculation-k 1 --no-early-stop --runs 3 --gen-length 128`, all three suites; 35/36 rows valid, variance **0.5% PASS**.
+*   **Key Results**:
+    *   `[Sourced]`: Phase shares of `denoiseSeconds` (median, **identical across chat/reasoning/code**): forward **94.8%**, sampler 1.6%, selection 1.3%, loop-control 2.0%, residual 0.3%.
+    *   `[Sourced]`: **Selection-set fusion (phase-3 §4.3) CLOSED** — sampler+selection = **2.9%** ≪ the 8–10% build threshold.
+    *   `[Sourced]`: **§13.1 raw-Metal escape-hatch CLOSED with data** — loop-control = **2.0%** ≪ the 10–15% trigger. At the K=1 served default the readback is one `.item()`/step; negligible.
+    *   `[Inferred]`: **Both are upper bounds** — eval-inflation over-counts the cheap engine phases (each pays a fixed forced-`eval` sync production never pays), so the true shares are smaller. The negatives harden.
+    *   `[Sourced]`: **The §5 sanity gate expected forward ≈ 75%; measured 94.8% — reconciled, not massaged.** Corroborated independently: P9's full forward ≈ **26 ms** ÷ q-cached's ms/step ≈ **27.5 ms** = **94.5%**. The handoff's "~25% remainder" had conflated P9's *within-forward* remainder (norms+embed+lm_head ≈25% **of the forward**, already inside this `forward` bucket) with the engine loop; the actual loop is ~5% of the step.
+    *   `[Sourced]`: Guarded behaviourally (not by timing, per F-m): `testInstrumentTimersAreDiagnosticOnly` (instrument-off byte-identical, timers exactly 0) + extended `testCachedMatchesUncachedWithInstrumentation` (timers > 0, sum ≤ denoise). Full suite 121 tests, 0 failures.
+*   **Verdict**: **CLOSED.** The last phase-3 forward-budget item; both fusion and the escape-hatch are dead with data. This also **retro-refines WP-6c's "~21% remainder"**: that remainder is overwhelmingly forward-internal (norms/embed/lm_head), *not* the engine loop — the sampler+selection+loop it nominally lumped in is only ~5% of the whole step.
+
 ---
 
 ## 4. Key Architectural Insights & Global Lessons
@@ -275,6 +288,7 @@ graph TD
         IS --> RR["WP-6e Router reuse + fused router: REFUTED<br>(router is 1.7%, not 13.6%)"]
         IS --> CB["WP-6f Case B: ALIVE<br>~7.5 ms not moving bytes = ~27%"]
         IS --> FB["WP-3b FlashBlock explained<br>(attention is only 14.3%)"]
+        IS --> S3["Step 3 engine-phase timers: CLOSED<br>loop is ~5% of step (forward 94.8%)<br>selection-fusion + §13.1 hatch dead"]
     end
 ```
 
@@ -305,6 +319,8 @@ On unified-memory Apple Silicon:
 *   **Control arm** — an unablated arm must reproduce the served baseline. Catches mis-links, stale builds, and wrong-overload wiring.
 
 **3d. Timing cannot distinguish "this module is free" from "this module was deleted."** Any ablation that keeps a module running without its normal consumer is one DCE away from measuring nothing. Assert it **behaviourally** (output must change), never by reasoning about the optimiser. A wrong-overload wiring bug and a lazy-eval elision were both caught this way — each would have produced a clean, confident, entirely fake null.
+
+**3d-bis. Eval-inflation has a *direction*, and a "failed" sanity gate is a hypothesis, not a number to bend.** (Step 3 / F-n) Forcing an `eval()` at each sub-phase boundary to time a lazy graph pays a fixed sync per phase that production never pays — so it **over-counts the cheap phases** and never under-counts them. That makes an eval-inflated share a safe **upper bound** for a *"don't build"* decision (Step 3's engine loop ≤5%, both fusion + escape-hatch closed). Separately: the pre-registered gate expected `forward ≈ 75%` and measured **94.8%**. The discipline is not to trust *or* massage it, but to derive the expectation from independent knowns — P9's 26 ms forward ÷ q-cached's 27.5 ms step = 94.5% — and confirm the timer is right (the same control-arithmetic that caught WP-6b's 161% and the lm_head 86% DCE). The 75% estimate had conflated a *within-forward* remainder with the engine loop.
 
 **3e. Per-arm parameters, one process.** Until 2026-07-15 every bench lever was a process-global CLI flag, so every A/B was cross-process — where drift is **±6–10%** against a within-process CV of ~0.33%. That is why sub-10% effects (WP-4d's +1.8%) were never resolvable: the same comparison moved ~4pp between two clean runs, including a sign flip. `LLaDAArm.overrides` fixes this generally. **Known residual**: the bench loops arm-major, so arm identity still correlates with elapsed time; run-major interleaving is needed before trusting anything near the noise floor.
 

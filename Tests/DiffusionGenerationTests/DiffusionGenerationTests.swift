@@ -83,5 +83,43 @@ final class DiffusionGenerationTests: XCTestCase {
             uncached.metrics.forwardsEvaluated)
         XCTAssertGreaterThan(cached.metrics.denoiseSeconds, 0)
         XCTAssertGreaterThan(cached.metrics.commitSeconds, 0)
+
+        // Step 3 (final-plan §2): the sub-phase timers must actually BITE under instrument — a
+        // mis-wired timer reads 0 and looks like "phase free" (the F-m failure mode; only a
+        // behavioural guard, not a timing one, catches it). Every phase positive, and their sum
+        // contained within denoiseSeconds (non-overlapping sub-intervals of the timed phase).
+        for (name, secs) in [
+            ("forward", cached.metrics.forwardSeconds),
+            ("sampler", cached.metrics.samplerSeconds),
+            ("selection", cached.metrics.selectionSeconds),
+            ("loopControl", cached.metrics.loopControlSeconds),
+        ] {
+            XCTAssertGreaterThan(secs, 0, "\(name)Seconds must be > 0 under instrument")
+        }
+        let subSum = cached.metrics.forwardSeconds + cached.metrics.samplerSeconds
+            + cached.metrics.selectionSeconds + cached.metrics.loopControlSeconds
+        XCTAssertLessThanOrEqual(subSum, cached.metrics.denoiseSeconds + 1e-6)
+    }
+
+    /// Step 3 (final-plan §2, guardrail §8): the diagnostic must be INSTRUMENT-ONLY. The served
+    /// path (`instrument: false`) adds no sub-phase evals, so its output must be byte-identical to
+    /// the instrumented run's, and its sub-phase timers must be exactly 0 (never populated).
+    /// Mirrors `ModuleAblationTests.testNoneIsBitIdenticalToBaseline`.
+    func testInstrumentTimersAreDiagnosticOnly() {
+        let prompt = Array(1 ... 10).map { $0 * 3 % 150 }
+        let params = makeParams()
+
+        let plain = makeEngine(instrument: false).generate(prompt: prompt, params: params)
+        let instrumented = makeEngine(instrument: true).generate(prompt: prompt, params: params)
+
+        // Instrument-gated evals must not perturb the tokens or the committed sequence.
+        XCTAssertEqual(plain.tokens, instrumented.tokens)
+        XCTAssertEqual(plain.finalSequence, instrumented.finalSequence)
+
+        // Off the served path the timers are never touched.
+        XCTAssertEqual(plain.metrics.forwardSeconds, 0)
+        XCTAssertEqual(plain.metrics.samplerSeconds, 0)
+        XCTAssertEqual(plain.metrics.selectionSeconds, 0)
+        XCTAssertEqual(plain.metrics.loopControlSeconds, 0)
     }
 }

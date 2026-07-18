@@ -189,6 +189,12 @@ extension DiffusionEngine {
 
         var singleActiveDenoiseSeconds = 0.0
         var dualActiveDenoiseSeconds = 0.0
+        // Step 3 (final-plan §2): run-level sub-phase accumulators, summed from each PhaseResult.
+        // Non-zero only under `instrument`; eval-inflated (interpret as shares — see Metrics doc).
+        var forwardSeconds = 0.0
+        var samplerSeconds = 0.0
+        var selectionSeconds = 0.0
+        var loopControlSeconds = 0.0
 
         while !slots.isEmpty {
             if logicalStepsTotal > 1000 {
@@ -210,6 +216,10 @@ extension DiffusionEngine {
             denoiseSeconds += phaseSeconds
             if phaseWidth == 2 { dualActiveDenoiseSeconds += phaseSeconds }
             else { singleActiveDenoiseSeconds += phaseSeconds }
+            forwardSeconds += phase.forwardSeconds
+            samplerSeconds += phase.samplerSeconds
+            selectionSeconds += phase.selectionSeconds
+            loopControlSeconds += phase.loopControlSeconds
 
             switch phase.event {
             case .iceEarlyExit:
@@ -365,6 +375,10 @@ extension DiffusionEngine {
                 trailingStarvedStepsPerBlock: trailingStarvedPerBlock,
                 singleActiveDenoiseSeconds: singleActiveDenoiseSeconds,
                 dualActiveDenoiseSeconds: dualActiveDenoiseSeconds,
+                forwardSeconds: forwardSeconds,
+                samplerSeconds: samplerSeconds,
+                selectionSeconds: selectionSeconds,
+                loopControlSeconds: loopControlSeconds,
                 acceptedPerStep: acceptedPerStep,
                 tokensProcessedInForwards: tokensProcessed + (stats?.extraForwards ?? 0) * B,
                 effectiveNBuf: params.nBuf,

@@ -237,6 +237,13 @@ struct LLaDARunResult: Codable {
     let trailingStarvedStepsPerBlock: [Int]
     let singleActiveDenoiseSeconds: Double
     let dualActiveDenoiseSeconds: Double
+    // Step 3 (final-plan §2): forward-remainder decomposition. Real only under `instrument`;
+    // EVAL-INFLATED absolute ms — interpret as shares vs denoiseSeconds, not production ms.
+    // residual = denoiseSeconds − forward − sampler − selection − loopControl (embed/glue).
+    let forwardSeconds: Double
+    let samplerSeconds: Double
+    let selectionSeconds: Double
+    let loopControlSeconds: Double
     // WP-2a speculation — engine effective echoes + width-aware accounting.
     let speculation: String
     let tauSpan: Int
@@ -1042,6 +1049,10 @@ func runLLaDABench() async throws {
             trailingStarvedStepsPerBlock: output.metrics.trailingStarvedStepsPerBlock,
             singleActiveDenoiseSeconds: output.metrics.singleActiveDenoiseSeconds,
             dualActiveDenoiseSeconds: output.metrics.dualActiveDenoiseSeconds,
+            forwardSeconds: output.metrics.forwardSeconds,
+            samplerSeconds: output.metrics.samplerSeconds,
+            selectionSeconds: output.metrics.selectionSeconds,
+            loopControlSeconds: output.metrics.loopControlSeconds,
             speculation: output.metrics.effectiveSpeculation,
             tauSpan: output.metrics.effectiveTauSpan,
             acceptedTotal: output.metrics.acceptedPerStep.flatMap { $0 }.reduce(0, +),
@@ -1557,6 +1568,23 @@ func runLLaDABench() async throws {
                             : Double(output.metrics.postStepsPerBlock.reduce(0, +))
                                 / Double(output.metrics.postStepsPerBlock.count),
                         output.syncPoints, peakGB, flags))
+                    // Step 3 (final-plan §2): forward-remainder decomposition. Shares of
+                    // denoiseSeconds, NOT production ms — the per-sub-phase evals are inflated
+                    // (a sync per phase production never pays). Only when instrument produced them.
+                    let m = output.metrics
+                    let subSum = m.forwardSeconds + m.samplerSeconds
+                        + m.selectionSeconds + m.loopControlSeconds
+                    if subSum > 0, m.denoiseSeconds > 0 {
+                        let d = m.denoiseSeconds
+                        let residual = max(0, d - subSum)
+                        print(String(
+                            format: "    └─ phase shares (eval-inflated; %% of denoise %.2fs): "
+                                + "forward %.1f%% | sampler %.1f%% | selection %.1f%% | "
+                                + "loopCtrl %.1f%% | residual %.1f%%",
+                            d, m.forwardSeconds / d * 100, m.samplerSeconds / d * 100,
+                            m.selectionSeconds / d * 100, m.loopControlSeconds / d * 100,
+                            residual / d * 100))
+                    }
                 }
             }
             armTotals[arm.name, default: []].append(runTotal)
