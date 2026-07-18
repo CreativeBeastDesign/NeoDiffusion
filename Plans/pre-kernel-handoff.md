@@ -22,10 +22,30 @@ The 2026-07-14→18 attribution campaign has closed every *cheaper-steps* and *c
 | **Step 2 side-finding F-j** | CONFIRMED | JOT's recorded "+21.9–28% reasoning" was a **cold-baseline artefact**; drift-free it is **+5.5% reasoning only** (−26% chat, −20% code). ~16% of the old number was the free K=1 switch JOT-faithful forces. |
 | **Step 3** forward-remainder decomposition (**this session**, F-n) | CLOSED — NEGATIVE | engine-phase timers measured: forward **94.8%**, sampler 1.6%, selection 1.3%, loop-control 2.0%. **Selection-set fusion CLOSED** (2.9% < 8–10%); **§13.1 raw-Metal escape-hatch CLOSED with data** (2.0% < 10–15%). Committed on branch `step3-engine-phase-timers`. |
 | **Step 7a** Credit Decoding | LARGELY CLOSED | premise was wrong — Credit is **default-OFF** in engine + server, nothing ships on it. At shipped params: chat +3.5%, reasoning −1.0%, code −5.6%, changes output on 8/12 prompts (never sheeted). **Recommendation: leave off, retire from the accepted-lever list.** |
+| **Step 4** three cheap probes (**this session**, 2026-07-18) | CLOSED — ALL NEGATIVE | 4a **moot** (0.31.6 already newest mlx-swift); 4b **wiring optimal** (T=32 sort doesn't pay; 1.85× only at large T, already taken); 4c **no cheap format beats 4-bit affine** (8-bit +3.5% ≈ tie, mxfp4 +7.9%, FP16 +20.4%; coalescing +10.8%). Nibble-unpacking is *not* the ~7.5 ms. **Lowers Step 5 confidence** — the win (if any) is subtle, not a format swap. See §3. |
 
 **Accuracy levers already landed (not part of the kernel road, listed to answer "haven't we done these?"):** TSCV (WP-4a, default-on), ICE (WP-4b, served preset), Credit (WP-4d, default-off). Their *open work* is refinement/hygiene (Steps 6/7), not re-doing them.
 
-## 3. The last gate before the kernel — Step 4: three cheap probes
+## 3. The last gate before the kernel — Step 4: three cheap probes — **CLOSED 2026-07-18 (all negative)**
+
+> **Step 4 result (2026-07-18, Studio `Mac14,14`, MLX core 0.31.1 / mlx-swift 0.31.6; every arm 100% `envValid`, warmup-excluded, within-process CV <5%). All three probes ran; none shrank the prize, and the diagnosis they hand over is that the ~7.5 ms is NOT a cheap-format problem.**
+>
+> - **4a — MOOT (no target).** The newest mlx-swift tag upstream is **0.31.6 = the current pin** (`git ls-remote` — the mlx *0.32.0* on disk is the separate Python MLX-core wheel, not the Swift binding). There is nothing newer to bump to; the 0.31.4→0.31.6 win already banked under P1. No re-time possible, no metallib rebuild, no pin change.
+> - **4b — CONFIRMED NEGATIVE (wiring already optimal).** `sortedIndices` is correctly wired end-to-end: decode (T=32, `LLaDA2MoE.swift:409` crossover=128) is deliberately unsorted with `sortedIndices:false`; the WP-6a T≥128 path sorts and passes `true`. `LLaDAMoEDispatchBench` (8/8 pass): at **T=32 sorting does NOT pay** (unsorted 3.06 ms ≈ sorted 3.2 ms); the **1.85× sort win only appears at large T** (13.15→7.11 ms), already captured by the T≥128 path. No unsorted-path tax. Occupancy probe reproduced the Case-B datum: **T=32 gather 280 GB/s ≈ 36% of peak → not occupancy-bound.**
+> - **4c — CONFIRMED NEGATIVE (no cheap format beats 4-bit affine).** `attr-full` ms/forward, cross-process (each format = one model-load process; ±6–10% cross-process caveat applies), 5 runs × 3 suites:
+>   | format | ms/forward | Δ vs 4-bit |
+>   |---|---|---|
+>   | **4-bit affine g64 (incumbent)** | **26.96** | — |
+>   | 8-bit experts g64 (2× bytes, no nibble-unpack) | 27.90 | **+3.5%** (within cross-process noise ⇒ ~tie) |
+>   | mxfp4 g32 (e8m0 scale, no bias) | 29.10 | +7.9% |
+>   | FP16 experts (4× bytes, zero dequant) | 32.44 | +20.4% |
+>   Plus the within-process coalescing arm (`attr-fixed-experts`, fewer *distinct* experts): **+10.8% slower**, not faster — dispatch is **not bandwidth-bound on distinct-expert reads**.
+>   **Diagnosis handed over:** 8-bit removes nibble-unpacking at 2× bytes and lands ≈ 4-bit ⇒ **nibble-unpacking is NOT the hidden ~7.5 ms**; FP16's clean +20% shows raw bytes dominate at 4×; mxfp4's different dequant inner loop is +7.9% (slower, not faster). **No trivial format/coalescing change recovers the prize** — consistent with the §4 register-pressure / memory-level-parallelism hypothesis, and it **lowers confidence in the Step 5 payoff** (the win, if any, is subtle, not a format swap).
+>   Behavioural validation: mxfp4 & 8-bit artefacts round-trip in Python (8-bit 0.58%, mxfp4 8.8% rel err — coarse but live) and the Swift engine loads both and generates coherent text; mxfp4 output *differs* from affine (F-m satisfied, not a silent fallback).
+>
+> **New code (backward-compatible, landed on branch `pre-kernel`, uncommitted):** `Tools/convert_weights_streaming.py` gained `--mode {affine,mxfp4}` (bias-less, g32/4-bit, e8m0 U8 scales); `DiffusionModel.QuantizationConfig` decodes `mode` and threads it through `quantizeModel` (the load path was already mode-agnostic: `SwitchLinear.toQuantized`, optional biases, `sanitize`). Diagnostic artefacts `models/llada2-1-mini-{8bit-experts,mxfp4}` (17 GB + 9.1 GB, host-local) can be kept for Step-5 mxfp4 profiling or deleted.
+>
+> **The original probe descriptions below are retained for provenance.**
 
 All three sharpen or shrink the ~7.5 ms at near-zero cost. **Run them before the Instruments profile** — each can either shrink the prize or hand over the diagnosis for free.
 

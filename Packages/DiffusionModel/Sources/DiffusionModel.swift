@@ -52,11 +52,16 @@ public class DiffusionModel {
         /// the uniform g64 artefact → experts use `bits`/`groupSize`.
         public let expertBits: Int?
         public let expertGroupSize: Int?
+        /// Quant format. Absent in pre-mxfp4 artefacts → `.affine`. `.mxfp4` (Step 4c-ii
+        /// diagnostic) stores e8m0 scales and no biases; the load path threads this into
+        /// `MLXNN.quantize` so the built modules match the artefact's tensor set.
+        public let mode: QuantizationMode?
         enum CodingKeys: String, CodingKey {
             case bits
             case groupSize = "group_size"
             case expertBits = "expert_bits"
             case expertGroupSize = "expert_group_size"
+            case mode
         }
     }
 
@@ -93,7 +98,8 @@ public class DiffusionModel {
             quantizeModel(
                 groupSize: quantization?.groupSize ?? 64, bits: quantization?.bits ?? 4,
                 expertGroupSize: quantization?.expertGroupSize,
-                expertBits: quantization?.expertBits)
+                expertBits: quantization?.expertBits,
+                quantMode: quantization?.mode ?? .affine)
             rawArrays = Self.sanitize(rawArrays)
         }
 
@@ -114,8 +120,13 @@ public class DiffusionModel {
     /// m8-logbook, `testModelQuantizationFilter`).
     public func quantizeModel(
         groupSize: Int = 64, bits: Int = 4,
-        expertGroupSize: Int? = nil, expertBits: Int? = nil
+        expertGroupSize: Int? = nil, expertBits: Int? = nil,
+        quantMode: QuantizationMode = .affine
     ) {
+        // NB: the parameter is `quantMode`, not `mode`. The filter's return tuple has a
+        // `mode:` label; a parameter also named `mode` gets shadowed by that label inside
+        // the closure and silently resolves to the enum's first-declared-elsewhere value
+        // (observed: mxfp4 leaked in, crashing `[quantize] mxfp4 requires group 32`).
         MLXNN.quantize(
             model: model,
             filter: { path, module -> (groupSize: Int, bits: Int, mode: QuantizationMode)? in
@@ -123,10 +134,10 @@ public class DiffusionModel {
                     return nil
                 }
                 if module is SwitchLinear {
-                    return (expertGroupSize ?? groupSize, expertBits ?? bits, .affine)
+                    return (expertGroupSize ?? groupSize, expertBits ?? bits, quantMode)
                 }
                 if module is Linear {
-                    return (groupSize, bits, .affine)
+                    return (groupSize, bits, quantMode)
                 }
                 return nil
             }

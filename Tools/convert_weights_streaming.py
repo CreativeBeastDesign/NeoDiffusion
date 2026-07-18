@@ -39,9 +39,19 @@ def is_routed_expert(key):
 
 
 def convert_and_quantize_streaming(src_dir, dest_dir, bits=4, group_size=64,
-                                   expert_bits=None, expert_group_size=None):
+                                   expert_bits=None, expert_group_size=None,
+                                   mode="affine"):
     """expert_bits/expert_group_size override the quantization of ROUTED EXPERT tensors
-    only (M8 E6/E7 sweep axes: g32 / 6-bit experts, rest stays at bits/group_size)."""
+    only (M8 E6/E7 sweep axes: g32 / 6-bit experts, rest stays at bits/group_size).
+
+    `mode` selects the MLX quantization format: "affine" (weight+scales+biases, the
+    default artefact) or "mxfp4" (Step 4c-ii dequant-cost diagnostic: shared e8m0 FP8
+    scale, NO biases, fixed group-32 / 4-bit). mxfp4 forces bits=4/group=32 uniformly
+    (MLX constraint) and drops the biases tensor from the artefact."""
+    if mode == "mxfp4":
+        # MLX mxfp4 is fixed group-32, 4-bit; expert overrides do not apply.
+        bits, group_size = 4, 32
+        expert_bits, expert_group_size = 4, 32
     expert_bits = expert_bits or bits
     expert_group_size = expert_group_size or group_size
 
@@ -56,7 +66,7 @@ def convert_and_quantize_streaming(src_dir, dest_dir, bits=4, group_size=64,
     config_path = os.path.join(src_dir, "config.json")
     with open(config_path, "r") as f:
         config = json.load(f)
-    config["quantization"] = {"bits": bits, "group_size": group_size, "mode": "affine",
+    config["quantization"] = {"bits": bits, "group_size": group_size, "mode": mode,
                               "expert_bits": expert_bits,
                               "expert_group_size": expert_group_size}
     with open(os.path.join(dest_dir, "config.json"), "w") as f:
@@ -106,7 +116,10 @@ def convert_and_quantize_streaming(src_dir, dest_dir, bits=4, group_size=64,
 
             # Packed weights: N*bits/8 bytes per row (U8 byte view of MLX's U32 packing).
             w_q_size = M * (N * bits_k // 8)
-            scales_size = M * (N // group_k) * 2
+            # affine: F16 scales+biases (2 bytes each). mxfp4: U8 e8m0 scales (1 byte), no biases.
+            scale_dtype = "U8" if mode == "mxfp4" else "F16"
+            scale_elt = dtype_bytes[scale_dtype]
+            scales_size = M * (N // group_k) * scale_elt
             biases_size = M * (N // group_k) * 2
 
             output_tensors.append({
@@ -114,9 +127,11 @@ def convert_and_quantize_streaming(src_dir, dest_dir, bits=4, group_size=64,
                 "source_name": k, "type": "q_weight"
             })
             output_tensors.append({
-                "name": f"{base_name}.scales", "shape": [M, N // group_k], "dtype": "F16", "size_bytes": scales_size,
+                "name": f"{base_name}.scales", "shape": [M, N // group_k], "dtype": scale_dtype, "size_bytes": scales_size,
                 "source_name": k, "type": "q_scales"
             })
+            if mode == "mxfp4":
+                continue  # mxfp4 has no biases tensor
             output_tensors.append({
                 "name": f"{base_name}.biases", "shape": [M, N // group_k], "dtype": "F16", "size_bytes": biases_size,
                 "source_name": k, "type": "q_biases"
@@ -186,16 +201,23 @@ def convert_and_quantize_streaming(src_dir, dest_dir, bits=4, group_size=64,
             if should_quantize(src_name):
                 # Run GPU-accelerated quantization (per-tensor params: expert override)
                 bits_k, group_k = quant_params(src_name)
-                w_q, scales, biases = mx.quantize(x, group_size=group_k, bits=bits_k)
+                if mode == "mxfp4":
+                    # mxfp4 returns (packed_weight, e8m0_scales) — no biases; scales are U8.
+                    w_q, scales = mx.quantize(x, group_size=group_k, bits=bits_k, mode="mxfp4")
+                    mx.eval(w_q, scales)
+                    out_f.write(np.array(w_q).tobytes())
+                    out_f.write(np.array(scales).tobytes())  # already U8, no cast
+                else:
+                    w_q, scales, biases = mx.quantize(x, group_size=group_k, bits=bits_k)
 
-                # CRITICAL: mx.eval forces compilation/execution immediately
-                # so memory is not held by a growing lazy execution graph
-                mx.eval(w_q, scales, biases)
+                    # CRITICAL: mx.eval forces compilation/execution immediately
+                    # so memory is not held by a growing lazy execution graph
+                    mx.eval(w_q, scales, biases)
 
-                # Write to disk
-                out_f.write(np.array(w_q).tobytes())
-                out_f.write(np.array(scales.astype(mx.float16)).tobytes())
-                out_f.write(np.array(biases.astype(mx.float16)).tobytes())
+                    # Write to disk
+                    out_f.write(np.array(w_q).tobytes())
+                    out_f.write(np.array(scales.astype(mx.float16)).tobytes())
+                    out_f.write(np.array(biases.astype(mx.float16)).tobytes())
 
                 print(f"Quantized and streamed: {src_name}")
             else:
@@ -231,6 +253,9 @@ if __name__ == "__main__":
                         help="Override bits for routed-expert tensors (M8 sweep)")
     parser.add_argument("--expert-group-size", type=int, default=None,
                         help="Override group size for routed-expert tensors (M8 sweep)")
+    parser.add_argument("--mode", choices=["affine", "mxfp4"], default="affine",
+                        help="Quant format: affine (default artefact) or mxfp4 "
+                             "(Step 4c-ii diagnostic; forces g32/4-bit, no biases)")
 
     args = parser.parse_args()
 
@@ -238,7 +263,8 @@ if __name__ == "__main__":
         convert_and_quantize_streaming(args.src_dir, args.dest_dir, bits=args.bits,
                                        group_size=args.group_size,
                                        expert_bits=args.expert_bits,
-                                       expert_group_size=args.expert_group_size)
+                                       expert_group_size=args.expert_group_size,
+                                       mode=args.mode)
     except Exception as e:
         print(f"Error during weight conversion: {e}")
         exit(1)
