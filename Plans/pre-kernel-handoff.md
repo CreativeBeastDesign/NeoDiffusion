@@ -61,6 +61,58 @@ All three sharpen or shrink the ~7.5 ms at near-zero cost. **Run them before the
 
 This is where the hand-off ends and the fun begins. Entry state is "Step 4 done, ~7.5 ms question as sharp as free diagnostics can make it."
 
+> ### Step 5a — the occupancy profile: **PROFILED — decisive GO** (2026-07-18)
+>
+> **Verdict: write the fused kernel.** Xcode Metal-debugger counters on the production
+> `gatherQuantizedMM` dispatch, captured in situ (see methodology below), Studio `Mac14,14`:
+>
+> | signal | reading | reads as |
+> |---|---|---|
+> | Kernel Occupancy | **~32.8%** | low — well under half the GPU's thread-level parallelism in use |
+> | Registers | 100 allocated, 100 high, **0 bytes spilled** | no spilling, but high enough to cap occupancy — classic register-limited-occupancy |
+> | ALU Limiter / Integer&Complex Limiter | 69.6% / 57.1% | high — the dequant bit-unpack/shift is a real ALU cost, not just an indirect tax |
+> | F32 / F16 Utilization | 15.1% / 0% | low — raw float throughput is NOT the bottleneck |
+> | Kernel shape | `affine_gather_qmv_fast_float_gs_64_b_4` — matrix-**vector**, not matrix-matrix | structurally can't use `simdgroup_matrix`/MMA: each of the 256 token×expert pairs needs a *distinct* weight block, so there's no shared-weight tile for tensor cores to batch over |
+>
+> This is not merely consistent with the leading hypothesis — it **confirms** it: occupancy is low
+> *because* register pressure from the interleaved dequant+FMA chain caps concurrent threads, and
+> that same chain shows up directly as ALU/integer cost. Design implication for Step 5 proper: target
+> **reducing per-thread register pressure in the dequant+accumulate inner loop** (e.g. stage
+> scale/bias lookups through threadgroup memory instead of per-thread registers, shorten the live
+> range of intermediate dequantized values) to raise occupancy above 32.8% and let more memory
+> requests overlap — this is the mechanism, not a blind "make it faster." "Force MMA" is **not** a
+> viable lever here (structurally a GEMV, confirmed above), which narrows Step 5's design space
+> usefully. Expected payoff unchanged from the original sizing: **+10–20% TPS**, ceiling ~+37%
+> (§10/§12 of `gather_qmm_handoff.md`).
+>
+> **Methodology, recorded because it cost real time and is worth not re-learning:** the original
+> plan called for capturing `gatherQuantizedMM` in complete isolation (`testCaptureGatherQMMTrace`,
+> reusing `LLaDAMoEDispatchBench.runGatherQMMVariants`' Mini-shape construction). **This failed three
+> independent ways** — shared capture window (only the FP16 sibling dispatched), separate trace files
+> per arm (still empty), and forced-sync `.item()` readback on completely fresh never-before-evaluated
+> inputs (still empty, 40 KB trace, vs. the FP16 arm's 2.7–4 GB every time). All three ruled out
+> timing/caching/host-sync as the cause; the isolated `gatherQuantizedMM` call structurally would not
+> capture, for a reason not diagnosed. **The fix: capture a real `LLaDA2SparseMoEBlock` forward**
+> instead (`testCaptureMoEBlockTrace`, production quantization, T=32, one fresh input, forced
+> `.item()` readback) — the same code path Step 4's entire wall-clock campaign already validated to
+> cost real GPU time. That trace (1.2 GB, `scratch/captures/moe_block_t32.gputrace`) captured cleanly:
+> 21 dispatches, 510.22 µs total, with `affine_gather_qmv_fast_float_gs_64_b_4` at 50.9% of encoder
+> cost — both the kernel name and its bound buffers (`w`=128 MiB, `scales`=16 MiB, `biases`=16 MiB,
+> matching `E·I·H·bits/8` and `E·I·(H/64)·4B` exactly) confirm it unambiguously. **If profiling this
+> kernel again, go straight to the in-situ MoE-block route** — don't re-attempt isolation.
+>
+> Read via: Xcode → open the `.gputrace` → **Replay** (Profile after replay checked) → **Performance**
+> tab → **Shaders** sub-tab (sortable by cost, gives per-dispatch register/spill) and **Counters** →
+> **Occupancy** (hover the graph during the target kernel's window in the Timeline for the exact %).
+>
+> The pre-registered gate this closes (superseded text below, kept for provenance): **GO** if
+> occupancy-limited by register pressure, latency-bound with low MLP, or a scalar fallback instead of
+> MMA — **all three came in true simultaneously.**
+> and the residual is intrinsic to packed-4-bit reads. Caveat: labels may show as pipeline-state names
+> (MLX built without `MLX_METAL_DEBUG`); the counters are readable regardless.
+>
+> The bullets below are the original standing instructions, kept for provenance.
+
 - **Profile first, the *sized* question.** Xcode **GUI** Metal debugger occupancy counters (**not** `xctrace`) on `gatherQuantizedMM` at **T=32**, asking: *what is the ~7.5 ms doing if it is not moving bytes?* Measure **occupancy, register pressure, memory-level parallelism — NOT ALU time.** Context in `gather_qmm_handoff.md` §3 (Case B open problem) + §2.3: at T=32 the kernel already hits **290.5 GB/s = 36.3% of peak**, so it is **not occupancy-bound** — the cause is subtler (leading `[Inferred]` hypothesis: register pressure from interleaved dequant+FMA capping memory-level parallelism).
 - **Then route (b): a new inline-MSL kernel via `MLXFast.metalKernel`**, à la FlashBlock — Metal source as inline Swift strings compiled by MLX at runtime. **NO mlx-swift fork**: a fork needs an Xcode DerivedData rebuild of mlx-swift + reseed on *every edit* (`gather_qmm_handoff.md` ~§lines 205–235). The Alpha-MoE *ethos* (persistent kernel, threadgroup residency, fused dequant-into-GEMM) legitimately lands here `[Inferred]`; its Hopper-specific mechanisms do not (they're refuted — §3 of the plan).
 - **Prize / expected outcome**: some fraction of ~27% of the forward. **Plan on +10–20% TPS if the profile finds a fixable cause; accept a recorded negative if it doesn't.** The 433 GB/s comparison rate is from a *different* kernel — **7.5 ms is a ceiling, not a promise** `[Sourced caveat]`.

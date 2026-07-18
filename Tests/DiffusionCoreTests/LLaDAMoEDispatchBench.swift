@@ -120,6 +120,178 @@ final class LLaDAMoEDispatchBench: XCTestCase {
             swapBefore, swapAfter, swapGrowth, freeMemBefore, thermalBefore, thermalAfter, isValid ? "true" : "false"))
     }
 
+    /// Step 5a — produce Xcode-openable `.gputrace` captures of the production
+    /// `gatherQuantizedMM` and its FP16 `gatherMM` sibling at Mini shapes, T ∈ {32, 64}.
+    /// This gathers the last pre-kernel diagnostic (`gather_qmm_handoff.md` §3/§10): what
+    /// caps the 4-bit gather's occupancy at T=32.
+    ///
+    /// **Each arm gets its OWN trace file, built from inputs never evaluated before the
+    /// capture window.** Two earlier attempts failed the same way: sharing one window across
+    /// both `eval()` calls, and then even isolating each arm in its own window, both left the
+    /// 4-bit trace essentially empty (40 KB vs the FP16 arm's 2.7 GB) — calling `gatherQuantizedMM`
+    /// again on inputs already evaluated during warmup produced zero new GPU dispatches.
+    /// The fix: warm up the pipelines on THROWAWAY inputs, then build a completely FRESH set
+    /// of inputs and call each op EXACTLY ONCE, ever, inside its capture window — there is
+    /// nothing for MLX to have already computed.
+    ///
+    /// Requires BOTH the opt-in gate and Apple's capture env var:
+    ///   MTL_CAPTURE_ENABLED=1 NEODIFFUSION_GPU_CAPTURE=1 \
+    ///     swift test --filter LLaDAMoEDispatchBench/testCaptureGatherQMMTrace
+    /// Output: `$NEODIFFUSION_CAPTURE_DIR` (default `<cwd>/scratch/captures`)/gather_t{32,64}_{4bit,fp16}.gputrace.
+    func testCaptureGatherQMMTrace() throws {
+        try XCTSkipUnless(
+            ProcessInfo.processInfo.environment["NEODIFFUSION_GPU_CAPTURE"] == "1",
+            "opt-in: set NEODIFFUSION_GPU_CAPTURE=1 (writes .gputrace files)")
+        // GPU.startCapture silently no-ops / errors without this Apple env gate — fail loud.
+        XCTAssertEqual(
+            ProcessInfo.processInfo.environment["MTL_CAPTURE_ENABLED"], "1",
+            "GPU.startCapture requires MTL_CAPTURE_ENABLED=1 in the environment")
+
+        let dir = ProcessInfo.processInfo.environment["NEODIFFUSION_CAPTURE_DIR"]
+            ?? (FileManager.default.currentDirectoryPath + "/scratch/captures")
+        try FileManager.default.createDirectory(
+            atPath: dir, withIntermediateDirectories: true)
+
+        for T in [32, 64] {
+            try captureGatherQMM(E: Self.E, H: Self.H, I: Self.I, T: T, K: Self.K, dir: dir)
+        }
+    }
+
+    private typealias GatherInputs = (
+        wq: MLXArray, scales: MLXArray, biases: MLXArray?, wDeq: MLXArray,
+        x: MLXArray, indices: MLXArray
+    )
+
+    /// Builds one fresh, immediately-evaluated set of Mini-shape inputs (same construction
+    /// as `runGatherQMMVariants`). Each call produces genuinely new arrays — never reuse a
+    /// previous call's arrays across a warmup/capture boundary (see `captureGatherQMM`).
+    private func buildGatherInputs(E: Int, H: Int, I: Int, T: Int, K: Int, seed: UInt64) -> GatherInputs {
+        MLXRandom.seed(seed)
+        let w = MLXRandom.normal([E, I, H]) * 0.05
+        let (wq, scales, biases) = MLX.quantized(w, groupSize: 64, bits: 4)
+        // Explicit fp16 cast: `dequantized(...)` inherits w's dtype (float32 here), but the
+        // FP16 arm must genuinely run in fp16 to match the production Case-B comparison
+        // (`gather_qmm_handoff.md` §12 anchors its 433 GB/s figure to FP16, not FP32).
+        let wDeq = dequantized(wq, scales: scales, biases: biases, groupSize: 64, bits: 4)
+            .asType(.float16)
+        let x = MLXRandom.normal([T, 1, 1, H]).asType(.float16)
+        let indices = MLXRandom.randInt(0 ..< Int32(E), [T, K])
+        if let biases {
+            eval(wq, scales, biases, wDeq, x, indices)
+        } else {
+            eval(wq, scales, wDeq, x, indices)
+        }
+        return (wq, scales, biases, wDeq, x, indices)
+    }
+
+    private func quantizedGather(_ w: GatherInputs) -> MLXArray {
+        gatherQuantizedMM(
+            w.x, w.wq, scales: w.scales, biases: w.biases,
+            rhsIndices: w.indices, transpose: true, groupSize: 64, bits: 4)
+    }
+    private func fp16Gather(_ w: GatherInputs) -> MLXArray {
+        gatherMM(w.x.asType(w.wDeq.dtype), w.wDeq.swappedAxes(-1, -2), rhsIndices: w.indices)
+    }
+
+    /// Captures the 4-bit `gatherQuantizedMM` and the FP16 `gatherMM` sibling into two
+    /// SEPARATE `.gputrace` files, each built from inputs that have NEVER been evaluated
+    /// before entering the capture window (see the type doc comment for why).
+    private func captureGatherQMM(E: Int, H: Int, I: Int, T: Int, K: Int, dir: String) throws {
+        // 1. Warm up BOTH pipelines (JIT-compile) on throwaway inputs, run twice, entirely
+        //    outside any capture window and never touched again.
+        let warm = buildGatherInputs(E: E, H: H, I: I, T: T, K: K, seed: 11)
+        for _ in 0 ..< 2 { eval(quantizedGather(warm)); eval(fp16Gather(warm)) }
+
+        // Expected buffer sizes, printed so a trace can be sanity-checked from the outside:
+        // 4-bit packed weight ≈ E·I·H·bits/8 bytes; FP16 weight ≈ E·I·H·2 bytes (4× larger).
+        let packedMB = Double(E * I * H * 4 / 8) / 1_048_576
+        let fp16MB = Double(E * I * H * 2) / 1_048_576
+        print("[capture] T=\(T) expected weight-buffer sizes: 4bit≈\(Int(packedMB)) MiB (+ scales/biases), fp16≈\(Int(fp16MB)) MiB (no scales/biases)")
+
+        // 2. Capture: a completely fresh set of inputs per arm, called exactly once, ever.
+        // `.sum().item(...)` (not just `eval`) forces an actual CPU-blocking readback, so the
+        // capture window cannot close before the GPU work is fully submitted and complete —
+        // `eval()` alone left the 4-bit trace empty even with fresh inputs, suggesting eval()
+        // does not guarantee a host sync boundary for this op under an open capture.
+        let cap4bit = buildGatherInputs(E: E, H: H, I: I, T: T, K: K, seed: 101)
+        try captureOneArm(label: "4bit", dir: dir, T: T) {
+            _ = quantizedGather(cap4bit).sum().item(Float.self)
+        }
+
+        let capFp16 = buildGatherInputs(E: E, H: H, I: I, T: T, K: K, seed: 102)
+        try captureOneArm(label: "fp16", dir: dir, T: T) {
+            _ = fp16Gather(capFp16).sum().item(Float.self)
+        }
+
+        print("[capture] T=\(T) -> \(dir)/gather_t\(T)_{4bit,fp16}.gputrace  (Mini E=\(E) H=\(H) I=\(I) K=\(K))")
+    }
+
+    /// Captures exactly one call of `body` into its own trace file — no warmup here, `body`
+    /// must already be operating on freshly-built, never-evaluated inputs (see caller).
+    private func captureOneArm(label: String, dir: String, T: Int, body: () -> Void) throws {
+        // startCapture requires the destination not already exist (it is a bundle directory).
+        let path = "\(dir)/gather_t\(T)_\(label).gputrace"
+        if FileManager.default.fileExists(atPath: path) {
+            try FileManager.default.removeItem(atPath: path)
+        }
+        let url = URL(fileURLWithPath: path)
+
+        MLX.GPU.startCapture(url: url)
+        body()
+        MLX.GPU.stopCapture(url: url)
+    }
+
+    /// Step 5a fallback — the isolated `gatherQuantizedMM` capture above produced only a
+    /// 40 KB (empty) trace for the 4-bit arm across three independent fixes (separate trace
+    /// files, fresh never-evaluated inputs, forced host-sync `.item()` readback) — ruling out
+    /// timing/caching/sync as the cause and pointing at something structural in how an
+    /// ISOLATED `gatherQuantizedMM` call captures. This captures a REAL MoE block forward
+    /// instead — the same construction `testModuleAttribution` uses, extensively validated by
+    /// wall-clock timing (Step 4 / `gather_qmm_handoff.md`) to dispatch `gatherQuantizedMM` for
+    /// several ms of real, measured GPU time. Same env gate as `testCaptureGatherQMMTrace`.
+    func testCaptureMoEBlockTrace() throws {
+        try XCTSkipUnless(
+            ProcessInfo.processInfo.environment["NEODIFFUSION_GPU_CAPTURE"] == "1",
+            "opt-in: set NEODIFFUSION_GPU_CAPTURE=1 (writes .gputrace files)")
+        XCTAssertEqual(
+            ProcessInfo.processInfo.environment["MTL_CAPTURE_ENABLED"], "1",
+            "GPU.startCapture requires MTL_CAPTURE_ENABLED=1 in the environment")
+
+        let dir = ProcessInfo.processInfo.environment["NEODIFFUSION_CAPTURE_DIR"]
+            ?? (FileManager.default.currentDirectoryPath + "/scratch/captures")
+        try FileManager.default.createDirectory(atPath: dir, withIntermediateDirectories: true)
+
+        let moe = LLaDA2SparseMoEBlock(
+            hiddenSize: Self.H, moeIntermediateSize: Self.I, numExperts: Self.E,
+            numSharedExperts: 1, numExpertsPerTok: Self.K, nGroup: 8, topkGroup: 4,
+            routedScalingFactor: 2.5)
+        MLXNN.quantize(model: moe, groupSize: 64, bits: 4, mode: .affine,
+                       filter: { _, module in module is SwitchLinear })
+        eval(moe)
+
+        // Warm up (JIT-compile) on throwaway input, outside the capture window.
+        MLXRandom.seed(21)
+        let warmX = MLXRandom.normal([1, Self.T, Self.H]).asType(.float16)
+        eval(warmX)
+        for _ in 0 ..< 2 { _ = moe(warmX).sum().item(Float.self) }
+
+        // Capture: a fresh, never-before-evaluated input, forced sync readback inside window.
+        MLXRandom.seed(201)
+        let capX = MLXRandom.normal([1, Self.T, Self.H]).asType(.float16)
+        eval(capX)
+
+        let path = "\(dir)/moe_block_t32.gputrace"
+        if FileManager.default.fileExists(atPath: path) {
+            try FileManager.default.removeItem(atPath: path)
+        }
+        let url = URL(fileURLWithPath: path)
+        MLX.GPU.startCapture(url: url)
+        _ = moe(capX).sum().item(Float.self)
+        MLX.GPU.stopCapture(url: url)
+
+        print("[capture] MoE block forward (production quantized, T=32) -> \(path)")
+    }
+
     /// H4 — module-level attribution at real shapes (warm): one quantized MoE block
     /// (router + gather_qmm experts + F16 shared expert), one quantized attention layer
     /// (cached path, 128 committed KV), the F16 lm_head, all on a 32-token active block.
