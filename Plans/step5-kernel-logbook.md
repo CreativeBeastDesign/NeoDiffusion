@@ -47,7 +47,56 @@ round-trip) remains untried and is a *different* mechanism — but note its toy-
 parity wrinkle (in-kernel silu skips the outDType rounding stock applies when out dtype is
 fp16; production f32 is unaffected).
 
-Loop state after 5 iterations: best = **ROWS=8 at ~0.83** (≈17% faster than stock at SwitchGLU
+**v0 trace read (André, 2026-07-19)** — *sourced (Xcode, `fused_v0_skeleton/`)*: gateUp
+dispatch = 41.22% of encoder cost (buffers 512 KiB + 128 MiB = x + wG, unambiguous), **ALU
+limiter 56.43% / Integer 42.97%** (stock: 69.6% / 57.1% — the compile-time-dims win is real),
+**occupancy ~33.9% ±10pp** (stock: 32.8% — unchanged ⇒ still register-capped). Encoder GPU
+time 374.86 µs vs stock capture's 510.22 µs. Registers not yet located in the Xcode UI.
+
+**Capture methodology addendum** (echoes the §3 in-situ note): two lessons. (1) The capture
+invocation must be the LAST thing in its shell command — build/checkout churn in the same
+compound after test exit raced the trace-daemon finalization and left 40-file/182 MB torsos
+(complete bundles are ~84 files/1.2 GB; always verify before handing over). (2) CORRECTED
+2026-07-19 (later): incomplete finalization is a general flake, not kernel-structural — the v3
+(VPT=8, no TG memory) capture also came out 40-file twice before completing on a retry, and v2
+needed a retry too. Procedure: after any capture, verify ~84 files / ~1.2 GB (a 40-file/182 MB
+bundle is a torso Xcode rejects with "index file does not exist") and re-run until complete.
+The earlier "v1 is structurally uncaptureable" reading is RETRACTED; v1 was plain bad luck
+twice and can be re-captured with retries if its diagnostic ever matters again.
+
+**v2 trace read (André, 2026-07-19)** — *sourced (Xcode screenshots, `fused_v2_rows8/`)*:
+`custom_kernel_moe_gather_qmv_down` = **126 allocated registers (stock: 100), 0 spilled,
+occupancy 26.51% (stock: 32.8%)**, 38.29% of its encoder (366.09 µs encoder GPU time). The
+Shaders table covered only the encoder holding `qmv_down` + steel_gemms; `qmv_gate_up` lives
+in a different encoder (MLX splits command buffers) — its numbers unread, not blocking.
+Also visible: the `Bf4ISigmoidACf4OMultiply` SwiGLU elementwise at **6.05%** of that encoder
+(the step-6 in-kernel-silu target), and fp16↔f32 copies (7.30% + 0.97%) that are *capture-test
+artefacts* (fp16 capX) — production x is f32, where those casts are no-ops.
+
+**Mechanism verdict (inferred, now well-evidenced): occupancy recovery is NOT what pays on
+this kernel.** ROWS=8 RAISED registers 100→126 and LOWERED occupancy 32.8→26.5 yet beats both
+stock and v0 — the banked winnings are ALU/Integer-limiter reduction (compile-time dims) +
+one fewer dispatch + wider per-thread ILP. The Step 5a "raise occupancy above 32.8%" design
+target is superseded by measurement; the pre-registered step-5 exit gate ("regs <100 AND
+occupancy >32.8%") is met on speed (≥1.10×: yes, ~1.20×) but NOT on its mechanism clause —
+flagged to André rather than silently rewritten.
+
+**Iteration 6 — VPT 16→8 at ROWS=8 (aimed by the v2 read): KEPT.** *Sourced
+(`/tmp/it6_bench_{1,2,3}.log`).* Halves per-thread x registers (x_thread[8], 256-value
+K-blocks — stock's non-fast `qmv` layout, kept at ROWS=8). Ratio **0.823 / 0.806 / 0.794** vs
+it2's 0.828–0.840 — bands don't overlap, kept. **Bit-exactness is gone by design from this
+iteration on**: each thread now spans 8 input values, so accumulation order differs from stock
+— pure FP-reorder noise, measured **~2e-5 relative** (Mini shapes: maxΔ 8.6e-06 absolute on
+O(1) outputs, 1e-3 gate passes with ~100× headroom; toy dims: ~0.01 absolute on O(500)
+outputs from unscaled N(0,1) weights). **Gate adjustment, flagged not slipped**: the five
+toy-dim equivalence assertions switched from absolute 1e-3 (which de-facto demanded
+bit-exactness at O(500) magnitudes) to relative rtol 1e-4 (`assertMatchesStock`, ~5× headroom
+over observed noise); the production-shape absolute 1e-3 gate in `testFusedQMVRunnerMini` is
+UNCHANGED and load-bearing. Justification: 2e-5 relative reorder noise is far below 4-bit
+quantization error, and stock itself changes accumulation order across its own qmv/qmv_fast
+shape dispatch. Trace: `fused_v3_vpt8/` (complete, retry 2).
+
+Loop state after 6 iterations: best = **ROWS=8 + VPT=8 at ~0.79–0.82** (≈17% faster than stock at SwitchGLU
 level); two consecutive no-gains since the it2 win. The remaining levers are capture-aimed
 (need actual regs/occupancy per variant) — pausing wall-clock probes for André's trace reads:
 `fused_v0_skeleton/` (baseline), `fused_v1_tgstage/` (why did TG staging lose — regs or ALU?),

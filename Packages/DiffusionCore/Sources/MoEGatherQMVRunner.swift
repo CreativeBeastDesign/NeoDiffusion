@@ -95,9 +95,10 @@ public final class MoEGatherQMVRunner {
         #define K_TOP \(topK)
         #define GROUP_SIZE \(groupSize)
 
-        inline float load_x16(const device float* x, thread float* x_thread) {
+        template <int VPT>
+        inline float load_xn(const device float* x, thread float* x_thread) {
             float sum = 0.0f;
-            for (int i = 0; i < 16; i += 4) {
+            for (int i = 0; i < VPT; i += 4) {
                 float x0 = x[i], x1 = x[i + 1], x2 = x[i + 2], x3 = x[i + 3];
                 sum += x0 + x1 + x2 + x3;
                 x_thread[i] = x0;
@@ -108,13 +109,14 @@ public final class MoEGatherQMVRunner {
             return sum;
         }
 
-        inline float qdot16(
+        template <int VPT>
+        inline float qdotn(
             const device uint8_t* w, const thread float* x_thread,
             float scale, float bias, float sum
         ) {
             float accum = 0.0f;
             const device uint16_t* ws = (const device uint16_t*)w;
-            for (int i = 0; i < 4; i++) {
+            for (int i = 0; i < VPT / 4; i++) {
                 accum += x_thread[4 * i] * (ws[i] & 0x000f)
                     + x_thread[4 * i + 1] * (ws[i] & 0x00f0)
                     + x_thread[4 * i + 2] * (ws[i] & 0x0f00)
@@ -127,7 +129,7 @@ public final class MoEGatherQMVRunner {
         // K-loop in 512-value blocks — stock `qmv_fast_impl` is ROWS=4; ROWS=8 halves x-load
         // traffic per output element (+4 accumulator registers). Pointers are expert-slab
         // bases; `xr` is the input row; `yr` is the pair's output row.
-        template <int IN_DIM, int ROWS>
+        template <int IN_DIM, int ROWS, int VPT>
         inline void qmv_rows(
             const device uint8_t* ws, const device float* sl, const device float* bl,
             const device float* xr, device float* yr,
@@ -135,27 +137,28 @@ public final class MoEGatherQMVRunner {
         ) {
             const int w_row = IN_DIM / 2;          // packed 4-bit bytes per output row
             const int g_row = IN_DIM / GROUP_SIZE; // quant groups per output row
+            const int blk = VPT * 32;              // K-loop block: VPT values × 32 lanes
 
-            ws += out_row * w_row + simd_lid * 8;  // 2 packs × 4 bytes per thread
-            sl += out_row * g_row + simd_lid / 4;  // 4 threads share one 64-value group
-            bl += out_row * g_row + simd_lid / 4;
-            xr += simd_lid * 16;
+            ws += out_row * w_row + simd_lid * (VPT / 2);      // VPT/8 packs × 4 bytes
+            sl += out_row * g_row + simd_lid / (GROUP_SIZE / VPT);
+            bl += out_row * g_row + simd_lid / (GROUP_SIZE / VPT);
+            xr += simd_lid * VPT;
 
-            thread float x_thread[16];
+            thread float x_thread[VPT];
             thread float result[ROWS];
             for (int row = 0; row < ROWS; row++) { result[row] = 0.0f; }
 
-            for (int k = 0; k < IN_DIM; k += 512) {
-                float sum = load_x16(xr, x_thread);
+            for (int k = 0; k < IN_DIM; k += blk) {
+                float sum = load_xn<VPT>(xr, x_thread);
                 for (int row = 0; row < ROWS; row++) {
-                    result[row] += qdot16(
+                    result[row] += qdotn<VPT>(
                         ws + row * w_row, x_thread,
                         sl[row * g_row], bl[row * g_row], sum);
                 }
-                ws += 256; // 512 values × 4 bits
-                sl += 512 / GROUP_SIZE;
-                bl += 512 / GROUP_SIZE;
-                xr += 512;
+                ws += blk / 2;
+                sl += blk / GROUP_SIZE;
+                bl += blk / GROUP_SIZE;
+                xr += blk;
             }
 
             for (int row = 0; row < ROWS; row++) {
@@ -186,10 +189,10 @@ public final class MoEGatherQMVRunner {
             const device float* xr = x + (ulong)token * H_DIM;
             const int out_row = tid.y * 16 + simd_gid * 8;
 
-            qmv_rows<H_DIM, 8>(
+            qmv_rows<H_DIM, 8, 8>(
                 (const device uint8_t*)wG + wSlab, sG + gSlab, bG + gSlab,
                 xr, outGate + (ulong)pair * I_DIM, out_row, simd_lid);
-            qmv_rows<H_DIM, 8>(
+            qmv_rows<H_DIM, 8, 8>(
                 (const device uint8_t*)wU + wSlab, sU + gSlab, bU + gSlab,
                 xr, outUp + (ulong)pair * I_DIM, out_row, simd_lid);
         """
@@ -207,7 +210,7 @@ public final class MoEGatherQMVRunner {
             const device float* xr = x + (ulong)pair * I_DIM;
             const int out_row = tid.y * 16 + simd_gid * 8;
 
-            qmv_rows<I_DIM, 8>(
+            qmv_rows<I_DIM, 8, 8>(
                 (const device uint8_t*)wD + wSlab, sD + gSlab, bD + gSlab,
                 xr, outDown + (ulong)pair * H_DIM, out_row, simd_lid);
         """

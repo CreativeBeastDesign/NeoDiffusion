@@ -56,6 +56,22 @@ final class MoEGatherQMVRunnerTests: XCTestCase {
         return (x, indicesArr)
     }
 
+    /// Relative equivalence gate vs stock. Since iteration 6 (VPT=8) the kernel spans 8 input
+    /// values per thread, not stock's 16 — the accumulation ORDER differs, so bit-exactness is
+    /// gone by design and only FP-reorder noise remains (observed ~2e-5 relative). The gate is
+    /// relative because these toy weights are unscaled N(0,1) — outputs are O(500), where an
+    /// absolute 1e-3 would silently demand bit-exactness. The production-shape gate
+    /// (`testFusedQMVRunnerMini`) stays absolute 1e-3 and passes with ~100x headroom.
+    private func assertMatchesStock(
+        _ fused: MLXArray, _ stock: MLXArray, rtol: Float = 1e-4,
+        _ message: String, file: StaticString = #filePath, line: UInt = #line
+    ) {
+        let maxDelta = MLX.abs(fused.asType(.float32) - stock.asType(.float32))
+            .max().item(Float.self)
+        let scale = MLX.abs(stock.asType(.float32)).max().item(Float.self)
+        XCTAssertLessThan(maxDelta, rtol * max(scale, 1e-6), message, file: file, line: line)
+    }
+
     override func tearDown() {
         // Never let one test's flag flip leak into another.
         MoEFusedQMVConfig.enabled = false
@@ -90,9 +106,7 @@ final class MoEGatherQMVRunnerTests: XCTestCase {
         XCTAssertEqual(fused.shape, [Self.T, Self.K, Self.H])
         XCTAssertEqual(fused.dtype, stock.dtype)
 
-        let maxDelta = MLX.abs(fused.asType(.float32) - stock.asType(.float32))
-            .max().item(Float.self)
-        XCTAssertLessThan(maxDelta, 1e-3, "fused kernel diverges from stock gatherQuantizedMM")
+        assertMatchesStock(fused, stock, "fused kernel diverges from stock gatherQuantizedMM")
         XCTAssertFalse(
             allClose(stock, MLXArray.zeros(like: stock)).item(Bool.self),
             "stock output is all zeros — comparison is vacuous")
@@ -112,9 +126,7 @@ final class MoEGatherQMVRunnerTests: XCTestCase {
             let fused = glu(x, indices: indices)
             MoEFusedQMVConfig.enabled = false
             eval(stock, fused)
-            let maxDelta = MLX.abs(fused.asType(.float32) - stock.asType(.float32))
-                .max().item(Float.self)
-            XCTAssertLessThan(maxDelta, 1e-3, "divergence for index pattern \(pattern)")
+            assertMatchesStock(fused, stock, "divergence for index pattern \(pattern)")
         }
     }
 
@@ -193,11 +205,8 @@ final class MoEGatherQMVRunnerTests: XCTestCase {
                 XCTAssertEqual(
                     MoEFusedQMVConfig.dispatchCount, before + 1,
                     "seed \(seed) xDType \(xDType): fused path did not dispatch — test proves nothing")
-                let maxDelta = MLX.abs(fused.asType(.float32) - stock.asType(.float32))
-                    .max().item(Float.self)
-                XCTAssertLessThan(
-                    maxDelta, 1e-3,
-                    "seed \(seed) xDType \(xDType): fused kernel diverges from stock")
+                assertMatchesStock(
+                    fused, stock, "seed \(seed) xDType \(xDType): fused kernel diverges from stock")
             }
         }
     }
@@ -226,10 +235,8 @@ final class MoEGatherQMVRunnerTests: XCTestCase {
         XCTAssertEqual(
             fused.dtype, stock.dtype,
             "fused output dtype must match stock's promoted dtype (fp16 scales + fp32 x)")
-        let maxDelta = MLX.abs(fused.asType(.float32) - stock.asType(.float32))
-            .max().item(Float.self)
-        XCTAssertLessThan(
-            maxDelta, 1e-3, "fused kernel diverges from stock at the production dtype pairing")
+        assertMatchesStock(
+            fused, stock, "fused kernel diverges from stock at the production dtype pairing")
     }
 
     /// Decode-shaped edge case: a single token (T=1) still routed to `K` experts. The stock
@@ -254,9 +261,7 @@ final class MoEGatherQMVRunnerTests: XCTestCase {
             MoEFusedQMVConfig.dispatchCount, before + 1,
             "fused path did not dispatch — eligibility fell back to stock, test proves nothing")
         XCTAssertEqual(fused.shape, [1, Self.K, Self.H])
-        let maxDelta = MLX.abs(fused.asType(.float32) - stock.asType(.float32))
-            .max().item(Float.self)
-        XCTAssertLessThan(maxDelta, 1e-3, "fused kernel diverges from stock at T=1")
+        assertMatchesStock(fused, stock, "fused kernel diverges from stock at T=1")
     }
 
     /// `CoreFixtureTests`' toy config (`hidden=128`, `moeInter=64`, `numExperts=4`) fails
