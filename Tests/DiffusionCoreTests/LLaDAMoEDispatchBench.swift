@@ -127,36 +127,55 @@ final class LLaDAMoEDispatchBench: XCTestCase {
     /// Step 5a trace shows the production dispatch is `..._float_...`).
     func testFusedQMVRunnerMini() throws {
         try skipUnlessOptedIn()
+        try runFusedQMVComparison(E: Self.E, H: Self.H, I: Self.I, T: Self.T, K: Self.K, label: "Mini")
+    }
+
+    /// Same A/B at Flash shapes (H=4096, I=1024 — both still multiples of 512, so
+    /// `MoEGatherQMVRunner.isEligible` holds and the fused path is taken, not a silent
+    /// fallback). Flash's weights are ~4x Mini's (still fine on this host). Step 8 insurance:
+    /// confirms the fused kernel's ranking isn't Mini-shape-specific before trusting it
+    /// end-to-end on a model that uses these dims.
+    func testFusedQMVRunnerFlash() throws {
+        try skipUnlessOptedIn()
+        try runFusedQMVComparison(E: Self.E, H: 4096, I: 1024, T: Self.T, K: Self.K, label: "Flash")
+    }
+
+    /// Step 2 of the kernel plan — the fused `MoEGatherQMVRunner` walking skeleton vs the stock
+    /// three-`gatherQuantizedMM` SwitchGLU, same quantized weights, SwitchGLU-level A/B (both
+    /// arms include the MLX-side SwiGLU combine; the k-weighted sum happens outside SwitchGLU
+    /// in both). Weights fp16, x float32 — the production dtype pairing (the Step 5a trace
+    /// shows the production dispatch is `..._float_...`).
+    private func runFusedQMVComparison(E: Int, H: Int, I: Int, T: Int, K: Int, label: String) throws {
         let freeMemBefore = freeMemoryMB()
         let swapBefore = swapUsedMB()
         let thermalBefore = thermalStateName()
 
         MLXRandom.seed(23)
-        let glu = SwitchGLU(hiddenSize: Self.H, intermediateSize: Self.I, numExperts: Self.E)
+        let glu = SwitchGLU(hiddenSize: H, intermediateSize: I, numExperts: E)
         let params: [String: MLXArray] = [
-            "gate_proj.weight": (MLXRandom.normal([Self.E, Self.I, Self.H]) * 0.05)
+            "gate_proj.weight": (MLXRandom.normal([E, I, H]) * 0.05)
                 .asType(.float16),
-            "up_proj.weight": (MLXRandom.normal([Self.E, Self.I, Self.H]) * 0.05)
+            "up_proj.weight": (MLXRandom.normal([E, I, H]) * 0.05)
                 .asType(.float16),
-            "down_proj.weight": (MLXRandom.normal([Self.E, Self.H, Self.I]) * 0.05)
+            "down_proj.weight": (MLXRandom.normal([E, H, I]) * 0.05)
                 .asType(.float16),
         ]
         try glu.update(parameters: ModuleParameters.unflattened(params), verify: .all)
         MLXNN.quantize(
             model: glu, groupSize: 64, bits: 4, mode: .affine,
             filter: { _, module in module is SwitchLinear })
-        let x = MLXRandom.normal([Self.T, Self.H])  // float32, per production
-        let indices = MLXRandom.randInt(0 ..< Int32(Self.E), [Self.T, Self.K])
+        let x = MLXRandom.normal([T, H])  // float32, per production
+        let indices = MLXRandom.randInt(0 ..< Int32(E), [T, K])
         eval(glu, x, indices)
 
         // reps 50: at ~1.3 ms/op the default 10 reps is inside cross-process drift; kernel
         // iteration needs the within-process ratio sharp.
-        let tStock = time("Mini - SwitchGLU stock (3x gatherQuantizedMM)", warmup: 3, reps: 50) {
+        let tStock = time("\(label) - SwitchGLU stock (3x gatherQuantizedMM)", warmup: 3, reps: 50) {
             MoEFusedQMVConfig.enabled = false
             return glu(x, indices: indices)
         }
         let dispatchesBefore = MoEFusedQMVConfig.dispatchCount
-        let tFused = time("Mini - SwitchGLU fused MoEGatherQMVRunner", warmup: 3, reps: 50) {
+        let tFused = time("\(label) - SwitchGLU fused MoEGatherQMVRunner", warmup: 3, reps: 50) {
             MoEFusedQMVConfig.enabled = true
             return glu(x, indices: indices)
         }
@@ -171,9 +190,9 @@ final class LLaDAMoEDispatchBench: XCTestCase {
         let fused = glu(x, indices: indices)
         MoEFusedQMVConfig.enabled = false
         let maxDelta = abs(fused.asType(.float32) - stock.asType(.float32)).max().item(Float.self)
-        print("[m6-bench] fused vs stock max |Δ| = \(maxDelta)")
+        print("[m6-bench] \(label) fused vs stock max |Δ| = \(maxDelta)")
         XCTAssertLessThan(maxDelta, 1e-3)
-        print(String(format: "[m6-bench] fused/stock time ratio = %.3f (stock %.4f s, fused %.4f s)",
+        print(String(format: "[m6-bench] \(label) fused/stock time ratio = %.3f (stock %.4f s, fused %.4f s)",
             tFused / tStock, tStock, tFused))
 
         let swapAfter = swapUsedMB()
