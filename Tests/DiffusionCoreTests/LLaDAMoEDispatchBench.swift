@@ -120,11 +120,10 @@ final class LLaDAMoEDispatchBench: XCTestCase {
             swapBefore, swapAfter, swapGrowth, freeMemBefore, thermalBefore, thermalAfter, isValid ? "true" : "false"))
     }
 
-    /// Step 2 of the kernel plan — the fused `MoEGatherQMVRunner` walking skeleton vs the stock
-    /// three-`gatherQuantizedMM` SwitchGLU at real Mini shapes, same quantized weights, SwitchGLU-
-    /// level A/B (both arms include the MLX-side SwiGLU combine; the k-weighted sum happens
-    /// outside SwitchGLU in both). Weights fp16, x float32 — the production dtype pairing (the
-    /// Step 5a trace shows the production dispatch is `..._float_...`).
+    /// Fused `MoEGatherQMVRunner` vs stock SwitchGLU at real Mini shapes, f32 x — races the
+    /// stock `_float_` gather variant. NOTE (2026-07-19): this pairing was originally mislabeled
+    /// "production"; TRUE production is f16 x (see `testFusedQMVRunnerMiniHalfX` and the
+    /// step5 logbook post-close addendum).
     func testFusedQMVRunnerMini() throws {
         try skipUnlessOptedIn()
         try runFusedQMVComparison(E: Self.E, H: Self.H, I: Self.I, T: Self.T, K: Self.K, label: "Mini")
@@ -140,12 +139,28 @@ final class LLaDAMoEDispatchBench: XCTestCase {
         try runFusedQMVComparison(E: Self.E, H: 4096, I: 1024, T: Self.T, K: Self.K, label: "Flash")
     }
 
+    /// TRUE production dtypes (f16 x + f16 scales): stock dispatches the `_half_` gather kernel
+    /// here — the one serving actually runs — while the fused runner stages through f32 buffers
+    /// (value-identical arithmetic, different traffic). The f32-x tests above race the `_float_`
+    /// stock variant instead and flatter no one in particular; this is the honest ranking.
+    func testFusedQMVRunnerMiniHalfX() throws {
+        try skipUnlessOptedIn()
+        try runFusedQMVComparison(
+            E: Self.E, H: Self.H, I: Self.I, T: Self.T, K: Self.K, label: "Mini-halfX",
+            xDType: .float16)
+    }
+
     /// Step 2 of the kernel plan — the fused `MoEGatherQMVRunner` walking skeleton vs the stock
     /// three-`gatherQuantizedMM` SwitchGLU, same quantized weights, SwitchGLU-level A/B (both
     /// arms include the MLX-side SwiGLU combine; the k-weighted sum happens outside SwitchGLU
-    /// in both). Weights fp16, x float32 — the production dtype pairing (the Step 5a trace
-    /// shows the production dispatch is `..._float_...`).
-    private func runFusedQMVComparison(E: Int, H: Int, I: Int, T: Int, K: Int, label: String) throws {
+    /// in both). Weights fp16 always. `xDType` picks the stock kernel variant being raced:
+    /// f32 x promotes to f32 (the `_float_` gather — what the Step 5a synthetic capture ran and
+    /// this campaign originally mislabeled "production"); **f16 x is TRUE production** (hidden
+    /// states are f16 end-to-end, promote(f16, f16) = f16 → the `_half_` gather, zero scales
+    /// casts — established 2026-07-19, logbook post-close addendum).
+    private func runFusedQMVComparison(
+        E: Int, H: Int, I: Int, T: Int, K: Int, label: String, xDType: DType = .float32
+    ) throws {
         let freeMemBefore = freeMemoryMB()
         let swapBefore = swapUsedMB()
         let thermalBefore = thermalStateName()
@@ -164,7 +179,7 @@ final class LLaDAMoEDispatchBench: XCTestCase {
         MLXNN.quantize(
             model: glu, groupSize: 64, bits: 4, mode: .affine,
             filter: { _, module in module is SwitchLinear })
-        let x = MLXRandom.normal([T, H])  // float32, per production
+        let x = MLXRandom.normal([T, H]).asType(xDType)
         let indices = MLXRandom.randInt(0 ..< Int32(E), [T, K])
         eval(glu, x, indices)
 
@@ -190,8 +205,14 @@ final class LLaDAMoEDispatchBench: XCTestCase {
         let fused = glu(x, indices: indices)
         MoEFusedQMVConfig.enabled = false
         let maxDelta = abs(fused.asType(.float32) - stock.asType(.float32)).max().item(Float.self)
-        print("[m6-bench] \(label) fused vs stock max |Δ| = \(maxDelta)")
-        XCTAssertLessThan(maxDelta, 1e-3)
+        let stockMax = abs(stock.asType(.float32)).max().item(Float.self)
+        // Relative gate, dtype-dependent: f32 out keeps the original ~5e-4-relative strictness;
+        // f16 out (TRUE production: half kernels, f16-rounded SwiGLU intermediates) carries
+        // ~1e-3-relative reorder noise amplified through the f16 nonlinearity — 5e-3 bounds it.
+        let rtol: Float = stock.dtype == .float16 ? 5e-3 : 5e-4
+        print("[m6-bench] \(label) fused vs stock max |Δ| = \(maxDelta) "
+            + "(relative \(maxDelta / max(stockMax, 1e-6)), gate rtol \(rtol))")
+        XCTAssertLessThan(maxDelta, rtol * max(stockMax, 1e-6))
         print(String(format: "[m6-bench] \(label) fused/stock time ratio = %.3f (stock %.4f s, fused %.4f s)",
             tFused / tStock, tStock, tFused))
 

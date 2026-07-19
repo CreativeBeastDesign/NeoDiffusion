@@ -9,10 +9,13 @@
 // K-blocks, pre-scaled activations + masked-nibble dot, FP32 accumulate) so the equivalence
 // gate is near-exact; register-pressure restructuring is Step 5's optimization loop, not this.
 //
-// Dtype contract (sourced from the Step 5a trace: the production dispatch is
-// `affine_gather_qmv_fast_float_gs_64_b_4`, T = float32): the kernels run in float32; inputs
-// are cast on the way in, the SwiGLU intermediate is rounded through `x.dtype` to mirror the
-// stock path's rounding points, and the result is returned in `x.dtype`.
+// Dtype contract: the kernels always run in float32 buffers (inputs cast on the way in —
+// exact for f16 sources); the result is returned in the promoted stock output dtype
+// (`outDType`), with the SwiGLU intermediate rounded through it to mirror stock's rounding
+// points. CORRECTED 2026-07-19 (logbook post-close addendum): TRUE production is f16 x +
+// f16 scales → stock dispatches the `_half_` gather (accumulating in float internally, like
+// this kernel) and outDType is f16. The earlier claim that production runs `_float_` came
+// from the Step 5a capture — which is the SYNTHETIC capture test (f32 scales), not serving.
 //
 // Default-off behind `MoEFusedQMVConfig.enabled`; the stock `gatherQuantizedMM` path is
 // untouched when the flag is off or the fast-path preconditions in `SwitchGLU` aren't met

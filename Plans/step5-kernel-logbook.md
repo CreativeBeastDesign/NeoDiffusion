@@ -94,7 +94,9 @@ bit-exactness at O(500) magnitudes) to relative rtol 1e-4 (`assertMatchesStock`,
 over observed noise); the production-shape absolute 1e-3 gate in `testFusedQMVRunnerMini` is
 UNCHANGED and load-bearing. Justification: 2e-5 relative reorder noise is far below 4-bit
 quantization error, and stock itself changes accumulation order across its own qmv/qmv_fast
-shape dispatch. Trace: `fused_v3_vpt8/` (complete, retry 2).
+shape dispatch. Trace: `fused_v3_vpt8/` (complete, retry 2). *v3 trace read (André,
+2026-07-19): occupancy mostly ~26.65% — unchanged from v2's 26.51 despite the halved
+x-registers, further confirming occupancy is decoupled from what pays here.*
 
 **Iteration 7 (= step-6 fusion attempt) — in-kernel SwiGLU: NEGATIVE, REVERTED (both
 configs).** *Sourced (`/tmp/it7_bench_{1,2,3}.log`, `/tmp/it7b_bench_{1,2,3}.log`).* A third
@@ -185,6 +187,48 @@ scales → casts short-circuit). Two consequences under check:
    experts ONLY: other quantized layers' runtime pairing is unverified and forcing f32 there
    would change promotion, not pre-pay it. Cost ~+0.95 GB resident (Studio trivial; M1 would
    need a host-aware default if this ships). E2E ms/forward A/B running.
+
+### 2026-07-19 — Post-close addendum II: cast-hypothesis A/B RESOLVED — production dtype mislabel found, campaign story now complete
+
+**Pre-cast A/B result** *(sourced: Sonnet subagent, reviewed; `scratch/precast/arm_{a,b}{1,2}.jsonl`
++ `.log`; 48 rows, all envValid, warmups excluded; engagement proven — `[precast-scales] … (114
+tensors)` in both B logs, absent in A; `[fused-qmv]` absent everywhere; stale-binary first
+attempt caught by the engagement check itself and redone after rebuild — the echo discipline
+paid for itself)*: **ms/forward 0.996 (wash)**, peak memory **+0.89 GB**, and — decisively —
+**bit-identity FAILED: 10/12 prompts changed trajectories** (deterministic per arm; coherent
+text; e.g. chat-email 56→66 steps). Under the hypothesis's own premise that was impossible,
+which exposed the real error:
+
+**Production x at the MoE gather is FLOAT16, not float32.** *Sourced (code):* embeddings stored
+F16, no hidden-state upcast anywhere in the decoder path, the MoE combine returns `x.dtype`.
+Therefore stock promotes (f16, f16) → **f16**, dispatches the **`_half_` gather kernel**, and
+`astype(scales, f16)` **short-circuits — stock pays zero cast traffic**. The pre-cast flag
+*forces* f32 promotion instead: a real precision increase (hence the trajectory changes), +0.89
+GB, nothing saved. **Flag REJECTED**, marked in its comment; kept as measurement provenance.
+
+**Retractions and corrections** (stated, not silently rewritten — house rule):
+1. *"The production dispatch is `_float_`"* — **my error, retracted.** The Step 5a trace that
+   claim came from is the SYNTHETIC capture test (quantizes f32 weights → f32 scales; fp16 capX
+   → promote f32). It was never serving. The mislabel propagated into the runner's doc comment,
+   the bench test names ("production dtype pairing"), and André's ~2.9 GB cast sizing premise
+   (his `ops.cpp` per-call-astype reading itself is correct and was worth the check).
+2. **Every occupancy/register profile in this campaign — including Step 5a's original
+   32.8%/100-regs GO verdict — measured the FLOAT kernel variant. Production's HALF variant
+   was never profiled.** Any future kernel work must capture at true production dtypes (f16
+   weights + f16 x in the capture test).
+3. **The step-8 "busy queue hides the latency" inference is SUPERSEDED** by a simpler, measured
+   explanation: `testFusedQMVRunnerMiniHalfX` (new, true production dtypes) shows **fused/stock
+   = 0.998 / 0.973 / 0.997 — the fused kernel merely TIES the half variant** stock actually
+   runs in serving. The celebrated 0.79–0.83 was measured against the ~20%-slower float
+   variant. There was no dilution mystery: the win never existed against the right baseline.
+   (Equivalence at f16: rel 1.5e-3 — reorder noise through f16-rounded SwiGLU; bench gate made
+   relative, rtol 5e-3 f16 / 5e-4 f32, f32 arms unchanged in effective strictness.)
+
+**Final standing (unchanged verdict, now with a complete causal story)**: fused kernel stays
+landed, default-off, rejected for serving. The ~7.5 ms "not-moving-bytes" question is
+re-opened in one narrow sense — it was sized against float-variant captures and castless-FP16
+comparisons — but the E2E measurements (step 8 + this A/B) bound any recoverable win at ≈0 for
+this kernel class on this host, so the practical CLOSED verdict holds.
 
 Recommendation to André: ratify the reject, keep branch `kernel`'s artifacts (they are the
 negative result), fold the CLAUDE.md status update, and consider the kernel road CLOSED unless

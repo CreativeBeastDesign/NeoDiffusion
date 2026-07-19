@@ -32,12 +32,12 @@ Peak memory +0.37 GB on the fused arm (transient f32 casts of fp16 scales/biases
    registers to 126 and *lowered* occupancy to 26.5% and were faster anyway; the TG-staging
    variant that actually targeted registers was slower. What paid at microbench level: fewer
    dispatches, compile-time dims (ALU limiter 70→56, Integer 57→43), wider per-thread ILP.
-2. **The microbench win did not survive the busy queue.** In the real forward the latency the
-   fused kernel removes is already hidden by queued work — the same non-additivity
-   `gather_qmm_handoff.md` §11 found for the router. This bounds the ~7.5 ms
-   "not-moving-bytes" sizing: it is a latency/scheduling phenomenon the pipeline absorbs, not
-   recoverable ALU waste. **Microbench deltas on this codebase are upper bounds, not
-   predictions.**
+2. **The microbench win was against the wrong baseline variant** *(superseded the earlier
+   "busy queue" reading — post-close coda below)*: the 0.79–0.83 raced stock's `_float_`
+   gather, but serving runs f16 hidden states → the `_half_` gather, ~20% faster — and the
+   fused kernel merely ties it (0.97–1.00 at true dtypes). **Microbench deltas are upper
+   bounds, and a microbench is only valid against the exact kernel variant production
+   dispatches — dtype promotion picks the variant.**
 3. **Threshold decoding is trajectory-sensitive to ~1e-5-class numeric perturbation.** The
    kernel's FP-reorder noise (~2e-5 relative, far under 4-bit quantization error) deterministically
    changed decoding trajectories on 7/12 bench prompts (different step counts and token counts;
@@ -68,3 +68,17 @@ Branch `kernel`, commits `9219fc2..b86e817`.
   any two-level version would have shipped.
 - Negative results with this much instrumentation are cheap insurance: the next person who
   proposes "just rewrite the MoE kernel" starts from measured ground.
+
+## Post-close coda (2026-07-19): the dtype mislabel and the cast hypothesis
+
+André's read of `ops.cpp` (`gather_qmm` casts scales/biases per call) triggered a pre-cast-at-
+load A/B that refuted its own premise in the most informative way possible: trajectories
+diverged where exactness was predicted, which unmasked that **production hidden states are
+f16** — stock promotes to f16, runs the `_half_` kernel, and pays no casts at all. The "+2.9
+GB cast traffic" premise traced back to this campaign mislabeling its synthetic capture (f32
+scales) as "production". Fallout, all corrected in-tree: every profile of the campaign
+(including the Step 5a GO verdict) measured the float variant production never runs; the
+pre-cast flag is rejected (forces f32 promotion: +0.89 GB, ms/forward 0.996, real numeric
+change); the fused-vs-stock ranking at true dtypes is a tie. Lesson worth engraving: **check
+what dtype actually reaches the op — promotion rules choose the kernel, and the kernel you
+profile must be the kernel you serve.**

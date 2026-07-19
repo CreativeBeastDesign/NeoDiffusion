@@ -105,14 +105,14 @@ public class DiffusionModel {
 
         var arrays = ExpertWeightStacking.stack(rawArrays)
 
-        // NEODIFFUSION_PRECAST_SCALES=1 (diagnostic, default off): store routed-expert
-        // scales/biases as f32 instead of the checkpoint's f16. `gather_qmm` casts them to the
-        // promoted out_type (f32, since serving x is f32) on EVERY call (`ops.cpp` gather_qmm:
-        // `astype(scales, out_type)`); `astype` short-circuits on matching dtype, so pre-casting
-        // once at load turns ~2.9 GB/forward of cast traffic (6 tensors × 19 MoE layers) into
-        // no-ops, for ~+0.95 GB resident. f16→f32 is exact — trajectories must stay
-        // bit-identical. Routed experts ONLY: other quantized layers' runtime pairing is
-        // unverified, and forcing f32 there would CHANGE their promotion, not just pre-pay it.
+        // NEODIFFUSION_PRECAST_SCALES=1 — diagnostic, default off, **REJECTED 2026-07-19**
+        // (step5 logbook post-close addendum): the premise was that serving x is f32, making
+        // `gather_qmm`'s per-call `astype(scales, out_type)` cost ~2.9 GB/forward. Measured:
+        // serving x is f16 → promote(f16, f16) = f16 → the casts short-circuit already and
+        // stock pays NOTHING. Flipping this flag FORCES f32 promotion instead: +0.89 GB peak,
+        // ms/forward wash (0.996), and real trajectory changes (10/12 prompts) from the
+        // precision increase — measured `scratch/precast/`. Kept only as the measurement's
+        // provenance; do not enable in serving.
         if ProcessInfo.processInfo.environment["NEODIFFUSION_PRECAST_SCALES"] == "1" {
             var castCount = 0
             for (key, value) in arrays
