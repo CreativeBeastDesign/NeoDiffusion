@@ -123,11 +123,12 @@ public final class MoEGatherQMVRunner {
             return scale * accum + sum * bias;
         }
 
-        // One simdgroup's share of a single (token, expert) GEMV: 4 consecutive output rows,
-        // K-loop in 512-value blocks — the exact shape of stock `qmv_fast_impl`. Pointers are
-        // expert-slab bases; `xr` is the input row; `yr` is the pair's output row.
-        template <int IN_DIM>
-        inline void qmv4_rows(
+        // One simdgroup's share of a single (token, expert) GEMV: ROWS consecutive output rows,
+        // K-loop in 512-value blocks — stock `qmv_fast_impl` is ROWS=4; ROWS=8 halves x-load
+        // traffic per output element (+4 accumulator registers). Pointers are expert-slab
+        // bases; `xr` is the input row; `yr` is the pair's output row.
+        template <int IN_DIM, int ROWS>
+        inline void qmv_rows(
             const device uint8_t* ws, const device float* sl, const device float* bl,
             const device float* xr, device float* yr,
             int out_row, uint simd_lid
@@ -141,11 +142,12 @@ public final class MoEGatherQMVRunner {
             xr += simd_lid * 16;
 
             thread float x_thread[16];
-            thread float result[4] = {0.0f, 0.0f, 0.0f, 0.0f};
+            thread float result[ROWS];
+            for (int row = 0; row < ROWS; row++) { result[row] = 0.0f; }
 
             for (int k = 0; k < IN_DIM; k += 512) {
                 float sum = load_x16(xr, x_thread);
-                for (int row = 0; row < 4; row++) {
+                for (int row = 0; row < ROWS; row++) {
                     result[row] += qdot16(
                         ws + row * w_row, x_thread,
                         sl[row * g_row], bl[row * g_row], sum);
@@ -156,7 +158,7 @@ public final class MoEGatherQMVRunner {
                 xr += 512;
             }
 
-            for (int row = 0; row < 4; row++) {
+            for (int row = 0; row < ROWS; row++) {
                 float r = simd_sum(result[row]);
                 if (simd_lid == 0) {
                     yr[out_row + row] = r;
@@ -182,12 +184,12 @@ public final class MoEGatherQMVRunner {
             const ulong wSlab = (ulong)expert * I_DIM * (H_DIM / 2);
             const ulong gSlab = (ulong)expert * I_DIM * (H_DIM / GROUP_SIZE);
             const device float* xr = x + (ulong)token * H_DIM;
-            const int out_row = tid.y * 8 + simd_gid * 4;
+            const int out_row = tid.y * 16 + simd_gid * 8;
 
-            qmv4_rows<H_DIM>(
+            qmv_rows<H_DIM, 8>(
                 (const device uint8_t*)wG + wSlab, sG + gSlab, bG + gSlab,
                 xr, outGate + (ulong)pair * I_DIM, out_row, simd_lid);
-            qmv4_rows<H_DIM>(
+            qmv_rows<H_DIM, 8>(
                 (const device uint8_t*)wU + wSlab, sU + gSlab, bU + gSlab,
                 xr, outUp + (ulong)pair * I_DIM, out_row, simd_lid);
         """
@@ -203,9 +205,9 @@ public final class MoEGatherQMVRunner {
             const ulong wSlab = (ulong)expert * H_DIM * (I_DIM / 2);
             const ulong gSlab = (ulong)expert * H_DIM * (I_DIM / GROUP_SIZE);
             const device float* xr = x + (ulong)pair * I_DIM;
-            const int out_row = tid.y * 8 + simd_gid * 4;
+            const int out_row = tid.y * 16 + simd_gid * 8;
 
-            qmv4_rows<I_DIM>(
+            qmv_rows<I_DIM, 8>(
                 (const device uint8_t*)wD + wSlab, sD + gSlab, bD + gSlab,
                 xr, outDown + (ulong)pair * H_DIM, out_row, simd_lid);
         """
@@ -261,7 +263,7 @@ public final class MoEGatherQMVRunner {
                 up.weight, up.scales.asType(.float32), bU.asType(.float32),
                 expertIdx,
             ],
-            grid: (64, intermediateSize / 8, T * k),
+            grid: (64, intermediateSize / 16, T * k),
             threadGroup: (64, 1, 1),
             outputShapes: [[T * k, intermediateSize], [T * k, intermediateSize]],
             outputDTypes: [.float32, .float32]
@@ -275,7 +277,7 @@ public final class MoEGatherQMVRunner {
 
         let downResults = downKernel(
             [glu, down.weight, down.scales.asType(.float32), bD.asType(.float32), expertIdx],
-            grid: (64, hiddenSize / 8, T * k),
+            grid: (64, hiddenSize / 16, T * k),
             threadGroup: (64, 1, 1),
             outputShapes: [[T * k, hiddenSize]],
             outputDTypes: [.float32]

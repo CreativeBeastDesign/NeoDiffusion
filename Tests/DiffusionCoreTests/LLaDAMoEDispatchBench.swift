@@ -149,12 +149,14 @@ final class LLaDAMoEDispatchBench: XCTestCase {
         let indices = MLXRandom.randInt(0 ..< Int32(Self.E), [Self.T, Self.K])
         eval(glu, x, indices)
 
-        let tStock = time("Mini - SwitchGLU stock (3x gatherQuantizedMM)") {
+        // reps 50: at ~1.3 ms/op the default 10 reps is inside cross-process drift; kernel
+        // iteration needs the within-process ratio sharp.
+        let tStock = time("Mini - SwitchGLU stock (3x gatherQuantizedMM)", warmup: 3, reps: 50) {
             MoEFusedQMVConfig.enabled = false
             return glu(x, indices: indices)
         }
         let dispatchesBefore = MoEFusedQMVConfig.dispatchCount
-        let tFused = time("Mini - SwitchGLU fused MoEGatherQMVRunner") {
+        let tFused = time("Mini - SwitchGLU fused MoEGatherQMVRunner", warmup: 3, reps: 50) {
             MoEFusedQMVConfig.enabled = true
             return glu(x, indices: indices)
         }
@@ -354,6 +356,9 @@ final class LLaDAMoEDispatchBench: XCTestCase {
         MLX.GPU.stopCapture(url: url)
 
         print("[capture] MoE block forward (production quantized, T=32) -> \(path)")
+        // Which MoE dispatch path did the captured forward take? (NEODIFFUSION_FUSED_QMV=1
+        // seeds the flag, but eligibility can silently fall back to stock — echo the proof.)
+        print("[capture] fused gather-QMV dispatches this process: \(MoEFusedQMVConfig.dispatchCount)")
     }
 
     /// H4 — module-level attribution at real shapes (warm): one quantized MoE block

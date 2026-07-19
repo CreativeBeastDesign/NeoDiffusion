@@ -15,6 +15,46 @@ with the same precision as wins, envValid discipline on every bench row.
 
 ## Log
 
+### 2026-07-19 — Step 5 optimization loop
+
+**Bench protocol tightened first**: `testFusedQMVRunnerMini` reps 10→50, warmup 3 — at
+~1.3 ms/op the default 10 reps sat inside cross-process drift. All ratios below are
+fused/stock within one process, 3 processes each, envValid true throughout. Baseline **v0**
+(the committed walking skeleton, `9219fc2`) under this protocol: **0.842 / 0.855 / 0.845**.
+
+**Iteration 2 — ROWS 4→8 per simdgroup: KEPT, first win.** *Sourced
+(`/tmp/it2_bench_{1,2,3}.log`).* Each simdgroup accumulates 8 output rows per K-block instead
+of stock's 4, halving x-load traffic per output element for +4 accumulator registers. Ratio
+**0.829 / 0.828 / 0.830** vs v0's 0.842–0.855 (~2 pp), maxΔ = 0.0, 9/9 tests. Working tree
+now carries this variant (`qmv_rows<*, 8>`, grid OUT/16, 64 threads/tg); trace captured to
+`scratch/captures/fused_v2_rows8/` (dispatch-proven, 3).
+
+**Iteration 3 — ROWS=16: REVERTED.** *Sourced (`/tmp/it3_bench_{1,2,3}.log`).* 0.838 / 0.833 /
+0.847 — worse than ROWS=8 and noisier; +16 accumulator registers overshoot.
+
+**Iteration 4 — 4 simdgroups/tg (128 threads, ROWS=8): REVERTED.** *Sourced
+(`/tmp/it4_bench_{1,2,3}.log`).* 0.844 / 0.852 / 0.844 — fewer threadgroup launches doesn't
+pay; per-thread registers unchanged, so no occupancy relief either.
+
+Loop state after 4 iterations: best = **ROWS=8 at ~0.83** (≈17% faster than stock at SwitchGLU
+level); two consecutive no-gains since the it2 win. The remaining levers are capture-aimed
+(need actual regs/occupancy per variant) — pausing wall-clock probes for André's trace reads:
+`fused_v0_skeleton/` (baseline), `fused_v1_tgstage/` (why did TG staging lose — regs or ALU?),
+`fused_v2_rows8/` (current best — is there register headroom for packs_per_thread=4?).
+
+**Iteration 1 — threadgroup x-staging (lever 1): REVERTED, wall-clock negative.** *Sourced
+(`/tmp/it1_bench_{1,2,3}.log`, `/tmp/v0_bench_{1,2,3}.log`).* Staged the full pre-scaled input
+row in TG memory (8 KB gate/up, 2 KB down), one barrier, both passes reading TG instead of
+per-thread `x_thread[16]`; bias sum reconstructed with exact power-of-2 multiplies
+(bit-identical arithmetic — equivalence stayed maxΔ = 0.0, 9/9 tests). Ratio **0.878 / 0.886 /
+0.878** vs v0's 0.842–0.855 ⇒ ~3.5 pp regression, consistent. Wall-clock says the barrier +
+TG round-trips cost more than the register relief buys at these shapes. **Why is not yet
+known** — trace captured to `scratch/captures/fused_v1_tgstage/` (dispatch-count-proven, 3);
+André's read of regs/occupancy vs v0 decides whether the register-pressure lever family is
+mis-aimed (regs didn't drop — compiler hoisted TG reads) or capped (regs dropped, ALU floor
+ate the gain). v1 source preserved at `/tmp/v1_runner.swift` this session; the working tree
+carries v0.
+
 ### 2026-07-18 — Step 0: disk cleanup (chore)
 Deleted the superseded host-local artefacts approved by André (empty/superseded isolated
 captures, `captures_old/`, the 8-bit-experts and mxfp4 Step-4c diagnostic models): **39 GiB
