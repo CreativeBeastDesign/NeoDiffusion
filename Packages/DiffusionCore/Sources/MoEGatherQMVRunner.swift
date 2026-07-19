@@ -37,7 +37,17 @@ public enum MoEFusedQMVConfig {
     /// fused path actually ran (an ineligible shape silently falls back to stock).
     nonisolated(unsafe) public private(set) static var dispatchCount: Int = 0
 
-    static func recordDispatch() { dispatchCount += 1 }
+    nonisolated(unsafe) private static var didLogActivation = false
+
+    static func recordDispatch() {
+        dispatchCount += 1
+        if !didLogActivation {
+            didLogActivation = true
+            // Effective-echo (AGENTS.md): serving/bench logs must show the fused path actually
+            // engaged, not just that the env var was set.
+            print("[fused-qmv] active: first fused gather-QMV dispatch in this process")
+        }
+    }
 }
 
 /// Runs one MoE layer's routed-expert SwiGLU (`gate_proj` / `up_proj` / `down_proj`) through two
