@@ -36,7 +36,18 @@ now carries this variant (`qmv_rows<*, 8>`, grid OUT/16, 64 threads/tg); trace c
 (`/tmp/it4_bench_{1,2,3}.log`).* 0.844 / 0.852 / 0.844 — fewer threadgroup launches doesn't
 pay; per-thread registers unchanged, so no occupancy relief either.
 
-Loop state after 4 iterations: best = **ROWS=8 at ~0.83** (≈17% faster than stock at SwitchGLU
+**Iteration 5 — dual gate+up K-loop (step-6 probe, silu still MLX-side): NOT KEPT, ambiguous.**
+*Sourced (`/tmp/it5_bench_{1,2,3}.log`).* One x_thread load per K-block feeding both weight
+matrices' 8 rows (register profile ≈ ROWS=16). Ratio 0.824 / 0.842 / 0.854 — fully overlaps
+the ROWS=8 band, high variance, no proven gain; reverted on simplicity. *Inferred insight:*
+x is ~256 KB/layer-forward — cache-resident after first touch — so x-load traffic was never
+the cost; the 128 MiB weight stream is. The it2 win was plausibly wider per-thread ILP, not
+x reuse. Full step-6 (in-kernel silu, single glu output, one fewer dispatch + intermediate
+round-trip) remains untried and is a *different* mechanism — but note its toy-fp16 rounding-
+parity wrinkle (in-kernel silu skips the outDType rounding stock applies when out dtype is
+fp16; production f32 is unaffected).
+
+Loop state after 5 iterations: best = **ROWS=8 at ~0.83** (≈17% faster than stock at SwitchGLU
 level); two consecutive no-gains since the it2 win. The remaining levers are capture-aimed
 (need actual regs/occupancy per variant) — pausing wall-clock probes for André's trace reads:
 `fused_v0_skeleton/` (baseline), `fused_v1_tgstage/` (why did TG staging lose — regs or ALU?),
