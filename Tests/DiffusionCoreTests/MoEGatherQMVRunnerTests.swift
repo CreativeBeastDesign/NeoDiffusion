@@ -161,6 +161,72 @@ final class MoEGatherQMVRunnerTests: XCTestCase {
 
     /// Flag off must run the stock `gatherQuantizedMM` path — non-zero output, deterministic
     /// across calls.
+    /// THE definitive mechanism test for the 2026-07-19 dtype finding (logbook post-close
+    /// addendum II): with f16 weights (→ f16 scales) and f16 x — TRUE production dtypes — the
+    /// STOCK path promotes (f16, f16) → f16 and pays no scale casts. Pre-casting the resident
+    /// scales/biases to f32 once (exactly what `NEODIFFUSION_PRECAST_SCALES` does at load)
+    /// flips the promotion: output dtype becomes f32, and the values genuinely change (higher-
+    /// precision intermediates) while staying close — precision shift, not corruption. Every
+    /// link of the causal chain (resident dtype → promotion → output dtype → numerics) is
+    /// asserted here; the speed link is the env-gated `testPrecastScalesMiniTiming`.
+    /// The fused-kernel flag stays off throughout — this is about STOCK behavior.
+    func testPrecastScalesPromotionMechanism() throws {
+        let glu = makeToyGLU(seed: 31, weightDType: .float16)
+        let (x, indices) = toyInputs(xDType: .float16)
+        XCTAssertFalse(MoEFusedQMVConfig.enabled, "precondition: stock path only")
+        let dispatchesBefore = MoEFusedQMVConfig.dispatchCount
+
+        guard let g = glu.gateProj as? QuantizedSwitchLinear,
+              let u = glu.upProj as? QuantizedSwitchLinear,
+              let d = glu.downProj as? QuantizedSwitchLinear,
+              let bG = g.biases, let bU = u.biases, let bD = d.biases
+        else { return XCTFail("toy GLU is not affine-quantized") }
+        XCTAssertEqual(g.scales.dtype, .float16, "f16 weights must yield f16 scales")
+
+        // Arm A — stock, f16 resident scales: promote(f16, f16) = f16, the _half_ gather.
+        let outA = glu(x, indices: indices)
+        eval(outA)
+        XCTAssertEqual(outA.dtype, .float16,
+            "stock at production dtypes must output f16 — if this fails, the _half_-variant "
+            + "finding is wrong and the campaign records need re-opening")
+
+        // Pre-cast resident scales/biases to f32 — the loader flag's exact mechanism.
+        let precast: [String: MLXArray] = [
+            "gate_proj.scales": g.scales.asType(.float32),
+            "gate_proj.biases": bG.asType(.float32),
+            "up_proj.scales": u.scales.asType(.float32),
+            "up_proj.biases": bU.asType(.float32),
+            "down_proj.scales": d.scales.asType(.float32),
+            "down_proj.biases": bD.asType(.float32),
+        ]
+        try glu.update(parameters: ModuleParameters.unflattened(precast), verify: .noUnusedKeys)
+        eval(glu)
+
+        // Arm B — identical quantized values, f32 resident scales: promotion flips to f32.
+        let outB = glu(x, indices: indices)
+        eval(outB)
+        XCTAssertEqual(outB.dtype, .float32,
+            "f32 resident scales must flip the promotion — astype short-circuit means stock "
+            + "was never casting at f16/f16")
+        XCTAssertEqual(
+            MoEFusedQMVConfig.dispatchCount, dispatchesBefore,
+            "fused path must not have run — this test is about stock promotion")
+
+        // Numerics: a real precision change (not bit-preserving), but close (not corruption).
+        let a32 = outA.asType(.float32)
+        let maxDelta = MLX.abs(outB - a32).max().item(Float.self)
+        let scale = MLX.abs(a32).max().item(Float.self)
+        XCTAssertFalse(
+            allClose(outB, a32, rtol: 0.0, atol: 0.0).item(Bool.self),
+            "outputs are bit-identical — then promotion does NOT change numerics and the "
+            + "pre-cast A/B's trajectory divergence needs another explanation")
+        XCTAssertLessThan(
+            maxDelta, 2e-2 * max(scale, 1e-6),
+            "f16→f32 promotion should shift values by ~f16-rounding magnitude only")
+        print("[precast-mechanism] maxΔ = \(maxDelta) (relative \(maxDelta / max(scale, 1e-6))) "
+            + "— precision shift confirmed, dtype f16→f32 confirmed")
+    }
+
     func testFlagOffPathUnchanged() throws {
         let glu = makeToyGLU(seed: 5)
         let (x, indices) = toyInputs()

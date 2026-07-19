@@ -230,6 +230,25 @@ re-opened in one narrow sense — it was sized against float-variant captures an
 comparisons — but the E2E measurements (step 8 + this A/B) bound any recoverable win at ≈0 for
 this kernel class on this host, so the practical CLOSED verdict holds.
 
+### 2026-07-19 — The definitive promotion-mechanism test (André's ask): every link now asserted
+
+Two permanent tests pin the causal chain (`testPrecastScalesPromotionMechanism`, always-run;
+`testPrecastScalesMiniTiming`, env-gated). *Sourced (this session, 3 timing processes):*
+
+| link | assertion/measurement | result |
+|---|---|---|
+| resident f16 scales + f16 x → stock output dtype | `outA.dtype == .float16` | **confirmed** (the `_half_` gather; zero casts) |
+| pre-cast resident scales f32 → promotion flips | `outB.dtype == .float32` | **confirmed** |
+| numerics: real change, not corruption | not bit-identical AND < 2e-2 rel | **confirmed — 1.8e-3 relative** (f16-rounding magnitude; explains the pre-cast A/B's 10/12 trajectory flips) |
+| speed cost of the flip (Mini shapes, within-process) | float/half time ratio | **1.065 / 1.027 / 1.047 — ~3–6%** |
+
+The ~3–6% SwitchGLU-level flip cost dilutes to the measured E2E wash (pre-cast A/B ms/forward
+0.996) — the story is now measured at every level with no dangling inconsistencies. Note the
+earlier "~20% faster half variant" phrasing conflated two effects: within-process, scales-only
+promotion costs ~5%; the rest of the earlier Mini-vs-halfX stock gap came from the x-dtype
+difference between those test setups. If MLX ever changes its promotion semantics, the
+mechanism test fires.
+
 Recommendation to André: ratify the reject, keep branch `kernel`'s artifacts (they are the
 negative result), fold the CLAUDE.md status update, and consider the kernel road CLOSED unless
 a future MLX/GPU generation reopens the sizing. (≈17% faster than stock at SwitchGLU

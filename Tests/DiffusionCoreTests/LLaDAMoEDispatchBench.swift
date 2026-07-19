@@ -139,6 +139,62 @@ final class LLaDAMoEDispatchBench: XCTestCase {
         try runFusedQMVComparison(E: Self.E, H: 4096, I: 1024, T: Self.T, K: Self.K, label: "Flash")
     }
 
+    /// Speed link of the promotion-mechanism chain (`testPrecastScalesPromotionMechanism` has
+    /// the numerics links): STOCK SwitchGLU at Mini shapes, f16 x, timed twice in one process —
+    /// first with f16 resident scales (promote → f16, the `_half_` gather serving runs), then
+    /// with the same scales pre-cast to f32 (promote → f32, the `_float_` gather this campaign
+    /// mistakenly profiled). The ratio IS the cost of the promotion flip — and why
+    /// `NEODIFFUSION_PRECAST_SCALES` was rejected. Fused flag off throughout.
+    func testPrecastScalesMiniTiming() throws {
+        try skipUnlessOptedIn()
+        MLXRandom.seed(23)
+        let glu = SwitchGLU(hiddenSize: Self.H, intermediateSize: Self.I, numExperts: Self.E)
+        let params: [String: MLXArray] = [
+            "gate_proj.weight": (MLXRandom.normal([Self.E, Self.I, Self.H]) * 0.05)
+                .asType(.float16),
+            "up_proj.weight": (MLXRandom.normal([Self.E, Self.I, Self.H]) * 0.05)
+                .asType(.float16),
+            "down_proj.weight": (MLXRandom.normal([Self.E, Self.H, Self.I]) * 0.05)
+                .asType(.float16),
+        ]
+        try glu.update(parameters: ModuleParameters.unflattened(params), verify: .all)
+        MLXNN.quantize(
+            model: glu, groupSize: 64, bits: 4, mode: .affine,
+            filter: { _, module in module is SwitchLinear })
+        let x = MLXRandom.normal([Self.T, Self.H]).asType(.float16)
+        let indices = MLXRandom.randInt(0 ..< Int32(Self.E), [Self.T, Self.K])
+        eval(glu, x, indices)
+        MoEFusedQMVConfig.enabled = false
+
+        let tHalf = time("Mini - STOCK, f16 scales (promote f16, _half_ gather)",
+                         warmup: 3, reps: 50) {
+            glu(x, indices: indices)
+        }
+
+        guard let g = glu.gateProj as? QuantizedSwitchLinear,
+              let u = glu.upProj as? QuantizedSwitchLinear,
+              let d = glu.downProj as? QuantizedSwitchLinear
+        else { return XCTFail("not quantized") }
+        let precast: [String: MLXArray] = [
+            "gate_proj.scales": g.scales.asType(.float32),
+            "gate_proj.biases": g.biases!.asType(.float32),
+            "up_proj.scales": u.scales.asType(.float32),
+            "up_proj.biases": u.biases!.asType(.float32),
+            "down_proj.scales": d.scales.asType(.float32),
+            "down_proj.biases": d.biases!.asType(.float32),
+        ]
+        try glu.update(parameters: ModuleParameters.unflattened(precast), verify: .noUnusedKeys)
+        eval(glu)
+
+        let tFloat = time("Mini - STOCK, precast f32 scales (promote f32, _float_ gather)",
+                          warmup: 3, reps: 50) {
+            glu(x, indices: indices)
+        }
+        print(String(format:
+            "[m6-bench] promotion-flip cost: float/half time ratio = %.3f "
+            + "(half %.4f s, float %.4f s)", tFloat / tHalf, tHalf, tFloat))
+    }
+
     /// TRUE production dtypes (f16 x + f16 scales): stock dispatches the `_half_` gather kernel
     /// here — the one serving actually runs — while the fused runner stages through f32 buffers
     /// (value-identical arithmetic, different traffic). The f32-x tests above race the `_float_`
