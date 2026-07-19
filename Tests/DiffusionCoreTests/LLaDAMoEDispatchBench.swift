@@ -120,6 +120,70 @@ final class LLaDAMoEDispatchBench: XCTestCase {
             swapBefore, swapAfter, swapGrowth, freeMemBefore, thermalBefore, thermalAfter, isValid ? "true" : "false"))
     }
 
+    /// Step 2 of the kernel plan — the fused `MoEGatherQMVRunner` walking skeleton vs the stock
+    /// three-`gatherQuantizedMM` SwitchGLU at real Mini shapes, same quantized weights, SwitchGLU-
+    /// level A/B (both arms include the MLX-side SwiGLU combine; the k-weighted sum happens
+    /// outside SwitchGLU in both). Weights fp16, x float32 — the production dtype pairing (the
+    /// Step 5a trace shows the production dispatch is `..._float_...`).
+    func testFusedQMVRunnerMini() throws {
+        try skipUnlessOptedIn()
+        let freeMemBefore = freeMemoryMB()
+        let swapBefore = swapUsedMB()
+        let thermalBefore = thermalStateName()
+
+        MLXRandom.seed(23)
+        let glu = SwitchGLU(hiddenSize: Self.H, intermediateSize: Self.I, numExperts: Self.E)
+        let params: [String: MLXArray] = [
+            "gate_proj.weight": (MLXRandom.normal([Self.E, Self.I, Self.H]) * 0.05)
+                .asType(.float16),
+            "up_proj.weight": (MLXRandom.normal([Self.E, Self.I, Self.H]) * 0.05)
+                .asType(.float16),
+            "down_proj.weight": (MLXRandom.normal([Self.E, Self.H, Self.I]) * 0.05)
+                .asType(.float16),
+        ]
+        try glu.update(parameters: ModuleParameters.unflattened(params), verify: .all)
+        MLXNN.quantize(
+            model: glu, groupSize: 64, bits: 4, mode: .affine,
+            filter: { _, module in module is SwitchLinear })
+        let x = MLXRandom.normal([Self.T, Self.H])  // float32, per production
+        let indices = MLXRandom.randInt(0 ..< Int32(Self.E), [Self.T, Self.K])
+        eval(glu, x, indices)
+
+        let tStock = time("Mini - SwitchGLU stock (3x gatherQuantizedMM)") {
+            MoEFusedQMVConfig.enabled = false
+            return glu(x, indices: indices)
+        }
+        let dispatchesBefore = MoEFusedQMVConfig.dispatchCount
+        let tFused = time("Mini - SwitchGLU fused MoEGatherQMVRunner") {
+            MoEFusedQMVConfig.enabled = true
+            return glu(x, indices: indices)
+        }
+        MoEFusedQMVConfig.enabled = false
+        XCTAssertGreaterThan(
+            MoEFusedQMVConfig.dispatchCount, dispatchesBefore,
+            "fused arm silently fell back to stock — timings are meaningless")
+
+        MoEFusedQMVConfig.enabled = false
+        let stock = glu(x, indices: indices)
+        MoEFusedQMVConfig.enabled = true
+        let fused = glu(x, indices: indices)
+        MoEFusedQMVConfig.enabled = false
+        let maxDelta = abs(fused.asType(.float32) - stock.asType(.float32)).max().item(Float.self)
+        print("[m6-bench] fused vs stock max |Δ| = \(maxDelta)")
+        XCTAssertLessThan(maxDelta, 1e-3)
+        print(String(format: "[m6-bench] fused/stock time ratio = %.3f (stock %.4f s, fused %.4f s)",
+            tFused / tStock, tStock, tFused))
+
+        let swapAfter = swapUsedMB()
+        let swapGrowth = swapAfter - swapBefore
+        let isValid = swapGrowth <= 256.0 && freeMemBefore >= 1024.0
+            && (thermalBefore == "nominal" || thermalBefore == "fair")
+        print(String(format:
+            "Telemetry - swapGrowth: %.1fMB, freeMemBefore: %.1fMB, thermalBefore: %@, thermalAfter: %@, envValid: %@",
+            swapGrowth, freeMemBefore, thermalBefore, thermalStateName(),
+            isValid ? "true" : "false"))
+    }
+
     /// Step 5a — produce Xcode-openable `.gputrace` captures of the production
     /// `gatherQuantizedMM` and its FP16 `gatherMM` sibling at Mini shapes, T ∈ {32, 64}.
     /// This gathers the last pre-kernel diagnostic (`gather_qmm_handoff.md` §3/§10): what

@@ -113,6 +113,11 @@ public final class SwitchGLU: Module {
     @ModuleInfo(key: "up_proj") public var upProj: SwitchLinear
     @ModuleInfo(key: "down_proj") public var downProj: SwitchLinear
 
+    /// Fused gather-QMV runner (`MoEGatherQMVRunner.swift`, `MoEFusedQMVConfig.enabled`,
+    /// default off). Built lazily on first eligible call; not a checkpoint parameter.
+    private var fusedRunner: MoEGatherQMVRunner?
+    private var fusedRunnerIneligible = false
+
     public init(hiddenSize: Int, intermediateSize: Int, numExperts: Int) {
         self._gateProj = ModuleInfo(
             wrappedValue: SwitchLinear(
@@ -134,11 +139,53 @@ public final class SwitchGLU: Module {
     ///   - indices: top-k expert indices `[T, k]`
     /// - Returns: per-expert outputs `[T, k, hiddenSize]`
     public func callAsFunction(_ x: MLXArray, indices: MLXArray, sortedIndices: Bool = false) -> MLXArray {
+        // Fused gather-QMV fast path (Step 2 walking skeleton; default off). Only when all three
+        // projections are 4-bit affine group-64 quantized with biases present and the dims meet
+        // the kernel's alignment preconditions (`MoEGatherQMVRunner.isEligible`), and
+        // `sortedIndices` is false (the runner's `expertIdx` layout matches the unsorted stock
+        // call). Anything else falls through to stock.
+        if MoEFusedQMVConfig.enabled, !sortedIndices,
+            let g = gateProj as? QuantizedSwitchLinear,
+            let u = upProj as? QuantizedSwitchLinear,
+            let d = downProj as? QuantizedSwitchLinear,
+            g.groupSize == 64, g.bits == 4, g.mode == .affine, g.biases != nil,
+            u.groupSize == 64, u.bits == 4, u.mode == .affine, u.biases != nil,
+            d.groupSize == 64, d.bits == 4, d.mode == .affine, d.biases != nil,
+            let runner = fusedRunnerInstance(topK: indices.dim(-1), gate: g)
+        {
+            return runner.forward(x: x, indices: indices, gate: g, up: u, down: d)
+        }
+
         let expanded = x.expandedDimensions(axes: [-2, -3])  // [T, 1, 1, H]
         let gate = gateProj(expanded, indices: indices, sortedIndices: sortedIndices)
         let up = upProj(expanded, indices: indices, sortedIndices: sortedIndices)
         let down = downProj(silu(gate) * up, indices: indices, sortedIndices: sortedIndices)  // [T, k, 1, H]
         return down.squeezed(axis: -2)
+    }
+
+    /// Lazily builds (once) the fused-kernel runner, or returns nil if the layer's dims fail the
+    /// kernel's alignment preconditions (cached — ineligible layers don't re-check every call).
+    /// Dims come from the quantized weight's `scales` tensor — `[numExperts, outDims,
+    /// inDims / groupSize]` per `MLX.quantized`'s row-grouped-quantization contract — rather
+    /// than new config plumbing, so this stays correct across layer shapes without extra wiring.
+    private func fusedRunnerInstance(topK: Int, gate: QuantizedSwitchLinear) -> MoEGatherQMVRunner? {
+        if let existing = fusedRunner { return existing }
+        if fusedRunnerIneligible { return nil }
+        let numExperts = gate.scales.dim(0)
+        let intermediateSize = gate.scales.dim(1)
+        let hiddenSize = gate.scales.dim(2) * gate.groupSize
+        guard MoEGatherQMVRunner.isEligible(
+            hiddenSize: hiddenSize, intermediateSize: intermediateSize,
+            groupSize: gate.groupSize, bits: gate.bits)
+        else {
+            fusedRunnerIneligible = true
+            return nil
+        }
+        let runner = MoEGatherQMVRunner(
+            hiddenSize: hiddenSize, intermediateSize: intermediateSize, numExperts: numExperts,
+            topK: topK, groupSize: gate.groupSize, bits: gate.bits)
+        fusedRunner = runner
+        return runner
     }
 }
 
