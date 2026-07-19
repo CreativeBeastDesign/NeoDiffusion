@@ -96,7 +96,17 @@ UNCHANGED and load-bearing. Justification: 2e-5 relative reorder noise is far be
 quantization error, and stock itself changes accumulation order across its own qmv/qmv_fast
 shape dispatch. Trace: `fused_v3_vpt8/` (complete, retry 2).
 
-Loop state after 6 iterations: best = **ROWS=8 + VPT=8 at ~0.79–0.82** (≈17% faster than stock at SwitchGLU
+**Iteration 7 (= step-6 fusion attempt) — in-kernel SwiGLU: NEGATIVE, REVERTED (both
+configs).** *Sourced (`/tmp/it7_bench_{1,2,3}.log`, `/tmp/it7b_bench_{1,2,3}.log`).* A third
+kernel (`qmv_rows_glu`) dual-accumulating gate+up in one K-loop with the silu(g)·u epilogue
+in-kernel, engaged only when outDType == f32 (production; fp16 toy path kept the two-output
+kernel so stock's fp16 rounding points stay mirrored). At ROWS=8: 0.825–0.838; at ROWS=4
+(restoring it6's 8-accumulator total): 0.821–0.831 — both ≥ it6's 0.794–0.823. The saved
+dispatch + elementwise (6.05% of encoder) + intermediate round-trip never beats the doubled
+accumulator pressure. Step 6's guard clause fired as designed: measured, not assumed;
+reverted to it6.
+
+Loop state after 7 iterations: settled best = **ROWS=8 + VPT=8 at ~0.79–0.82** (≈17% faster than stock at SwitchGLU
 level); two consecutive no-gains since the it2 win. The remaining levers are capture-aimed
 (need actual regs/occupancy per variant) — pausing wall-clock probes for André's trace reads:
 `fused_v0_skeleton/` (baseline), `fused_v1_tgstage/` (why did TG staging lose — regs or ALU?),
