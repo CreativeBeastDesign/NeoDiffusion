@@ -103,7 +103,30 @@ public class DiffusionModel {
             rawArrays = Self.sanitize(rawArrays)
         }
 
-        let arrays = ExpertWeightStacking.stack(rawArrays)
+        var arrays = ExpertWeightStacking.stack(rawArrays)
+
+        // NEODIFFUSION_PRECAST_SCALES=1 (diagnostic, default off): store routed-expert
+        // scales/biases as f32 instead of the checkpoint's f16. `gather_qmm` casts them to the
+        // promoted out_type (f32, since serving x is f32) on EVERY call (`ops.cpp` gather_qmm:
+        // `astype(scales, out_type)`); `astype` short-circuits on matching dtype, so pre-casting
+        // once at load turns ~2.9 GB/forward of cast traffic (6 tensors × 19 MoE layers) into
+        // no-ops, for ~+0.95 GB resident. f16→f32 is exact — trajectories must stay
+        // bit-identical. Routed experts ONLY: other quantized layers' runtime pairing is
+        // unverified, and forcing f32 there would CHANGE their promotion, not just pre-pay it.
+        if ProcessInfo.processInfo.environment["NEODIFFUSION_PRECAST_SCALES"] == "1" {
+            var castCount = 0
+            for (key, value) in arrays
+            where key.contains("experts.")
+                && (key.hasSuffix(".scales") || key.hasSuffix(".biases"))
+                && value.dtype != .float32
+            {
+                arrays[key] = value.asType(.float32)
+                castCount += 1
+            }
+            // Effective echo (AGENTS.md): logs must show the pre-cast actually applied.
+            print("[precast-scales] routed-expert scales/biases pre-cast to f32 (\(castCount) tensors)")
+        }
+
         let parameters = ModuleParameters.unflattened(arrays)
         try model.update(parameters: parameters, verify: .all)
         eval(model)

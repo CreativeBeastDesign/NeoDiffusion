@@ -106,7 +106,89 @@ dispatch + elementwise (6.05% of encoder) + intermediate round-trip never beats 
 accumulator pressure. Step 6's guard clause fired as designed: measured, not assumed;
 reverted to it6.
 
-Loop state after 7 iterations: settled best = **ROWS=8 + VPT=8 at ~0.79–0.82** (≈17% faster than stock at SwitchGLU
+Loop state after 7 iterations: settled best = **ROWS=8 + VPT=8 at ~0.79–0.82** (SwitchGLU
+microbench level — see Step 8 below for why that did not survive end-to-end).
+
+### 2026-07-19 — Step 8: end-to-end A/B — **the microbench win does NOT survive; TPS gate NOT met**
+
+*Sourced (Sonnet subagent run, reviewed; raw data `scratch/step8/arm_{a,b}{1,2}.jsonl` + `.log`;
+Mac14,14, MLX core 0.31.1 / mlx-swift 0.31.6; 48 rows, 0 envValid=false, 4 warmup rows excluded;
+engagement proven per-process via the `[fused-qmv] active` echo — present in both fused logs,
+absent in both stock logs; arms interleaved A/B/A/B, `--arms q-cached`, `--runs 1`, gen defaults
+identical across arms.)*
+
+1. **ms/forward (trajectory-independent): stock 27.41 vs fused 27.43 — ratio 1.0006, a wash**
+   (chat 1.0071 / reasoning 0.9887 / code 1.0077). The ~17–21% SwitchGLU-level win dilutes to
+   ~zero in the real forward.
+2. **Naive pooled TPS is confounded and must not be quoted alone**: chat 0.914 / reasoning 1.021 /
+   code 0.926 — driven by **trajectory divergence**, not speed: 7/12 prompts differ in
+   logicalSteps and/or tokensGenerated between arms, deterministically (run1 ≡ run2 per arm).
+   The kernel's ~2e-5 relative FP-reorder noise flips Γ/Δ threshold decisions across 20 layers ×
+   many steps (same sensitivity class as the M8 4-bit-drift flips). Spot-checked text is coherent
+   in both arms (different valid completions, not degeneration; post-steps/block *lower* on fused,
+   1.13 vs 1.23 — not the F9 churn signature); trajectory-matched subset (5/12 prompts, n small):
+   fused 1.02–1.05× TPS.
+3. **Peak memory +0.37 GB on fused** (9.92–9.93 vs 9.56 GB) — *CORRECTED by André's ops.cpp
+   read (2026-07-19, see addendum below):* NOT "the runner's f32 casts" as first inferred —
+   stock `gather_qmm` performs the identical `astype(scales/biases, out_type)` casts per call
+   (`ops.cpp` gather_qmm affine branch, verified). The differential more plausibly comes from
+   the fused gate+up dispatch holding all four casted tensors alive concurrently where stock
+   frees between its three separate dispatches.
+4. **Flash-shape microbench insurance**: fused/stock 0.903/0.904/0.913, maxΔ 2.5e-05 — the
+   microbench ranking holds at Flash shapes too; the dilution is not shape-specific.
+
+**Why the microbench lied (inferred, consistent with prior campaign evidence)**: the SwitchGLU
+microbench times the op family in a *sparse* queue, where dispatch gaps and scheduling bubbles
+are exposed and the fused kernel's fewer-dispatches/cheaper-ALU structure pays. The real forward
+runs a *busy* queue where that latency is already hidden — exactly the non-additivity
+`gather_qmm_handoff.md` §11 documented ("in a real forward, with 11.9 ms of GEMM work in the
+queue, much of that dispatch latency is evidently hidden"). This also bounds the original ~7.5 ms
+"not-moving-bytes" prize: our restructured kernel — ALU-cheaper by construction (v0 read: 56/43
+vs stock 70/57 limiters) — recovers none of it end-to-end, supporting the reading that the 7.5 ms
+is a latency/scheduling phenomenon the busy pipeline already absorbs, not recoverable ALU waste.
+
+### 2026-07-19 — Step 9: verdict — **REJECT for serving (documented negative); kernel stays landed, default-off**
+
+Per the pre-registered gates (AGENTS.md gate 4: ≥15–20% TPS on the Studio — measured ≈0%) and
+the plan's standing instruction ("accept a recorded negative if the actual MSL doesn't move the
+needle"): **do not flip the flag.** What lands and stays:
+- `MoEGatherQMVRunner` + SwitchGLU branch, default-off, 9/9 tests green, equivalence
+  ~2e-5-relative vs stock at production shapes, Flash-eligible, dispatch-counter + activation
+  echo instrumentation. Correct, tested, inert.
+- The measured knowledge: mechanism inversion (occupancy ≠ the lever; ALU + ILP are, and even
+  they don't survive the busy queue), cache-resident x, the microbench-vs-E2E dilution, the
+  trajectory-sensitivity of threshold decoding to ~1e-5-class numeric perturbation, and the
+  capture-retry methodology.
+- **Open follow-on flagged for André (not pursued)**: the trajectory divergence means ANY
+  numerics-perturbing kernel change to this model class needs an end-to-end trajectory check,
+  not just tensor-level equivalence — worth a line in AGENTS.md if more kernel work ever happens.
+
+
+### 2026-07-19 — Post-close addendum: André's scales-cast finding (CHECK IN FLIGHT)
+
+*Sourced (André's read of `ops.cpp` `gather_qmm`, independently verified this session):* stock
+casts `scales` and `biases` to the promoted out_type on **every call**. Production pairing is
+f16 scales + f32 x ⇒ every forward re-casts 6 tensors × 4.19M elements × 19 MoE layers ≈
+**~2.9 GB/forward of cast traffic** — paid by BOTH step-8 arms (so the fused-vs-stock verdict
+stands) and **invisible in every capture to date** (capture tests quantize f32 weights → f32
+scales → casts short-circuit). Two consequences under check:
+
+1. *(speculative until measured)* Part of the historic "7.5 ms not-moving-bytes" may literally
+   be cast traffic: the M6 attribution's `gather_qmm = full − no-experts` includes the casts
+   (the no-experts arm never calls gather_qmm ⇒ no casts), and §12's FP16-sibling comparison
+   (`gatherMM`, all-f16, castless) demonstrated its 433 GB/s on a path with a different cast
+   profile.
+2. The fix needs no kernel: `NEODIFFUSION_PRECAST_SCALES=1` (landed, default off,
+   `DiffusionModel.loadWeights`) stores routed-expert scales/biases f32 at load — `astype`
+   short-circuits on matching dtype, so the per-call casts become no-ops. f16→f32 is exact ⇒
+   trajectories must be bit-identical (a confound-free A/B, unlike step 8). Scoped to routed
+   experts ONLY: other quantized layers' runtime pairing is unverified and forcing f32 there
+   would change promotion, not pre-pay it. Cost ~+0.95 GB resident (Studio trivial; M1 would
+   need a host-aware default if this ships). E2E ms/forward A/B running.
+
+Recommendation to André: ratify the reject, keep branch `kernel`'s artifacts (they are the
+negative result), fold the CLAUDE.md status update, and consider the kernel road CLOSED unless
+a future MLX/GPU generation reopens the sizing. (≈17% faster than stock at SwitchGLU
 level); two consecutive no-gains since the it2 win. The remaining levers are capture-aimed
 (need actual regs/occupancy per variant) — pausing wall-clock probes for André's trace reads:
 `fused_v0_skeleton/` (baseline), `fused_v1_tgstage/` (why did TG staging lose — regs or ALU?),
