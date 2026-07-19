@@ -23,7 +23,9 @@ Final form: 2 dispatches instead of 3 (gate+up in one kernel), compile-time dims
 | **end-to-end ms/forward** (real model, 3 suites) | **1.0006** | **wash** |
 | end-to-end TPS gate (≥15–20% required) | ≈0% | **FAIL → reject** |
 
-Peak memory +0.37 GB on the fused arm (transient f32 casts of fp16 scales/biases).
+Peak memory +0.37 GB on the fused arm (both arms pay identical per-call scale casts where
+applicable; the delta is the fused dispatch holding more casted tensors alive concurrently).
+At true production dtypes (post-close coda) there are no casts on either path.
 
 ## Key findings (each measured, provenance in the logbook)
 
@@ -57,7 +59,7 @@ Peak memory +0.37 GB on the fused arm (transient f32 casts of fp16 scales/biases
 `Packages/DiffusionCore/Sources/MoEGatherQMVRunner.swift` (kernel + runner, default-off),
 the SwitchGLU branch, 9 unit tests + 2 env-gated microbenches (Mini/Flash), the capture
 harness improvements, and the traces under `scratch/captures/fused_v{0,2,3}*` (host-local).
-Branch `kernel`, commits `9219fc2..b86e817`.
+Branch `kernel`, commits `9219fc2..570936a`.
 
 ## Lessons for the wiki
 
