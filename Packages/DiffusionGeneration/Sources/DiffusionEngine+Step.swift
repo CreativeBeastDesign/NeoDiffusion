@@ -417,35 +417,11 @@ extension DiffusionEngine {
         let slotLen = S == 1 ? A : B
         let maskId = Int32(params.maskId)
 
-        let activeMask = windowActive .== maskId            // [1, A] Bool
-        // Per-slot post counters: each increments only on that block's mask-free iteration
-        // (reference semantics per block; the trailing block's budget only bites once promoted).
-        var nextPosts: [MLXArray] = []
-        for s in 0 ..< S {
-            let slotMask = activeMask[0..., (s * slotLen) ..< ((s + 1) * slotLen)]
-            let slotMaskAny: MLXArray
-            if params.iceEnabled && !isAnswerPhase {
-                let thinkingMask = slotMask[0..., 0 ..< params.iceThinkingLength]
-                slotMaskAny = thinkingMask.any()
-            } else {
-                slotMaskAny = slotMask.any()
-            }
-            nextPosts.append(posts[s] + which(slotMaskAny, MLXArray(Int32(0)), MLXArray(Int32(1))))
-        }
-        let anyMaskFront: MLXArray
-        if params.iceEnabled && !isAnswerPhase {
-            anyMaskFront = activeMask[0..., 0 ..< params.iceThinkingLength].any()
-        } else {
-            anyMaskFront = activeMask[0..., 0 ..< slotLen].any()
-        }
-        let budgetBreak = nextPosts[0] .> MLXArray(Int32(params.maxPostSteps))  // scalar Bool
-
         // Step 3 sub-phase timers (final-plan §2). Non-zero only under `instrument`; each forces an
         // `eval` at a true sub-graph boundary so the lazy graph splits where the phase does. On the
         // served path (`!instrument`) these stay 0 and NO eval is added — production is untouched.
         var forwardSeconds = 0.0
         var samplerSeconds = 0.0
-        var selectionSeconds = 0.0
 
         // One forward over the full window, logits for the active columns only.
         let window = prefixLen > 0 ? concatenated([prefix, windowActive], axis: 1) : windowActive
@@ -471,6 +447,63 @@ extension DiffusionEngine {
             if let nextCredit { eval(nextCredit) }
             samplerSeconds = Date().timeIntervalSince(samplerStart)
         }
+
+        return stockSelectionUpdate(
+            windowActive: windowActive, posts: posts, promptMasks: promptMasks,
+            slotPromptCounts: slotPromptCounts, hasNextBlock: hasNextBlock, params: params,
+            verifierForward: verifierForward, tracing: tracing,
+            jotStableCount: jotStableCount, prevPredictions: prevPredictions,
+            frozenMask: frozenMask, isAnswerPhase: isAnswerPhase,
+            x0: x0, x0p: x0p, unmaskConf: unmaskConf, unmaskTok: unmaskTok,
+            nextCredit: nextCredit, avgConfAnswer: avgConfAnswer,
+            A: A, S: S, slotLen: slotLen, maskId: maskId,
+            forwardSeconds: forwardSeconds, samplerSeconds: samplerSeconds)
+    }
+
+    /// The per-step selection/state-update segment: post counters and budget flag, Γ/Δ
+    /// construction, JOT, window update, break/activation flags, and diagnostics — everything
+    /// between the sampler outputs and the next forward. Extracted verbatim from `windowStep`
+    /// (GPU-control campaign T1, pure code motion) so the segment has exactly one call site:
+    /// the seam where a fused control kernel can be swapped in for eligible (plain-Γ)
+    /// configurations without forking the stock chain.
+    private func stockSelectionUpdate(
+        windowActive: MLXArray, posts: [MLXArray], promptMasks: MLXArray,
+        slotPromptCounts: [Int], hasNextBlock: Bool, params: GenerationParams,
+        verifierForward: VerifierForward?, tracing: Bool,
+        jotStableCount: MLXArray, prevPredictions: MLXArray,
+        frozenMask: MLXArray, isAnswerPhase: Bool,
+        x0: MLXArray, x0p: MLXArray, unmaskConf: MLXArray, unmaskTok: MLXArray,
+        nextCredit: MLXArray?, avgConfAnswer: MLXArray,
+        A: Int, S: Int, slotLen: Int, maskId: Int32,
+        forwardSeconds: Double, samplerSeconds: Double
+    ) -> WindowStepResult {
+        let B = params.blockLength
+        let activeMask = windowActive .== maskId            // [1, A] Bool
+        // Per-slot post counters: each increments only on that block's mask-free iteration
+        // (reference semantics per block; the trailing block's budget only bites once promoted).
+        var nextPosts: [MLXArray] = []
+        for s in 0 ..< S {
+            let slotMask = activeMask[0..., (s * slotLen) ..< ((s + 1) * slotLen)]
+            let slotMaskAny: MLXArray
+            if params.iceEnabled && !isAnswerPhase {
+                let thinkingMask = slotMask[0..., 0 ..< params.iceThinkingLength]
+                slotMaskAny = thinkingMask.any()
+            } else {
+                slotMaskAny = slotMask.any()
+            }
+            nextPosts.append(posts[s] + which(slotMaskAny, MLXArray(Int32(0)), MLXArray(Int32(1))))
+        }
+        let anyMaskFront: MLXArray
+        if params.iceEnabled && !isAnswerPhase {
+            anyMaskFront = activeMask[0..., 0 ..< params.iceThinkingLength].any()
+        } else {
+            anyMaskFront = activeMask[0..., 0 ..< slotLen].any()
+        }
+        let budgetBreak = nextPosts[0] .> MLXArray(Int32(params.maxPostSteps))  // scalar Bool
+
+        // Selection sub-phase timer (final-plan §2): same `instrument`-only contract as the
+        // forward/sampler timers in `windowStep` — 0 and eval-free on the served path.
+        var selectionSeconds = 0.0
 
         // Selection-set (Γ/Δ) construction begins here — the fusion candidate (final-plan §2, the
         // phase-3 §4.3 gate). Spans τ_mask thresholding + top-1 fallback + Δ-edit + JOT eval, up to
