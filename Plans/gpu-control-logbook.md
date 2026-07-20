@@ -8,9 +8,12 @@ row, repeated-median protocol, never a piped exit code.
 
 ## §0. Status
 
-**Campaign OPEN.** Started 2026-07-20, branch `GPU-contol`. **Dev-M1-scoped** per phase-3 §0.1
-protocol (hardware-independent metrics decide; wall-clock is host-scoped; Studio backfill, if
-any, is a future session's decision, not this campaign's).
+**Campaign OPEN.** Started 2026-07-20, branch `GPU-contol`. **Host correction (F1): this
+campaign is running on the Mac Studio M2 Ultra** (`hw.model=Mac14,14`, 192 GB, verified via
+sysctl 2026-07-20 — the plan's "dev-M1-scoped" assumption was wrong for this session). Per §0.1
+wall-clock verdicts are host-scoped: G2 numbers from this campaign are **Studio/serving-host
+verdicts** (higher trust tier), and an M1 backfill, if ever wanted, is a separate session's
+decision. Weights (mini + flash, BF16 + 4-bit) are all local on this host.
 
 **Goal (one paragraph):** V1 moves the per-step loop control from "GPU forward → CPU decides →
 GPU forward" to a single fused, GPU-resident control kernel that is **bit-exact** with the
@@ -81,7 +84,7 @@ starts.
 
 ## §2. Pre-registered gates (pre-registered 2026-07-20, before any kernel code ran)
 
-V1, dev-M1-scoped, per phase-3 §0.1.
+V1, scoped to the host the campaign actually runs on (the Studio M2 Ultra, per F1), per §0.1.
 
 | Gate | Class | Criterion |
 |---|---|---|
@@ -107,17 +110,17 @@ automatic exit; T1.5's numbers go in §4 and the decision gets logged here eithe
 
 | # | Task | Tier | Description | Status |
 |---|---|---|---|---|
-| T0 | Logbook skeleton | Sonnet | Decisions, pre-registered gates, empty findings table — this file | **in progress** |
-| T1 | Seam refactor | Fable | Pure code motion of the plain-branch selection chain into internal `stockSelectionUpdate(inputs) -> SelectionOutputs`; identical graph; full suite green; own commit before any kernel code | pending |
-| T1.5 | Stock-segment profile | Sonnet | In-situ Metal capture of the stock selection segment (dispatch count, GPU time, command-buffer boundaries, existing MLX fusion) — informs whether G2 upside exists before T2 is built; cheap-exit checkpoint | pending |
-| T2a | G0 feasibility spike | Sonnet | Minimal no-op `MLXFast.metalKernel` with the planned I/O signature (incl. `.bool` arrays, u32 state passthrough, FP_CONTRACT pragma) dispatched inside a K-chained lazy graph | pending |
+| T0 | Logbook skeleton | Sonnet | Decisions, pre-registered gates, empty findings table — this file | **done** (72973df) |
+| T1 | Seam refactor | Fable | Pure code motion of the plain-branch selection chain into internal `stockSelectionUpdate(inputs) -> SelectionOutputs`; identical graph; full suite green; own commit before any kernel code | **done** (30a35eb; suite 137 tests / 26 env-gated skips / 0 failures) |
+| T1.5 | Stock-segment profile | Sonnet | In-situ Metal capture of the stock selection segment (dispatch count, GPU time, command-buffer boundaries, existing MLX fusion) — informs whether G2 upside exists before T2 is built; cheap-exit checkpoint | **in progress** |
+| T2a | G0 feasibility spike | Sonnet | Minimal no-op `MLXFast.metalKernel` with the planned I/O signature (incl. `.bool` arrays, u32 state passthrough, FP_CONTRACT pragma) dispatched inside a K-chained lazy graph | **done — G0 PASS** (F2; `ControlKernelFeasibilityTests`, 4 tests / 0 failures) |
 | T2 | `BlockControlKernelRunner` | Fable | Full MSL + Swift per design; `Tools/seed-metallib.sh` after builds | pending |
 | T3 | Seam A/B parity tests | Sonnet | Adversarial set: τ boundaries, all/zero/single-mask windows, argMax ties, posts==maxPostSteps, tokenChanged=false at high conf, prompt-tail blocks, hasNextBlock both ways, B∈{16,32}; α>0 boundary tests double as the dyn-τ admission test | pending |
-| T4 | MLX-semantics pin tests | Haiku | argMax first-index tie-break, strict-`>` with −inf — converts inferred claims to sourced-by-test | pending |
+| T4 | MLX-semantics pin tests | Haiku | argMax first-index tie-break, strict-`>` with −inf — converts inferred claims to sourced-by-test | **done** (5a15067; F3; 4 tests / 0 failures) |
 | T5 | Engine wiring | Sonnet | Params knob, run-level eligibility resolution + graded incompatibility policy, `SlotRun.controlState` threading, `windowStep` branch, Metrics echo + incompatibility field, bench JSONL echo | pending |
 | T6 | E2E trajectory tests | Sonnet | Toy-config both-arms identity; real-weight-gated identity (`NEODIFFUSION_LLADA_REAL=1`), ≥8 prompts, Q mode, plain (+eosEarlyStop, +α=0.6 if admitted) | pending |
 | T7 | Segment microbench (diagnostic) | Sonnet | Stock chain vs kernel on synthetic `[1,32]` inputs; static op-node counts; assert syncPoints identical flag-on/off (feeds G4) | pending |
-| T8 | Bench campaign | Sonnet | `diffusion-bench llada` on dev M1 per §0.1, Q mode, flag off/on, repeated-median (≥5 reps), envValid-only, warmup excluded, toolchain + effective echoes; evaluate gates; logbook findings | pending |
+| T8 | Bench campaign | Sonnet | `diffusion-bench llada` on this host (Studio, per F1), Q mode, flag off/on, repeated-median (≥5 reps), envValid-only, warmup excluded, toolchain + effective echoes; evaluate gates; logbook findings | pending |
 | T9 | Close-out | Sonnet | Logbook verdict, CLAUDE.md status line, 3-section report to André | pending |
 
 T4 can run any time in parallel with the rest. T1.5 and T2a can run in parallel with each other
@@ -128,7 +131,9 @@ T4 can run any time in parallel with the rest. T1.5 and T2a can run in parallel 
 | F# | Date | Finding | Evidence | Consequence |
 |---|---|---|---|---|
 | F0 | 2026-07-20 | The engine already runs the entire Γ/Δ selection chain as MLX GPU array ops, with host readback already batched to one `[2K]`-shaped flags read per K-step speculative batch (plus one per block commit) — there is no per-step CPU decision loop to eliminate. | `DiffusionEngine+Step.swift:219` (batched `[2K]` flags read); selection chain at `DiffusionEngine+Step.swift:397-682` | This campaign's value proposition is **fusion of already-GPU-resident ops + enabling persistent kernel state for V2**, not "moving control off the CPU" — that framing would be wrong going into T1. Sets the honest scope for §0's goal statement and for T1.5's cheap-exit check (if the segment MLX already runs turns out cheap/already-fused, the fusion upside may not clear G2's 2% budget). |
-| | | | | |
+| F1 | 2026-07-20 | This campaign runs on the **Mac Studio M2 Ultra**, not the M1 dev box the plan assumed (sourced: `sysctl hw.model` = Mac14,14, 192 GB; both mini and flash weight artefacts local). | sysctl output, session 2026-07-20 | G2/T8 wall-clock verdicts are serving-host verdicts. Served default here is `speculationK=1` (host-aware, CLAUDE.md F-l) — T8 must bench the served K, and any K>1-specific claims are out of scope on this host. Plan/logbook "dev-M1" wording corrected; flagged to André. |
+| F2 | 2026-07-20 | **G0 PASS, all four sub-items** — bool MLXArray I/O works natively for metalKernel inputs *and* outputs (traced to `custom_kernel.cpp` `write_signature` → Metal `bool`, generic path); `#pragma STDC FP_CONTRACT OFF` compiles in the JIT body splice; K=4 pure lazy chaining with one eval + one readback works; `[1]`-Bool concat seam intact. API facts for T2: inputs with < 8 elements are declared `constant` (read-only — `posts`/`rtScalars` must never be written through), outputs are always `device`; `source` is spliced verbatim inside the generated function body. | `Tests/DiffusionCoreTests/ControlKernelFeasibilityTests.swift` (4 tests / 0 failures, suite line 2026-07-20 08:18) | The planned kernel interface needs **no dtype fallbacks**. T2 proceeds with bool tensors as designed. |
+| F3 | 2026-07-20 | MLX semantics pinned by test: argMax tie-break = first index (incl. all-equal and all-−inf → 0); `.>` is strict (τ==conf and −inf never pass); `which` is elementwise ternary. | `Tests/DiffusionGenerationTests/MLXSemanticsPinTests.swift` (4 tests / 0 failures) | The kernel's ballot+ctz first-index reduction and strict compares are implementing *sourced* semantics, not guesses. |
 
 ## §5. Provenance footer
 
@@ -137,9 +142,9 @@ T4 can run any time in parallel with the rest. T1.5 and T2a can run in parallel 
   `controlKernelIncompatibility` reason string whenever `effectiveControlKernel=false`).
 - Provenance labels (sourced / inferred / speculative) apply to every non-trivial claim in this
   log and in code comments touching the kernel path, per house style.
-- §0.1 protocol reminder: this campaign's gates (G0/G1/G2/G4) are hardware-independent and decide
-  on the dev M1; wall-clock numbers here are host-scoped and are not a portable verdict for any
-  other host without its own repeat of G2.
+- §0.1 protocol reminder: G0/G1/G4 are hardware-independent; G2's wall-clock is host-scoped —
+  measured on the Studio M2 Ultra (F1) and not a portable verdict for the M1 (or any other host)
+  without its own repeat of G2.
 - F0 is currently *sourced* (line-referenced). All later findings must cite their evidence file
   the same way — a bench JSONL path, a test name + suite line, or a capture bundle path — never a
   bare assertion.
