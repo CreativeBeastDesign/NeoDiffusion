@@ -450,7 +450,7 @@ extension DiffusionEngine {
         // One forward over the full window, logits for the active columns only.
         let window = prefixLen > 0 ? concatenated([prefix, windowActive], axis: 1) : windowActive
         let forwardStart = instrument ? Date() : nil
-        let logits = forward(window, A, params.jotEnabled ? frozenMask : nil)                     // [1, A, V] FP32
+        let logits = forward(window, A, (params.jotEnabled || params.sureLockEnabled) ? frozenMask : nil)                     // [1, A, V] FP32
         if let forwardStart { eval(logits); forwardSeconds = Date().timeIntervalSince(forwardStart) }
 
         // Raw model predictions. These govern EDITING (Δ), JOT freezing, the ICE answer-
@@ -744,7 +744,7 @@ extension DiffusionEngine {
         x0: MLXArray, x0p: MLXArray, prevPredictions: MLXArray, jotStableCount: MLXArray,
         frozenMask: MLXArray, promptMasks: MLXArray, activeLen A: Int, params: GenerationParams
     ) -> (stableCount: MLXArray, frozenMask: MLXArray, prevPredictions: MLXArray, newlyFrozen: MLXArray) {
-        guard params.jotEnabled else {
+        guard params.jotEnabled || params.sureLockEnabled else {
             return (jotStableCount, frozenMask, prevPredictions, MLXArray.zeros([1, A], dtype: .bool))
         }
         let isStable = (x0 .== prevPredictions) .&& (x0p .> MLXArray(params.jotThreshold)) .&& (.!promptMasks)
@@ -760,12 +760,13 @@ extension DiffusionEngine {
         nextWindow: MLXArray, delta: MLXArray, frozenMask: MLXArray, jotStableCount: MLXArray,
         maskId: Int32, params: GenerationParams
     ) -> (window: MLXArray, frozenMask: MLXArray, stableCount: MLXArray) {
-        guard params.jotEnabled else { return (nextWindow, frozenMask, jotStableCount) }
+        guard params.jotEnabled || params.sureLockEnabled else { return (nextWindow, frozenMask, jotStableCount) }
         let collision = delta .&& frozenMask
         return (which(collision, MLXArray(maskId), nextWindow),
                 frozenMask .&& (.!collision),
                 which(collision, MLXArray(Int32(0)), jotStableCount))
     }
+
 
     /// WP-2b-3 EOS early exit (arXiv:2601.17917): once a settled, non-prompt EOS exists in the
     /// FRONT block, fill every still-masked position after the first EOS with EOS so the block

@@ -97,7 +97,8 @@ public final class LLaDA2DecoderLayer: Module {
         jot: LayerJotCache, frozen: MLXArray, mask: MLXArray? = nil, capacity: Int? = nil,
         flashBlockEnabled: Bool = false, flashBlockTau: Int = 4,
         isFirstStepOfBlock: Bool = false, dirtyPerSeq: [Int] = [0],
-        ablation: ModuleAblation = .none, reuseRouter: Bool = false
+        ablation: ModuleAblation = .none, reuseRouter: Bool = false,
+        csa2Reuse: Bool = false
     ) -> MLXArray {
         // `.attention` skips the attention residual add entirely. Note this also means the KV
         // cache never grows in that arm, so the measured delta is attention's *total* cost
@@ -112,7 +113,8 @@ public final class LLaDA2DecoderLayer: Module {
             hidden = x + attention(
                 inNorm(x), cos: cos, sin: sin, cache: cache, jot: jot, frozen: frozen, mask: mask,
                 flashBlockEnabled: flashBlockEnabled, flashBlockTau: flashBlockTau,
-                isFirstStepOfBlock: isFirstStepOfBlock, dirtyPerSeq: dirtyPerSeq)
+                isFirstStepOfBlock: isFirstStepOfBlock, dirtyPerSeq: dirtyPerSeq,
+                csa2Reuse: csa2Reuse)
         }
         let ffnInput = postNorm(hidden)
         let ffnOutput: MLXArray

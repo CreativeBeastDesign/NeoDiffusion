@@ -405,7 +405,13 @@ extension DiffusionEngine {
                 effectiveCreditAlpha: params.creditAlpha,
                 effectiveCreditBeta: params.creditBeta,
                 effectiveCreditGamma: params.creditGamma,
+                effectiveDualCachingEnabled: params.dualCachingEnabled,
+                effectiveKVQuantization: params.kvQuantization.rawValue,
+                effectiveKVPoolEnabled: params.kvPoolEnabled,
+                effectiveCSA2Enabled: params.csa2Enabled,
+                effectiveSureLockEnabled: params.sureLockEnabled,
                 effectiveModuleAblation: params.moduleAblation),
             trajectorySequences: params.temporalVotingEnabled ? trajectorySequences : nil)
     }
 }
+

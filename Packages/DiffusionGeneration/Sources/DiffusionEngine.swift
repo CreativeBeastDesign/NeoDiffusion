@@ -222,6 +222,13 @@ public final class DiffusionEngine {
         public let effectiveCreditBeta: Float
         public let effectiveCreditGamma: Float
 
+        // MARK: Unified Dual Caching effective echoes
+        public let effectiveDualCachingEnabled: Bool
+        public let effectiveKVQuantization: String
+        public let effectiveKVPoolEnabled: Bool
+        public let effectiveCSA2Enabled: Bool
+        public let effectiveSureLockEnabled: Bool
+
         // MARK: In-situ attribution effective echo
         /// What the engine **actually ran with**, not what was requested. Load-bearing: an
         /// ablation that silently fails to reach the forward would otherwise look like a clean

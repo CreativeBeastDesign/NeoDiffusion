@@ -53,27 +53,32 @@ extension DiffusionEngine {
         streamBlock: (([Int]) -> Void)? = nil
     ) -> Output {
         let B = params.blockLength
-        let cache = ExactPrefixCache(layerCount: model.layerCount)
+        let cache = ExactPrefixCache(
+            layerCount: model.layerCount,
+            usePool: params.kvPoolEnabled,
+            initialPoolCapacity: params.kvPoolCapacity,
+            quantization: params.kvQuantization
+        )
         let activeCache = ActiveBlockCache(layerCount: model.layerCount)
         // Faithful JOT (WP-3a v2): per-layer frozen-K/V hold. Only allocated/used when the
         // faithful mechanism is on; otherwise it stays inert (the v1 path ignores it).
         let jotCache = JotFreezeCache(layerCount: model.layerCount)
         let stats = RunStats()
 
-        // Faithful JOT preconditions (see LayerJotCache / GenerationParams.jotFaithful):
+        // Faithful JOT / SureLock preconditions:
         // the K/V hold mutates in-graph once per step and is not rolled back across a K>1
         // speculative batch, and it manages the active window's K/V (mutually exclusive with
         // Elastic-Cache and with a two-block window).
-        if params.jotEnabled && params.jotFaithful {
+        if (params.jotEnabled && params.jotFaithful) || params.sureLockEnabled {
             precondition(self.speculationK == 1,
-                "faithful JOT requires speculationK == 1 — the frozen-K/V hold is not "
+                "faithful JOT / SureLock requires speculationK == 1 — the frozen-K/V hold is not "
                 + "snapshot/rolled-back across a speculative batch.")
             precondition(!params.elasticCacheEnabled,
-                "faithful JOT and Elastic-Cache both manage the active-window K/V — enable at most one.")
+                "faithful JOT / SureLock and Elastic-Cache both manage the active-window K/V — enable at most one.")
             precondition(params.nBuf == 1,
-                "faithful JOT v1 supports a single active block (nBuf == 1).")
+                "faithful JOT / SureLock v1 supports a single active block (nBuf == 1).")
             precondition(params.speculation == .none,
-                "faithful JOT is not composed with S2D2 speculation (WP-3a v1 scope).")
+                "faithful JOT / SureLock is not composed with S2D2 speculation.")
         }
         if params.flashBlockEnabled {
             precondition(self.speculationK == 1,
@@ -85,9 +90,18 @@ extension DiffusionEngine {
             precondition(!params.elasticCacheEnabled,
                 "FlashBlock and Elastic-Cache cannot be enabled together.")
         }
+        if params.dualCachingEnabled {
+            precondition(self.speculationK == 1,
+                "Dual caching requires speculationK == 1.")
+            precondition(params.nBuf == 1,
+                "Dual caching supports a single active block (nBuf == 1).")
+            precondition(!params.elasticCacheEnabled,
+                "Dual caching and Elastic-Cache cannot be enabled together.")
+        }
         precondition(!params.subBlockCommit || (params.jotEnabled && params.jotFaithful),
             "sub-block prefix commit (Option C) requires faithful JOT (it keys off the frozen "
             + "mask and commits into the ExactPrefixCache); enable jotEnabled + jotFaithful.")
+
 
         // Capture forward over a full block of `ids` at absolute `startPos`, then commit its K/V.
         func captureAndCommit(_ ids: MLXArray, startPos: Int) {
@@ -160,10 +174,10 @@ extension DiffusionEngine {
             let stepInBlock = stepIndex
             stepIndex += 1
 
-            // Faithful JOT (WP-3a v2) / FlashBlock (WP-3b)
-            if params.flashBlockEnabled || (params.jotEnabled && params.jotFaithful) {
+            // Faithful JOT (WP-3a v2) / FlashBlock (WP-3b) / CSA2 / SureLock / Dual Caching
+            if params.flashBlockEnabled || (params.jotEnabled && params.jotFaithful) || params.dualCachingEnabled || params.csa2Enabled || params.sureLockEnabled {
                 let frozenMaskVal = frozen ?? MLXArray.zeros([1, activeLen], dtype: .bool)
-                let capacity: Int? = (params.moeCapacityRatio > 0 && params.jotEnabled)
+                let capacity: Int? = (params.moeCapacityRatio > 0 && (params.jotEnabled || params.sureLockEnabled))
                     ? Int((params.moeCapacityRatio * Float(activeLen)).rounded(.up))
                     : nil
                 
@@ -180,12 +194,17 @@ extension DiffusionEngine {
                     dirtyCount = activeLen
                 }
                 
+                let fbEnabled = params.flashBlockEnabled || params.dualCachingEnabled
+                let csa2 = params.csa2Config
+
                 return model(activeIds, positionIds: positionIds, caches: cache.layers,
                              jotCaches: jotCache.layers, frozen: frozenMaskVal, mask: nil, capacity: capacity,
-                             flashBlockEnabled: params.flashBlockEnabled, flashBlockTau: params.flashBlockTau,
+                             flashBlockEnabled: fbEnabled, flashBlockTau: params.flashBlockTau,
                              isFirstStepOfBlock: isFirstStep, dirtyPerSeq: [dirtyCount],
-                             ablation: params.moduleAblation)
+                             ablation: params.moduleAblation,
+                             csa2Config: csa2, stepInBlock: stepInBlock)
             }
+
 
             // Elastic off (the served default): plain cached forward. The elastic overload
             // materializes full attention weights per layer for the drift test — that

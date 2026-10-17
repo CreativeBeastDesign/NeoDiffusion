@@ -130,38 +130,53 @@ public final class LLaDA2Attention: Module {
         return dense(output)
     }
 
-    /// Faithful-JOT cache-aware attention (WP-3a v2) + FlashBlock (WP-3b).
+    /// Faithful-JOT cache-aware attention (WP-3a v2) + FlashBlock (WP-3b) + CSA2 (Tier 2).
     public func callAsFunction(
         _ x: MLXArray, cos: MLXArray, sin: MLXArray, cache: LayerKVCache,
         jot: LayerJotCache, frozen: MLXArray, mask: MLXArray? = nil,
         flashBlockEnabled: Bool = false, flashBlockTau: Int = 4,
-        isFirstStepOfBlock: Bool = false, dirtyPerSeq: [Int] = [0]
+        isFirstStepOfBlock: Bool = false, dirtyPerSeq: [Int] = [0],
+        csa2Reuse: Bool = false
     ) -> MLXArray {
         let B = x.dim(0)
         let L = x.dim(1)
 
-        let qkv = queryKeyValue(x).reshaped(B, L, numHeads + 2 * numKVHeads, headDim)
-        let parts = split(qkv, indices: [numHeads, numHeads + numKVHeads], axis: 2)
-        var queries = parts[0].transposed(0, 2, 1, 3)
-        var freshKeys = parts[1].transposed(0, 2, 1, 3)   // [1, nKV, L, D]
-        let freshValues = parts[2].transposed(0, 2, 1, 3)
+        var activeKeys: MLXArray
+        var activeValues: MLXArray
+        var queries: MLXArray
 
-        if let queryLayernorm { queries = queryLayernorm(queries) }
-        if let keyLayernorm { freshKeys = keyLayernorm(freshKeys) }
+        if csa2Reuse, let prevK = jot.keys, let prevV = jot.values {
+            // CSA2 Reuse mode: compute queries only, reuse stabilized active keys and values
+            let qkv = queryKeyValue(x).reshaped(B, L, numHeads + 2 * numKVHeads, headDim)
+            let parts = split(qkv, indices: [numHeads, numHeads + numKVHeads], axis: 2)
+            queries = parts[0].transposed(0, 2, 1, 3)
 
-        queries = PartialRotaryEmbedding.apply(queries, cos: cos, sin: sin)
-        freshKeys = PartialRotaryEmbedding.apply(freshKeys, cos: cos, sin: sin)
+            if let queryLayernorm { queries = queryLayernorm(queries) }
+            queries = PartialRotaryEmbedding.apply(queries, cos: cos, sin: sin)
 
-        // Hold frozen columns at their captured value; refresh the rest. Broadcast `frozen`
-        // `[1, L]` over the head (nKV) and head-dim (D) axes → `[1, 1, L, 1]`.
-        let frozenKV = frozen.reshaped(1, 1, L, 1)
-        let activeKeys = jot.keys.map { which(frozenKV, $0, freshKeys) } ?? freshKeys
-        let activeValues = jot.values.map { which(frozenKV, $0, freshValues) } ?? freshValues
-        jot.keys = activeKeys
-        jot.values = activeValues
+            activeKeys = prevK
+            activeValues = prevV
+        } else {
+            let qkv = queryKeyValue(x).reshaped(B, L, numHeads + 2 * numKVHeads, headDim)
+            let parts = split(qkv, indices: [numHeads, numHeads + numKVHeads], axis: 2)
+            queries = parts[0].transposed(0, 2, 1, 3)
+            var freshKeys = parts[1].transposed(0, 2, 1, 3)   // [1, nKV, L, D]
+            let freshValues = parts[2].transposed(0, 2, 1, 3)
 
-        let keys = cache.keys.map { concatenated([$0, activeKeys], axis: 2) } ?? activeKeys
-        let values = cache.values.map { concatenated([$0, activeValues], axis: 2) } ?? activeValues
+            if let queryLayernorm { queries = queryLayernorm(queries) }
+            if let keyLayernorm { freshKeys = keyLayernorm(freshKeys) }
+
+            queries = PartialRotaryEmbedding.apply(queries, cos: cos, sin: sin)
+            freshKeys = PartialRotaryEmbedding.apply(freshKeys, cos: cos, sin: sin)
+
+            // Hold frozen columns at their captured value; refresh the rest. Broadcast `frozen`
+            // `[1, L]` over the head (nKV) and head-dim (D) axes → `[1, 1, L, 1]`.
+            let frozenKV = frozen.reshaped(1, 1, L, 1)
+            activeKeys = jot.keys.map { which(frozenKV, $0, freshKeys) } ?? freshKeys
+            activeValues = jot.values.map { which(frozenKV, $0, freshValues) } ?? freshValues
+            jot.keys = activeKeys
+            jot.values = activeValues
+        }
 
         cache.pendingKeys = activeKeys
         cache.pendingValues = activeValues
@@ -246,6 +261,9 @@ public final class LLaDA2Attention: Module {
             let output = (results.O.dtype == queries.dtype) ? results.O : results.O.asType(queries.dtype)
             return dense(output)
         }
+
+        let keys = cache.keys.map { concatenated([$0, activeKeys], axis: 2) } ?? activeKeys
+        let values = cache.values.map { concatenated([$0, activeValues], axis: 2) } ?? activeValues
 
         let attended = Self.attend(
             queries: queries, keys: keys, values: values, scale: scale, mask: mask)

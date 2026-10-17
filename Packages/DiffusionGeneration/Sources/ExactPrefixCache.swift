@@ -2,7 +2,8 @@ import Foundation
 import MLX
 import DiffusionCore
 
-/// The **exact** KV tier: prompt + committed-block K/V (phase-1 §5 "two caches, two contracts").
+/// The **exact** KV tier: prompt + committed-block K/V (phase-1 §5 "two caches, two contracts")
+/// enhanced with Tier-1 Preallocated Memory Pool and Low-Bit KV Quantization.
 ///
 /// Exact by block-causality under the `.strict` mask (phase-2 §5 deviation 1) — a committed
 /// block's K/V is what an uncached full-window forward would compute for those positions, so
@@ -15,9 +16,20 @@ import DiffusionCore
 /// are always consistent with the committed tokens (gotcha 6).
 public final class ExactPrefixCache {
     public let layers: [LayerKVCache]
+    public let usePool: Bool
+    public let quantization: KVCacheQuantization
 
-    public init(layerCount: Int) {
-        self.layers = (0 ..< layerCount).map { _ in LayerKVCache() }
+    public init(
+        layerCount: Int,
+        usePool: Bool = false,
+        initialPoolCapacity: Int = 512,
+        quantization: KVCacheQuantization = .none
+    ) {
+        self.usePool = usePool
+        self.quantization = quantization
+        self.layers = (0 ..< layerCount).map { _ in
+            LayerKVCache(usePool: usePool, initialPoolCapacity: initialPoolCapacity, quantization: quantization)
+        }
     }
 
     /// Committed token count (all layers advance in lockstep; layer 0 is representative).
@@ -25,7 +37,9 @@ public final class ExactPrefixCache {
 
     /// Commit the pending (last-captured) active-block K/V on every layer — the block-commit
     /// transition. Callers must have run a capture forward over the final committed tokens first.
-    public func commitBlock() {
-        for layer in layers { layer.commitPending() }
+    public func commitBlock(usePool: Bool? = nil, quantization: KVCacheQuantization? = nil) {
+        let poolFlag = usePool ?? self.usePool
+        let quantMode = quantization ?? self.quantization
+        for layer in layers { layer.commitPending(usePool: poolFlag, quantization: quantMode) }
     }
 }

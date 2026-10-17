@@ -150,6 +150,34 @@ public struct GenerationParams: Sendable, Equatable {
     /// Dirty token threshold for FlashBlock cache refresh.
     public var flashBlockTau: Int
 
+    /// Whether Unified Dual Caching is enabled (WP-4e).
+    public var dualCachingEnabled: Bool
+    /// KV Cache Quantization mode for Tier-1 Prefix storage (.none, .fp8, .fp4).
+    public var kvQuantization: KVCacheQuantization
+    /// Whether to use the pre-allocated memory pool for prefix KV.
+    public var kvPoolEnabled: Bool
+    /// Initial capacity for the KV pool in tokens.
+    public var kvPoolCapacity: Int
+    /// CSA2 static layer classification enabled (Tier-2 within-block).
+    public var csa2Enabled: Bool
+    /// CSA2 static layer reuse boundary (layers < boundary reuse on refinement steps).
+    public var csa2Boundary: Int?
+    /// CSA2 layer stride (e.g. 2 for alternating).
+    public var csa2Stride: Int
+    /// Token stability locking (SureLock / FreeCache unified mode).
+    public var sureLockEnabled: Bool
+
+    /// Resolved CSA2 configuration if CSA2 or Dual Caching is enabled.
+    public var csa2Config: CSA2Config? {
+        guard csa2Enabled || dualCachingEnabled else { return nil }
+        if let boundary = csa2Boundary {
+            return .boundary(boundary)
+        } else {
+            return .alternating(stride: csa2Stride)
+        }
+    }
+
+
     /// Whether Temporal Self-Consistency Voting is enabled.
     public var temporalVotingEnabled: Bool
     /// Decay parameter α for exponential step-weighting in voting.
@@ -231,6 +259,14 @@ public struct GenerationParams: Sendable, Equatable {
         subBlockMinPrefix: Int = 8,
         flashBlockEnabled: Bool = false,
         flashBlockTau: Int = 4,
+        dualCachingEnabled: Bool = false,
+        kvQuantization: KVCacheQuantization = .none,
+        kvPoolEnabled: Bool = false,
+        kvPoolCapacity: Int = 512,
+        csa2Enabled: Bool = false,
+        csa2Boundary: Int? = nil,
+        csa2Stride: Int = 2,
+        sureLockEnabled: Bool = false,
         temporalVotingEnabled: Bool = false,
         temporalVotingAlpha: Float = 0.0,
         temporalVotingCutoff: Float = 0.9,
@@ -276,6 +312,14 @@ public struct GenerationParams: Sendable, Equatable {
         self.subBlockMinPrefix = subBlockMinPrefix
         self.flashBlockEnabled = flashBlockEnabled
         self.flashBlockTau = flashBlockTau
+        self.dualCachingEnabled = dualCachingEnabled
+        self.kvQuantization = kvQuantization
+        self.kvPoolEnabled = kvPoolEnabled
+        self.kvPoolCapacity = kvPoolCapacity
+        self.csa2Enabled = csa2Enabled
+        self.csa2Boundary = csa2Boundary
+        self.csa2Stride = csa2Stride
+        self.sureLockEnabled = sureLockEnabled
         self.temporalVotingEnabled = temporalVotingEnabled
         self.temporalVotingAlpha = temporalVotingAlpha
         self.temporalVotingCutoff = temporalVotingCutoff
