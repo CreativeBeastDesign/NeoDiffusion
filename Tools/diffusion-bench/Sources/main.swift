@@ -80,6 +80,52 @@ func percentile(_ sorted: [Double], _ p: Double) -> Double {
     return sorted[idx]
 }
 
+if CommandLine.arguments.contains("--help") || CommandLine.arguments.contains("-h") {
+    print("""
+        diffusion-bench — NeoDiffusion benchmark CLI
+
+        Usage: diffusion-bench llada [options]   (phase-2 M6 metric set)
+        Options:
+          --model DIR        converted model dir (default models/llada2-1-mini-4bit)
+          --tokenizer DIR    tokenizer dir (default models/llada2-1-mini)
+          --runs N           runs per arm (default 3)
+          --cooldown N       seconds between runs (default 30)
+          --gen-length N     tokens to generate per prompt (default 128)
+          --suites LIST      prompt suites, comma-sep (default chat,reasoning,code)
+          --prompt TEXT      single ad-hoc prompt instead of the suites
+          --json PATH        append JSONL results (default scratch/llada_bench.jsonl)
+          --speculation-k N  loop-control speculation depth (default 4)
+          --no-early-stop    disable eos_early_stop
+          --no-instrument    skip phase-boundary evals (phase clocks become unreliable)
+          --mask-diagnostic  .strict vs .referenceBias output comparison (uncached; §6 item 4)
+          --arm NAME         single custom arm: --arm-mode q|s, --uncached,
+                             --mask strict|referenceBias
+          --arms LIST        filter the default arms (q-cached,s-cached)
+
+        Usage: diffusion-bench sumi [options]    (sumi-plan.md §5 S3.1)
+        Options:
+          --model DIR       converted model dir (default models/sumi-7b-4bit)
+          --tokenizer DIR   tokenizer dir (default Tools/reference/sumi)
+          --runs N          runs per arm (default 3)
+          --budget N        content budget in tokens (default 64)
+          --sampler S       adaptive | greedy | ancestral (default adaptive)
+          --canvas N        canvas size (default 1024)
+          --k N             speculation depth (default 4)
+          --steps N         fixed step count for greedy/ancestral (default 64)
+          --freeze          freeze tokens stable for 4 steps (adaptive default true)
+          --temperature F   sampling temperature (default 0.7 for ancestral, 0 for others)
+          --denoise-end     scale sigma from t to 0 (default: scale from 1 to 0)
+          --pipelined       pipeline step N+1 preparation with step N execution
+          --early-exit-stable N   early-exit when canvas has N consecutive stable steps
+          --early-exit-min-steps N minimum steps before early-exit is allowed (default 0)
+          --early-exit-fraction F early-exit when fraction of canvas is settled (default 1.0)
+          --prompt TEXT     text prompt (default: "A high-resolution photograph...")
+          --json PATH       append JSONL results (default scratch/sumi_bench.jsonl)
+          --arm NAME        run a single named arm instead of the 3-arm suite
+        """)
+    exit(0)
+}
+
 if CommandLine.arguments.count > 1, CommandLine.arguments[1] == "llada" {
     try await runLLaDABench()
     exit(0)
