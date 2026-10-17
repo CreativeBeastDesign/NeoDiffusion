@@ -97,14 +97,18 @@ Every logged experiment row must record:
     *   `[Sourced]`: Upgrading expert grouping to group-32 (g32) or bit-depth to 6-bit experts did not improve the flip rate (3.4% and 3.1% flips, respectively), despite adding memory footprint.
 *   **Verdict**: **Uniform 4-bit g64 defaults accepted** as optimal quality-footprint knee.
 
-### WP-1a: Elastic-Cache Pipeline
+### WP-1a: Elastic-Cache Pipeline & Unified Dual Caching Strategy
 *   **Objective**: Implement sliding window $\beta$ and depth boundary $\ell^\star$ KV-cache staleness reuse inside active blocks.
 *   **Host Environment**: MacBook Pro M1 (16 GB RAM).
 *   **Key Results**:
     *   `[Sourced]`: Active-KV reuse increased generation steps monotonically (S4: 13.4, S16: 30.6 vs. 12.6 baseline).
     *   `[Sourced]`: Confidence starvation occurred at reuse depth $S \ge 12$, stalling block updates.
     *   `[Inferred]`: Exact block-causal semantics and `ExactPrefixCache` already pre-banked the paper's caching gains. Fused QKV projections limit the FLOP savings ceiling to ~4%, which was wiped out by similarity-testing overhead.
-*   **Verdict**: **REJECTED (Negative Result)**.
+    *   `[Sourced]`: **Superseded by Unified Dual Caching Architecture (2026)**:
+        1. **Tier 1 (Inter-Block / Prefix)**: Pre-allocated `KVCachePool` using `mlx_slice_update` eliminates `concatenated` re-allocation churn ($\Delta = 0.000000$). Quantized KV cache with DeepSeek-V4.1-Flash style FP8 (50% memory reduction, $\Delta = 0.0195$) and packed FP4 (75% memory reduction) group-64 compression.
+        2. **Tier 2 (Within-Block / Intra-Block)**: CSA2 static layer classification (`.boundary` and `.alternating` stride) executes with zero CPU-GPU host synchronization.
+        3. **FlashBlock Synergy**: Prefix attention is evaluated once on step 0 (`.refreshCache`) and subsequent steps reuse scalar accumulators ($A_{past}, L_{past}$) without reading prefix KV, meaning compressed prefix KV incurs zero dequantization overhead on reuse steps.
+*   **Verdict**: **WP-1a Naive Elastic-Cache REJECTED; Unified Dual Caching ACCEPTED & LANDED ON `kernel`**. Tests: `DualCachingTests` (4/4 passed). Wiki draft: [`Plans/wiki-drafts/dual-caching-and-kv-compression.md`](file:///Users/andrebarlocher/Documents/Swift/NeoDiffusion/Plans/wiki-drafts/dual-caching-and-kv-compression.md).
 
 ### WP-1b: Training-free MultiBD
 *   **Objective**: Support concurrently unmasking up to two blocks in a single 64-token forward pass via $\tau_{\text{add}}$ activation and $\tau_{\text{semi}}$ fallbacks.
