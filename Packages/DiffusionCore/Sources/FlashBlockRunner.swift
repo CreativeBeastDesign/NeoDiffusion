@@ -1,7 +1,7 @@
 // FlashBlockRunner.swift
 //
 // Pure-Swift asynchronous FlashBlock runner using MLXFast.metalKernel.
-// Eliminates CPU-GPU roundtrips by running directly on MLX's internal command buffer stream.
+// Zero-copy native tensor layout, 4-wide vector loads/FMAs, and multi-head threadgroup tiling.
 
 import Foundation
 import MLX
@@ -17,20 +17,23 @@ public struct FlashBlockConfig {
 
     // Tile sizes
     public var blockM: Int              // 16 or 32
-    public var blockN: Int              // 64 or 128
+    public var blockN: Int              // 32, 64, or 128
 
     // Reuse gates
     public var tau: Int                 // per-block dirty-token threshold
     public var composeGamma: Float      // per-head similarity threshold
 
+    public var dtype: DType
+
     public init(numSeqs: Int, blockLen: Int,
                 numQHeads: Int, numKVHeads: Int, headDim: Int,
                 pageSize: Int = 256, maxPagesPerSeq: Int = 64,
-                blockM: Int = 32, blockN: Int = 128,
-                tau: Int = 4, composeGamma: Float = 0.0) {
+                blockM: Int = 32, blockN: Int = 32,
+                tau: Int = 4, composeGamma: Float = 0.0,
+                dtype: DType = .float16) {
         precondition(numQHeads % numKVHeads == 0, "GQA: numQHeads must be a multiple of numKVHeads")
         precondition(blockLen <= blockM, "blockLen must be <= blockM")
-        precondition([64, 96, 128].contains(headDim), "headDim must be 64/96/128")
+        precondition([32, 64, 96, 128].contains(headDim), "headDim must be 32/64/96/128")
         self.numSeqs = numSeqs
         self.blockLen = blockLen
         self.numQHeads = numQHeads
@@ -42,10 +45,17 @@ public struct FlashBlockConfig {
         self.blockN = blockN
         self.tau = tau
         self.composeGamma = composeGamma
+        self.dtype = dtype
     }
 
-    var kvGroup: Int { numQHeads / numKVHeads }
-    var nqTotal: Int { numSeqs * blockLen }
+    public var kvGroup: Int { numQHeads / numKVHeads }
+    public var nqTotal: Int { numSeqs * blockLen }
+
+    /// Multi-head threadgroup tiling: when heads are even and share a KV group, pack 2 heads per threadgroup
+    /// to share KV tile loads in threadgroup memory and boost occupancy to 64 threads (2 simdgroups).
+    public var headsPerThreadGroup: Int {
+        (numQHeads % 2 == 0 && kvGroup >= 2) ? 2 : 1
+    }
 }
 
 public final class FlashBlockRunner {
@@ -62,14 +72,23 @@ public final class FlashBlockRunner {
     public init(config: FlashBlockConfig) throws {
         self.config = config
 
-        // Bake constants as preprocessor defines
+        let dTypeName = (config.dtype == .float32) ? "float" : "half"
+        let dType4Name = (config.dtype == .float32) ? "float4" : "half4"
+        let smScale = (1.0 / Float(config.headDim).squareRoot()) * Float(log2(M_E))
+
         let header = """
+        #include <metal_stdlib>
+        using namespace metal;
+
+        #define DTYPE \(dTypeName)
+        #define DTYPE4 \(dType4Name)
         #define BLOCK_M \(config.blockM)
         #define BLOCK_N \(config.blockN)
         #define HEAD_DIM \(config.headDim)
         #define KV_GROUP \(config.kvGroup)
-        #define PAGE_SIZE \(config.pageSize)
-        #define MAX_PAGES \(config.maxPagesPerSeq)
+        #define H_PER_TG \(config.headsPerThreadGroup)
+        #define SM_SCALE \(smScale)f
+        #define VEC_D (HEAD_DIM / 4)
 
         """
 
@@ -78,182 +97,80 @@ public final class FlashBlockRunner {
             const uint3 tid = thread_position_in_threadgroup;
             const uint3 ntids = threads_per_threadgroup;
 
-            const uint seq   = tgid.x;
-            const uint qh    = tgid.y;
-            const uint kh    = qh / uint(KV_GROUP);
-            const int  Nk    = ctx_lens[seq];
-            const int  B     = \(config.blockLen);
+            const uint seq = tgid.x;
+            const uint qh  = tgid.y * uint(H_PER_TG) + tid.y;
+            const uint kh  = qh / uint(KV_GROUP);
+            const int  Nk  = ctx_lens[seq];
+            const int  B   = \(config.blockLen);
             const uint tid_x = tid.x;
-            const uint ntids_x = ntids.x;
 
-            struct FlashBlockParams {
-                int num_seqs;
-                int block_len;
-                int num_q_heads;
-                int num_kv_heads;
-                float sm_scale;
-                float compose_gamma;
-                int use_dirty_gate;
-                int use_head_gamma;
-            };
-            FlashBlockParams P;
-            P.num_seqs = \(config.numSeqs);
-            P.block_len = \(config.blockLen);
-            P.num_q_heads = \(config.numQHeads);
-            P.num_kv_heads = \(config.numKVHeads);
-            P.sm_scale = \((1.0 / Float(config.headDim).squareRoot()) * Float(log2(M_E)));
-            P.compose_gamma = \(config.composeGamma);
-            P.use_dirty_gate = 1;
-            P.use_head_gamma = 0;
+            const uint thread_id = tid.y * ntids.x + tid.x;
+            const uint total_threads = ntids.y * ntids.x;
 
-            threadgroup half Ktile[BLOCK_N * HEAD_DIM];
-            threadgroup half Vtile[BLOCK_N * HEAD_DIM];
+            threadgroup DTYPE4 Ktile4[(BLOCK_N * HEAD_DIM) / 4];
+            threadgroup DTYPE4 Vtile4[(BLOCK_N * HEAD_DIM) / 4];
+            threadgroup DTYPE* Ktile = reinterpret_cast<threadgroup DTYPE*>(Ktile4);
+            threadgroup DTYPE* Vtile = reinterpret_cast<threadgroup DTYPE*>(Vtile4);
 
             float m_i = -INFINITY;
             float l_i = 0.0f;
-            float acc[128];
+            float4 acc4[VEC_D];
             #pragma clang loop unroll(full)
-            for (int d = 0; d < 128; ++d) acc[d] = 0.0f;
+            for (int d = 0; d < VEC_D; ++d) acc4[d] = float4(0.0f);
 
-            const bool row_active = (int(tid_x) < B);
-            half q_row[128];
+            const bool row_active = (int(tid_x) < B) && (qh < uint(\(config.numQHeads)));
+            DTYPE4 q_row4[VEC_D];
             if (row_active) {
-                const uint q_row_idx = seq * uint(B) + tid_x;
-                device const half* qp =
-                    Q + (q_row_idx * uint(P.num_q_heads) + qh) * uint(HEAD_DIM);
+                device const DTYPE4* qp4 = reinterpret_cast<device const DTYPE4*>(
+                    Q + ((seq * uint(\(config.numQHeads)) + qh) * uint(B) + tid_x) * uint(HEAD_DIM)
+                );
                 #pragma clang loop unroll(full)
-                for (int d = 0; d < 128; ++d) {
-                    if (d < HEAD_DIM) {
-                        q_row[d] = qp[d];
-                    } else {
-                        q_row[d] = 0.0h;
-                    }
+                for (int d = 0; d < VEC_D; ++d) {
+                    q_row4[d] = qp4[d];
                 }
             } else {
                 #pragma clang loop unroll(full)
-                for (int d = 0; d < 128; ++d) q_row[d] = 0.0h;
+                for (int d = 0; d < VEC_D; ++d) q_row4[d] = DTYPE4(0.0);
             }
 
-            const int num_pages = (Nk + PAGE_SIZE - 1) / PAGE_SIZE;
-            int kv_pos = 0;
+            const uint total_vec = (uint(BLOCK_N) * uint(HEAD_DIM)) / 4;
+            device const DTYPE4* k_cache4 = reinterpret_cast<device const DTYPE4*>(
+                K_cache + (seq * uint(\(config.numKVHeads)) + kh) * uint(Nk) * uint(HEAD_DIM)
+            );
+            device const DTYPE4* v_cache4 = reinterpret_cast<device const DTYPE4*>(
+                V_cache + (seq * uint(\(config.numKVHeads)) + kh) * uint(Nk) * uint(HEAD_DIM)
+            );
 
-            for (int lp = 0; lp < num_pages; ++lp) {
-                const uint page_id = block_tables[seq * uint(MAX_PAGES) + uint(lp)];
-                const int  toks    = min(Nk - kv_pos, PAGE_SIZE);
+            // 1. Prefix KV cache streaming loop
+            for (int tn = 0; tn < Nk; tn += BLOCK_N) {
+                const int actual = min(Nk - tn, BLOCK_N);
+                const uint valid_vec = (uint(actual) * uint(HEAD_DIM)) / 4;
+                const uint tn_vec    = (uint(tn) * uint(HEAD_DIM)) / 4;
 
-                for (int tn = 0; tn < toks; tn += BLOCK_N) {
-                    const int actual = min(toks - tn, BLOCK_N);
-
-                    const uint tile_elems = uint(BLOCK_N) * uint(HEAD_DIM);
-                    for (uint e = tid_x; e < tile_elems; e += ntids_x) {
-                        const uint j = e / uint(HEAD_DIM);
-                        const uint d = e % uint(HEAD_DIM);
-                        if (int(j) < actual) {
-                            const int safe_j = min(int(j), actual - 1);
-                            const uint src =
-                                ((page_id * uint(PAGE_SIZE) + uint(tn) + safe_j) * uint(P.num_kv_heads) + kh)
-                                * uint(HEAD_DIM) + d;
-                            Ktile[e] = K_page[src];
-                            Vtile[e] = V_page[src];
-                        } else {
-                            Ktile[e] = 0.0h;
-                            Vtile[e] = 0.0h;
-                        }
-                    }
-                    threadgroup_barrier(mem_flags::mem_threadgroup);
-
-                    if (row_active) {
-                        float qk[128];
-                        #pragma clang loop unroll(full)
-                        for (int j = 0; j < 128; ++j) qk[j] = -INFINITY;
-
-                        for (int j = 0; j < actual; ++j) {
-                            float s = 0.0f;
-                            threadgroup const half* krow = Ktile + j * HEAD_DIM;
-                            #pragma clang loop unroll(full)
-                            for (int d = 0; d < 128; ++d) {
-                                if (d < HEAD_DIM) {
-                                    s = fma(float(q_row[d]), float(krow[d]), s);
-                                }
-                            }
-                            qk[j] = s * P.sm_scale;
-                        }
-
-                        float m_new = m_i;
-                        for (int j = 0; j < actual; ++j) m_new = max(m_new, qk[j]);
-                        const float alpha = fast::exp2(m_i - m_new);
-                        l_i *= alpha;
-                        #pragma clang loop unroll(full)
-                        for (int d = 0; d < 128; ++d) acc[d] *= alpha;
-
-                        for (int j = 0; j < actual; ++j) {
-                            const float p = fast::exp2(qk[j] - m_new);
-                            l_i += p;
-                            threadgroup const half* vrow = Vtile + j * HEAD_DIM;
-                            #pragma clang loop unroll(full)
-                            for (int d = 0; d < 128; ++d) {
-                                if (d < HEAD_DIM) {
-                                    acc[d] = fma(p, float(vrow[d]), acc[d]);
-                                }
-                            }
-                        }
-                        m_i = m_new;
-                    }
-                    threadgroup_barrier(mem_flags::mem_threadgroup);
-                }
-                kv_pos += toks;
-            }
-
-            if (row_active) {
-                const uint qrow  = seq * uint(B) + tid_x;
-                const uint slot  = qrow * uint(P.num_q_heads) + qh;
-                const float l_safe = (l_i == 0.0f) ? 1.0f : l_i;
-
-                #pragma clang loop unroll(full)
-                for (int d = 0; d < 128; ++d) {
-                    if (d < HEAD_DIM) {
-                        attnOutPast[slot * uint(HEAD_DIM) + d] = acc[d] / l_safe;
-                    }
-                }
-                logsumexp[slot] = m_i * float(M_LN2_F) + log(l_safe);
-            }
-
-            for (int tn = 0; tn < B; tn += BLOCK_N) {
-                const int actual = min(B - tn, BLOCK_N);
-                const uint tile_elems = uint(BLOCK_N) * uint(HEAD_DIM);
-
-                for (uint e = tid_x; e < tile_elems; e += ntids_x) {
-                    const uint j = e / uint(HEAD_DIM);
-                    const uint d = e % uint(HEAD_DIM);
-                    if (int(j) < actual) {
-                        const int safe_j = min(int(j), actual - 1);
-                        const uint src_row = seq * uint(B) + uint(tn) + safe_j;
-                        const uint src =
-                            (src_row * uint(P.num_kv_heads) + kh) * uint(HEAD_DIM) + d;
-                        Ktile[e] = K_cur[src];
-                        Vtile[e] = V_cur[src];
+                for (uint v = thread_id; v < total_vec; v += total_threads) {
+                    if (v < valid_vec) {
+                        Ktile4[v] = k_cache4[tn_vec + v];
+                        Vtile4[v] = v_cache4[tn_vec + v];
                     } else {
-                        Ktile[e] = 0.0h;
-                        Vtile[e] = 0.0h;
+                        Ktile4[v] = DTYPE4(0.0);
+                        Vtile4[v] = DTYPE4(0.0);
                     }
                 }
                 threadgroup_barrier(mem_flags::mem_threadgroup);
 
                 if (row_active) {
-                    float qk[128];
+                    float qk[BLOCK_N];
                     #pragma clang loop unroll(full)
-                    for (int j = 0; j < 128; ++j) qk[j] = -INFINITY;
+                    for (int j = 0; j < BLOCK_N; ++j) qk[j] = -INFINITY;
 
                     for (int j = 0; j < actual; ++j) {
                         float s = 0.0f;
-                        threadgroup const half* krow = Ktile + j * HEAD_DIM;
+                        threadgroup const DTYPE4* krow4 = reinterpret_cast<threadgroup const DTYPE4*>(Ktile + j * HEAD_DIM);
                         #pragma clang loop unroll(full)
-                        for (int d = 0; d < 128; ++d) {
-                            if (d < HEAD_DIM) {
-                                s = fma(float(q_row[d]), float(krow[d]), s);
-                            }
+                        for (int d = 0; d < VEC_D; ++d) {
+                            s += dot(float4(q_row4[d]), float4(krow4[d]));
                         }
-                        qk[j] = s * P.sm_scale;
+                        qk[j] = s * SM_SCALE;
                     }
 
                     float m_new = m_i;
@@ -261,17 +178,15 @@ public final class FlashBlockRunner {
                     const float alpha = fast::exp2(m_i - m_new);
                     l_i *= alpha;
                     #pragma clang loop unroll(full)
-                    for (int d = 0; d < 128; ++d) acc[d] *= alpha;
+                    for (int d = 0; d < VEC_D; ++d) acc4[d] *= alpha;
 
                     for (int j = 0; j < actual; ++j) {
                         const float p = fast::exp2(qk[j] - m_new);
                         l_i += p;
-                        threadgroup const half* vrow = Vtile + j * HEAD_DIM;
+                        threadgroup const DTYPE4* vrow4 = reinterpret_cast<threadgroup const DTYPE4*>(Vtile + j * HEAD_DIM);
                         #pragma clang loop unroll(full)
-                        for (int d = 0; d < 128; ++d) {
-                            if (d < HEAD_DIM) {
-                                acc[d] = fma(p, float(vrow[d]), acc[d]);
-                            }
+                        for (int d = 0; d < VEC_D; ++d) {
+                            acc4[d] = fma(float4(p), float4(vrow4[d]), acc4[d]);
                         }
                     }
                     m_i = m_new;
@@ -279,16 +194,87 @@ public final class FlashBlockRunner {
                 threadgroup_barrier(mem_flags::mem_threadgroup);
             }
 
+            // Stash cached prefix attention accumulators
             if (row_active) {
-                const uint qrow = seq * uint(B) + tid_x;
-                device half* op =
-                    O + (qrow * uint(P.num_q_heads) + qh) * uint(HEAD_DIM);
+                const uint slot = ((seq * uint(\(config.numQHeads)) + qh) * uint(B) + tid_x);
+                const float l_safe = (l_i == 0.0f) ? 1.0f : l_i;
+                device float4* aop4 = reinterpret_cast<device float4*>(attnOutPast + slot * uint(HEAD_DIM));
+                #pragma clang loop unroll(full)
+                for (int d = 0; d < VEC_D; ++d) {
+                    aop4[d] = acc4[d] / l_safe;
+                }
+                logsumexp[slot] = m_i * float(M_LN2_F) + log(l_safe);
+            }
+
+            // 2. Active block KV streaming loop
+            device const DTYPE4* k_cur4 = reinterpret_cast<device const DTYPE4*>(
+                K_cur + (seq * uint(\(config.numKVHeads)) + kh) * uint(B) * uint(HEAD_DIM)
+            );
+            device const DTYPE4* v_cur4 = reinterpret_cast<device const DTYPE4*>(
+                V_cur + (seq * uint(\(config.numKVHeads)) + kh) * uint(B) * uint(HEAD_DIM)
+            );
+
+            for (int tn = 0; tn < B; tn += BLOCK_N) {
+                const int actual = min(B - tn, BLOCK_N);
+                const uint valid_vec = (uint(actual) * uint(HEAD_DIM)) / 4;
+                const uint tn_vec    = (uint(tn) * uint(HEAD_DIM)) / 4;
+
+                for (uint v = thread_id; v < total_vec; v += total_threads) {
+                    if (v < valid_vec) {
+                        Ktile4[v] = k_cur4[tn_vec + v];
+                        Vtile4[v] = v_cur4[tn_vec + v];
+                    } else {
+                        Ktile4[v] = DTYPE4(0.0);
+                        Vtile4[v] = DTYPE4(0.0);
+                    }
+                }
+                threadgroup_barrier(mem_flags::mem_threadgroup);
+
+                if (row_active) {
+                    float qk[BLOCK_N];
+                    #pragma clang loop unroll(full)
+                    for (int j = 0; j < BLOCK_N; ++j) qk[j] = -INFINITY;
+
+                    for (int j = 0; j < actual; ++j) {
+                        float s = 0.0f;
+                        threadgroup const DTYPE4* krow4 = reinterpret_cast<threadgroup const DTYPE4*>(Ktile + j * HEAD_DIM);
+                        #pragma clang loop unroll(full)
+                        for (int d = 0; d < VEC_D; ++d) {
+                            s += dot(float4(q_row4[d]), float4(krow4[d]));
+                        }
+                        qk[j] = s * SM_SCALE;
+                    }
+
+                    float m_new = m_i;
+                    for (int j = 0; j < actual; ++j) m_new = max(m_new, qk[j]);
+                    const float alpha = fast::exp2(m_i - m_new);
+                    l_i *= alpha;
+                    #pragma clang loop unroll(full)
+                    for (int d = 0; d < VEC_D; ++d) acc4[d] *= alpha;
+
+                    for (int j = 0; j < actual; ++j) {
+                        const float p = fast::exp2(qk[j] - m_new);
+                        l_i += p;
+                        threadgroup const DTYPE4* vrow4 = reinterpret_cast<threadgroup const DTYPE4*>(Vtile + j * HEAD_DIM);
+                        #pragma clang loop unroll(full)
+                        for (int d = 0; d < VEC_D; ++d) {
+                            acc4[d] = fma(float4(p), float4(vrow4[d]), acc4[d]);
+                        }
+                    }
+                    m_i = m_new;
+                }
+                threadgroup_barrier(mem_flags::mem_threadgroup);
+            }
+
+            // Write final normalized output O in native layout [B, L, H * D]
+            if (row_active) {
+                device DTYPE4* op4 = reinterpret_cast<device DTYPE4*>(
+                    O + ((seq * uint(B) + tid_x) * uint(\(config.numQHeads)) + qh) * uint(HEAD_DIM)
+                );
                 const float l_safe = (l_i == 0.0f) ? 1.0f : l_i;
                 #pragma clang loop unroll(full)
-                for (int d = 0; d < 128; ++d) {
-                    if (d < HEAD_DIM) {
-                        op[d] = half(acc[d] / l_safe);
-                    }
+                for (int d = 0; d < VEC_D; ++d) {
+                    op4[d] = DTYPE4(acc4[d] / l_safe);
                 }
             }
         """
@@ -298,155 +284,117 @@ public final class FlashBlockRunner {
             const uint3 tid = thread_position_in_threadgroup;
             const uint3 ntids = threads_per_threadgroup;
 
-            const uint seq  = tgid.x;
-            const uint qh   = tgid.y;
-            const uint kh   = qh / uint(KV_GROUP);
-            const int  B    = \(config.blockLen);
+            const uint seq = tgid.x;
+            const uint qh  = tgid.y * uint(H_PER_TG) + tid.y;
+            const uint kh  = qh / uint(KV_GROUP);
+            const int  B   = \(config.blockLen);
             const uint tid_x = tid.x;
-            const uint ntids_x = ntids.x;
 
-            struct FlashBlockParams {
-                int num_seqs;
-                int block_len;
-                int num_q_heads;
-                int num_kv_heads;
-                float sm_scale;
-                float compose_gamma;
-                int use_dirty_gate;
-                int use_head_gamma;
-            };
-            FlashBlockParams P;
-            P.num_seqs = \(config.numSeqs);
-            P.block_len = \(config.blockLen);
-            P.num_q_heads = \(config.numQHeads);
-            P.num_kv_heads = \(config.numKVHeads);
-            P.sm_scale = \((1.0 / Float(config.headDim).squareRoot()) * Float(log2(M_E)));
-            P.compose_gamma = \(config.composeGamma);
-            P.use_dirty_gate = 1;
-            P.use_head_gamma = 0;
+            const uint thread_id = tid.y * ntids.x + tid.x;
+            const uint total_threads = ntids.y * ntids.x;
 
-            const bool row_active = (int(tid_x) < B);
-            half q_row[128];
+            const bool row_active = (int(tid_x) < B) && (qh < uint(\(config.numQHeads)));
+            DTYPE4 q_row4[VEC_D];
             if (row_active) {
-                const uint q_row_idx = seq * uint(B) + tid_x;
-                device const half* qp =
-                    Q + (q_row_idx * uint(P.num_q_heads) + qh) * uint(HEAD_DIM);
+                device const DTYPE4* qp4 = reinterpret_cast<device const DTYPE4*>(
+                    Q + ((seq * uint(\(config.numQHeads)) + qh) * uint(B) + tid_x) * uint(HEAD_DIM)
+                );
                 #pragma clang loop unroll(full)
-                for (int d = 0; d < 128; ++d) {
-                    if (d < HEAD_DIM) {
-                        q_row[d] = qp[d];
-                    } else {
-                        q_row[d] = 0.0h;
-                    }
+                for (int d = 0; d < VEC_D; ++d) {
+                    q_row4[d] = qp4[d];
                 }
             } else {
                 #pragma clang loop unroll(full)
-                for (int d = 0; d < 128; ++d) q_row[d] = 0.0h;
+                for (int d = 0; d < VEC_D; ++d) q_row4[d] = DTYPE4(0.0);
             }
 
-            threadgroup half Ktile[BLOCK_M * HEAD_DIM];
-            threadgroup half Vtile[BLOCK_M * HEAD_DIM];
+            threadgroup DTYPE4 Ktile4[(BLOCK_M * HEAD_DIM) / 4];
+            threadgroup DTYPE4 Vtile4[(BLOCK_M * HEAD_DIM) / 4];
+            threadgroup DTYPE* Ktile = reinterpret_cast<threadgroup DTYPE*>(Ktile4);
+            threadgroup DTYPE* Vtile = reinterpret_cast<threadgroup DTYPE*>(Vtile4);
 
-            const uint tile_elems = uint(BLOCK_M) * uint(HEAD_DIM);
-            for (uint e = tid_x; e < tile_elems; e += ntids_x) {
-                const uint j = e / uint(HEAD_DIM);
-                const uint d = e % uint(HEAD_DIM);
-                if (int(j) < B) {
-                    const uint src_row = seq * uint(B) + j;
-                    const uint src =
-                        (src_row * uint(P.num_kv_heads) + kh) * uint(HEAD_DIM) + d;
-                    Ktile[e] = K_cur[src];
-                    Vtile[e] = V_cur[src];
+            const uint total_vec = (uint(BLOCK_M) * uint(HEAD_DIM)) / 4;
+            const uint valid_vec = (uint(B) * uint(HEAD_DIM)) / 4;
+
+            device const DTYPE4* k_cur4 = reinterpret_cast<device const DTYPE4*>(
+                K_cur + (seq * uint(\(config.numKVHeads)) + kh) * uint(B) * uint(HEAD_DIM)
+            );
+            device const DTYPE4* v_cur4 = reinterpret_cast<device const DTYPE4*>(
+                V_cur + (seq * uint(\(config.numKVHeads)) + kh) * uint(B) * uint(HEAD_DIM)
+            );
+
+            for (uint v = thread_id; v < total_vec; v += total_threads) {
+                if (v < valid_vec) {
+                    Ktile4[v] = k_cur4[v];
+                    Vtile4[v] = v_cur4[v];
                 } else {
-                    Ktile[e] = 0.0h;
-                    Vtile[e] = 0.0h;
+                    Ktile4[v] = DTYPE4(0.0);
+                    Vtile4[v] = DTYPE4(0.0);
                 }
             }
             threadgroup_barrier(mem_flags::mem_threadgroup);
 
             float m_in = -INFINITY;
             float l_in = 0.0f;
-            float a_in[128];
+            float4 a_in4[VEC_D];
             #pragma clang loop unroll(full)
-            for (int d = 0; d < 128; ++d) a_in[d] = 0.0f;
+            for (int d = 0; d < VEC_D; ++d) a_in4[d] = float4(0.0f);
 
             if (row_active) {
-                float qk[32];
+                float qk[BLOCK_M];
                 #pragma clang loop unroll(full)
-                for (int j = 0; j < 32; ++j) qk[j] = -INFINITY;
+                for (int j = 0; j < BLOCK_M; ++j) qk[j] = -INFINITY;
 
                 for (int j = 0; j < B; ++j) {
                     float s = 0.0f;
-                    threadgroup const half* krow = Ktile + j * HEAD_DIM;
+                    threadgroup const DTYPE4* krow4 = reinterpret_cast<threadgroup const DTYPE4*>(Ktile + j * HEAD_DIM);
                     #pragma clang loop unroll(full)
-                    for (int d = 0; d < 128; ++d) {
-                        if (d < HEAD_DIM) {
-                            s = fma(float(q_row[d]), float(krow[d]), s);
-                        }
+                    for (int d = 0; d < VEC_D; ++d) {
+                        s += dot(float4(q_row4[d]), float4(krow4[d]));
                     }
-                    qk[j] = s * P.sm_scale;
+                    qk[j] = s * SM_SCALE;
                 }
                 for (int j = 0; j < B; ++j) m_in = max(m_in, qk[j]);
 
                 for (int j = 0; j < B; ++j) {
                     const float p = fast::exp2(qk[j] - m_in);
                     l_in += p;
-                    threadgroup const half* vrow = Vtile + j * HEAD_DIM;
+                    threadgroup const DTYPE4* vrow4 = reinterpret_cast<threadgroup const DTYPE4*>(Vtile + j * HEAD_DIM);
                     #pragma clang loop unroll(full)
-                    for (int d = 0; d < 128; ++d) {
-                        if (d < HEAD_DIM) {
-                            a_in[d] = fma(p, float(vrow[d]), a_in[d]);
-                        }
+                    for (int d = 0; d < VEC_D; ++d) {
+                        a_in4[d] = fma(float4(p), float4(vrow4[d]), a_in4[d]);
                     }
                 }
+
                 const float l_safe = (l_in == 0.0f) ? 1.0f : l_in;
                 #pragma clang loop unroll(full)
-                for (int d = 0; d < 128; ++d) a_in[d] /= l_safe;
+                for (int d = 0; d < VEC_D; ++d) a_in4[d] /= l_safe;
 
                 const float L_in = m_in * float(M_LN2_F) + log(l_safe);
 
-                const uint qrow_idx = seq * uint(B) + tid_x;
-                const uint slot     = qrow_idx * uint(P.num_q_heads) + qh;
-                const float L_out   = logsumexp[slot];
+                const uint slot   = (seq * uint(\(config.numQHeads)) + qh) * uint(B) + tid_x;
+                const float L_out = logsumexp[slot];
 
                 const float m_c   = max(L_out, L_in);
                 const float w_out = fast::exp(L_out - m_c);
                 const float w_in  = fast::exp(L_in  - m_c);
                 const float denom = w_out + w_in;
 
-                const bool skip_this_row =
-                    (P.use_dirty_gate != 0)
-                    && (dirty_mask[seq * uint(B) + tid_x] == 0);
-
-                device half* op =
-                    O + (qrow_idx * uint(P.num_q_heads) + qh) * uint(HEAD_DIM);
-
-                if (skip_this_row) {
-                    device const float* aop =
-                        attnOutPast + slot * uint(HEAD_DIM);
-                    #pragma clang loop unroll(full)
-                    for (int d = 0; d < 128; ++d) {
-                        if (d < HEAD_DIM) {
-                            op[d] = half(aop[d]);
-                        }
-                    }
-                } else {
-                    device const float* aop =
-                        attnOutPast + slot * uint(HEAD_DIM);
-                    #pragma clang loop unroll(full)
-                    for (int d = 0; d < 128; ++d) {
-                        if (d < HEAD_DIM) {
-                            const float mixed = (w_out * aop[d] + w_in * a_in[d]) / denom;
-                            op[d] = half(mixed);
-                        }
-                    }
+                device DTYPE4* op4 = reinterpret_cast<device DTYPE4*>(
+                    O + ((seq * uint(B) + tid_x) * uint(\(config.numQHeads)) + qh) * uint(HEAD_DIM)
+                );
+                device const float4* aop4 = reinterpret_cast<device const float4*>(attnOutPast + slot * uint(HEAD_DIM));
+                #pragma clang loop unroll(full)
+                for (int d = 0; d < VEC_D; ++d) {
+                    float4 mixed = (float4(w_out) * aop4[d] + float4(w_in) * a_in4[d]) / float4(denom);
+                    op4[d] = DTYPE4(mixed);
                 }
             }
         """
 
         self.externalKernel = MLXFast.metalKernel(
             name: "flashblock_external_pass",
-            inputNames: ["Q", "K_cur", "V_cur", "K_page", "V_page", "block_tables", "ctx_lens"],
+            inputNames: ["Q", "K_cur", "V_cur", "K_cache", "V_cache", "ctx_lens"],
             outputNames: ["O", "attnOutPast", "logsumexp"],
             source: externalSource,
             header: header
@@ -454,7 +402,7 @@ public final class FlashBlockRunner {
 
         self.internalKernel = MLXFast.metalKernel(
             name: "flashblock_internal_and_compose",
-            inputNames: ["Q", "K_cur", "V_cur", "attnOutPast", "logsumexp", "dirty_mask"],
+            inputNames: ["Q", "K_cur", "V_cur", "attnOutPast", "logsumexp"],
             outputNames: ["O"],
             source: internalSource,
             header: header
@@ -469,42 +417,46 @@ public final class FlashBlockRunner {
 
     public func forward(
         kind: StepKind,
-        Q: MLXArray,
-        Kcur: MLXArray,
-        Vcur: MLXArray,
-        kCache: MLXArray,
-        vCache: MLXArray,
-        blockTables: MLXArray,
-        ctxLens: MLXArray,
-        attnOutPast: MLXArray,
-        logsumexp: MLXArray,
-        dirtyMask: MLXArray
+        Q: MLXArray,           // Native [B, numQHeads, L, headDim]
+        Kcur: MLXArray,        // Native [B, numKVHeads, L, headDim]
+        Vcur: MLXArray,        // Native [B, numKVHeads, L, headDim]
+        kCache: MLXArray?,     // Native [B, numKVHeads, committedLen, headDim]
+        vCache: MLXArray?,     // Native [B, numKVHeads, committedLen, headDim]
+        ctxLens: MLXArray,     // [B] Int32
+        attnOutPast: MLXArray, // [B, numQHeads, L, headDim] (FP32)
+        logsumexp: MLXArray    // [B, numQHeads, L] (FP32)
     ) -> (O: MLXArray, attnOutPast: MLXArray, logsumexp: MLXArray) {
         
+        let tgSize = (config.blockM, config.headsPerThreadGroup, 1)
+        let gridDim = (config.numSeqs * config.blockM, config.numQHeads, 1)
+
         switch kind {
         case .refreshCache:
+            guard let kCache = kCache, let vCache = vCache else {
+                fatalError("refreshCache requires non-nil kCache and vCache")
+            }
             let results = externalKernel(
-                [Q, Kcur, Vcur, kCache, vCache, blockTables, ctxLens],
-                grid: (config.numSeqs, config.numQHeads, 1),
-                threadGroup: (config.blockM, 1, 1),
+                [Q, Kcur, Vcur, kCache, vCache, ctxLens],
+                grid: gridDim,
+                threadGroup: tgSize,
                 outputShapes: [
-                    [config.nqTotal, config.numQHeads, config.headDim], // O
-                    [config.nqTotal, config.numQHeads, config.headDim], // attnOutPast
-                    [config.nqTotal, config.numQHeads]                  // logsumexp
+                    [config.numSeqs, config.blockLen, config.numQHeads * config.headDim], // O [B, L, H * D]
+                    [config.numSeqs, config.numQHeads, config.blockLen, config.headDim],  // attnOutPast
+                    [config.numSeqs, config.numQHeads, config.blockLen]                   // logsumexp
                 ],
-                outputDTypes: [.float16, .float32, .float32]
+                outputDTypes: [config.dtype, .float32, .float32]
             )
             return (results[0], results[1], results[2])
 
         case .reuseCache:
             let results = internalKernel(
-                [Q, Kcur, Vcur, attnOutPast, logsumexp, dirtyMask],
-                grid: (config.numSeqs, config.numQHeads, 1),
-                threadGroup: (config.blockM, 1, 1),
+                [Q, Kcur, Vcur, attnOutPast, logsumexp],
+                grid: gridDim,
+                threadGroup: tgSize,
                 outputShapes: [
-                    [config.nqTotal, config.numQHeads, config.headDim]  // O
+                    [config.numSeqs, config.blockLen, config.numQHeads * config.headDim]  // O [B, L, H * D]
                 ],
-                outputDTypes: [.float16]
+                outputDTypes: [config.dtype]
             )
             return (results[0], attnOutPast, logsumexp)
         }

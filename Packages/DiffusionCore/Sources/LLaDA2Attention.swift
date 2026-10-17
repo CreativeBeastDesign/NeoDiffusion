@@ -169,6 +169,7 @@ public final class LLaDA2Attention: Module {
         let committedLen = cache.committedLength
 
         if flashBlockEnabled && committedLen > 0 {
+            let runnerDType = (queries.dtype == .float32) ? DType.float32 : DType.float16
             // Lazy init FlashBlockRunner on the cache
             if cache.flashBlockRunner == nil {
                 let config = FlashBlockConfig(
@@ -181,13 +182,11 @@ public final class LLaDA2Attention: Module {
                     maxPagesPerSeq: 64,
                     blockM: 32,
                     blockN: 32,
-                    tau: flashBlockTau
+                    tau: flashBlockTau,
+                    dtype: runnerDType
                 )
                 do {
                     cache.flashBlockRunner = try FlashBlockRunner(config: config)
-                    
-                    // Allocate blockTables as a static MLXArray: [0, 1, 2, ..., 63] (32-bit int)
-                    cache.blockTables = MLXArray(0..<Int32(64)).expandedDimensions(axis: 0) // shape [1, 64]
                 } catch {
                     fatalError("Failed to initialize FlashBlockRunner: \(error)")
                 }
@@ -197,53 +196,54 @@ public final class LLaDA2Attention: Module {
                 fatalError("FlashBlockRunner is nil")
             }
             
-            // Transpose inputs to FlashBlock layout: [Nq, H, D] where Nq = B * L
-            let qContiguous = queries.transposed(0, 2, 1, 3).reshaped(B * L, numHeads, headDim).contiguous()
-            let kContiguous = activeKeys.transposed(0, 2, 1, 3).reshaped(B * L, numKVHeads, headDim).contiguous()
-            let vContiguous = activeValues.transposed(0, 2, 1, 3).reshaped(B * L, numKVHeads, headDim).contiguous()
+            // Native zero-copy inputs: no transpose, no copy
+            let qInput = (queries.dtype == runnerDType) ? queries : queries.asType(runnerDType)
+            let kInput = (activeKeys.dtype == runnerDType) ? activeKeys : activeKeys.asType(runnerDType)
+            let vInput = (activeValues.dtype == runnerDType) ? activeValues : activeValues.asType(runnerDType)
             
-            // Get caches
-            guard let cacheKeys = cache.keys, let cacheValues = cache.values else {
-                fatalError("ExactPrefixCache keys/values are empty but we are in decoding loop")
+            // Set up ctx lens as a [1] int32 array (cached on layer cache)
+            if cache.ctxLens == nil || cache.ctxLens?.item(Int32.self) != Int32(committedLen) {
+                cache.ctxLens = MLXArray([Int32(committedLen)])
             }
-            
-            let cacheKeysContiguous = cacheKeys.transposed(0, 2, 1, 3).reshaped(committedLen, numKVHeads, headDim).contiguous()
-            let cacheValuesContiguous = cacheValues.transposed(0, 2, 1, 3).reshaped(committedLen, numKVHeads, headDim).contiguous()
-            
-            // Set up ctx lens as a [1] int32 array
-            let ctxLens = MLXArray([Int32(committedLen)])
-            
-            // Set up dirty mask: uchar [numSeqs, blockLen] (1 - frozen)
-            let dirtyMask = (MLXArray.ones(like: frozen) - frozen.asType(.int32)).asType(.uint8).contiguous()
-            
-            // Get past caches (A_out, L_out). If first step of block, allocate them
-            let attnOutPast = cache.attnOutPast ?? MLXArray.zeros([B * L, numHeads, headDim], dtype: .float32)
-            let logsumexp = cache.logsumexp ?? MLXArray.zeros([B * L, numHeads], dtype: .float32)
+            let ctxLens = cache.ctxLens!
             
             // Decide step kind
             let stepKind = runner.chooseStepKind(dirtyPerSeq: dirtyPerSeq, isFirstStepOfBlock: isFirstStepOfBlock)
             
+            // Only fetch KV caches if refreshing (ZERO cache access / operations on reuse!)
+            var kCacheInput: MLXArray? = nil
+            var vCacheInput: MLXArray? = nil
+            if stepKind == .refreshCache {
+                guard let cacheKeys = cache.keys, let cacheValues = cache.values else {
+                    fatalError("ExactPrefixCache keys/values are empty but we are in refreshCache")
+                }
+                kCacheInput = (cacheKeys.dtype == runnerDType) ? cacheKeys : cacheKeys.asType(runnerDType)
+                vCacheInput = (cacheValues.dtype == runnerDType) ? cacheValues : cacheValues.asType(runnerDType)
+            }
+            
+            // Get past caches (A_out, L_out). If first step of block, allocate them
+            let attnOutPast = cache.attnOutPast ?? MLXArray.zeros([B, numHeads, L, headDim], dtype: .float32)
+            let logsumexp = cache.logsumexp ?? MLXArray.zeros([B, numHeads, L], dtype: .float32)
+            
             // Call forward on the runner (runs fully asynchronously on MLX stream!)
             let results = runner.forward(
                 kind: stepKind,
-                Q: qContiguous,
-                Kcur: kContiguous,
-                Vcur: vContiguous,
-                kCache: cacheKeysContiguous,
-                vCache: cacheValuesContiguous,
-                blockTables: cache.blockTables!,
+                Q: qInput,
+                Kcur: kInput,
+                Vcur: vInput,
+                kCache: kCacheInput,
+                vCache: vCacheInput,
                 ctxLens: ctxLens,
                 attnOutPast: attnOutPast,
-                logsumexp: logsumexp,
-                dirtyMask: dirtyMask
+                logsumexp: logsumexp
             )
             
             // Save past caches back to LayerKVCache
             cache.attnOutPast = results.attnOutPast
             cache.logsumexp = results.logsumexp
             
-            // Wrap the output back into the expected MLX array shape [B, L, H * D]
-            let output = results.O.reshaped(B, L, numHeads * headDim)
+            // Output is already [B, L, numHeads * headDim] in native row-major order: direct zero-copy pass into dense!
+            let output = (results.O.dtype == queries.dtype) ? results.O : results.O.asType(queries.dtype)
             return dense(output)
         }
 

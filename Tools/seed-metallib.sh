@@ -13,14 +13,15 @@ if [ -z "$D" ]; then
 fi
 echo "seeding from: $D"
 
-for cfg in debug release; do
-    dir=".build/arm64-apple-macosx/$cfg"
+for dir in .build/arm64-apple-macosx/debug .build/arm64-apple-macosx/release .build/out/Products/Debug .build/out/Products/Release .build/debug .build/release; do
     [ -d "$dir" ] || continue
     cp -R "$D" "$dir/" && echo "  -> $dir/"
-    xctest="$dir/NeoDiffusionPackageTests.xctest/Contents/Resources"
-    if [ -d "$dir/NeoDiffusionPackageTests.xctest" ]; then
-        mkdir -p "$xctest" && cp -R "$D" "$xctest/" && echo "  -> $xctest/"
-    fi
+    for xctest in "$dir"/*.xctest; do
+        if [ -d "$xctest" ]; then
+            res="$xctest/Contents/Resources"
+            mkdir -p "$res" && cp -R "$D" "$res/" && echo "  -> $res/"
+        fi
+    done
 done
 
 # NOTE (2026-07-14): the FlashBlock.metal -> .metallib compile step was removed here.
