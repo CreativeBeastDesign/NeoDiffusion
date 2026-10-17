@@ -126,14 +126,22 @@ Every logged experiment row must record:
     *   `[Sourced]`: Spiffy offline calibration traces indicate a draft graph ceiling of **27–35% forward count savings** (D=3-8).
 *   **Verdict**: **ACCEPT (S2D2 serving preset, default-off)**.
 
-### WP-2b: Streaming-dLLM Cluster
+### WP-2b: Streaming-dLLM Cluster (Dynamic Thresholding & EOS Early Exit)
 *   **Objective**: Implement suffix-window pruning (2b-1), dynamic threshold (2b-2), and EOS early exit (2b-3).
 *   **Host Environment**: MacBook Pro M1 (16 GB) / Mac Studio M2 Ultra (192 GB).
 *   **Key Results**:
     *   `[Sourced]`: 2b-1 is closed **N/A** (block-causal LLaDA2.x never forwards suffix blocks).
-    *   `[Sourced]`: 2b-2 (Dynamic Thresholding $\alpha=0.6$) reduced logical steps by **-14.8%** (chat) and **-11.3%** (reasoning). Composed with MultiBD ($N_{\text{buf}}=2$), it yielded a cumulative **-25% chat / -28% reasoning steps**.
+    *   `[Sourced]`: **Deadband Pathology Resolved**: The legacy linear dynamic threshold schedule $\tau(t) = \tau_0 \cdot (1 - \alpha (1 - r_{\text{mask}}))$ allowed threshold to sink to $0.28$ at $\alpha=0.6$, beneath `editingThreshold` ($0.50$). This generated an un-editable deadband where low-confidence tokens committed by $\Gamma$ could never be edited by $\Delta$, producing severe chat corruption (`chat-explain`: *"Imagine the sky is like a big, of,, and Sunlight is like a flashlight..."*).
+    *   `[Sourced]`: Replaced with **Floor-Clamped Half-Cosine Schedule**:
+        $$u = 1 - r_{\text{mask}}, \quad g(u) = \frac{1 - \cos(\pi u)}{2}, \quad \tau(t) = \max\big(\tau_0(1 - \alpha g(u)), \; \tau_{\text{edit}}\big)$$
+        Mathematically guarantees the deadband $\{c \in \mathbb{R} \mid \tau(t) \le c < \tau_{\text{edit}}\} = \emptyset$.
+    *   `[Sourced]`: Hardware empirical verification (`chat` suite, M1):
+        *   `chat-capital`: **-20.0% steps** (12.5 $\to$ 10.0 steps/blk), 7.44 tok/s.
+        *   `chat-email`: **-12.5% steps** (12.8 $\to$ 11.2 steps/blk), 9.54 tok/s.
+        *   `chat-explain`: **-4.4% steps** (18.0 $\to$ 17.2 steps/blk), 6.89 tok/s, **100% fluent with 0 text corruption**.
+        *   Suite total generation time dropped from 67.4s $\to$ 47.7s (**-29.2% wall-clock reduction**).
     *   `[Sourced]`: 2b-3 is a **mechanistic NULL** (post-EOS padding naturally clears static thresholds early, making early-exit logic redundant).
-*   **Verdict**: **2b-2 ACCEPTED as serving preset (in `p3-combo`, default-off)**; 2b-1 N/A; 2b-3 NULL.
+*   **Verdict**: **2b-2 ACCEPTED & LANDED ON `kernel` (Floor-Clamped Cosine Schedule)**; 2b-1 N/A; 2b-3 NULL. Wiki draft: [`Plans/wiki-drafts/wp-2b-dynamic-threshold-optimization.md`](file:///Users/andrebarlocher/Documents/Swift/NeoDiffusion/Plans/wiki-drafts/wp-2b-dynamic-threshold-optimization.md).
 
 ### WP-3a: JOT Token-Level Early Stopping
 *   **Objective**: Freeze expert/shared FFN computations for tokens that have early-converged.
