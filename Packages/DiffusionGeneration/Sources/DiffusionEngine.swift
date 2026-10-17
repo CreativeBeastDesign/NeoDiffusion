@@ -199,6 +199,8 @@ public final class DiffusionEngine {
         public let effectiveTauSpan: Int
         // MARK: WP-2b effective echoes
         public let effectiveDynamicTauAlpha: Float
+        public let effectiveDynamicTauSchedule: String
+        public let effectiveDynamicTauFloor: Float
         public let effectiveEosEarlyExit: Bool
         // MARK: JOT effective echoes
         public let effectiveJotEnabled: Bool

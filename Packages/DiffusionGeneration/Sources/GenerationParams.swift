@@ -66,12 +66,32 @@ public struct GenerationParams: Sendable, Equatable {
     /// routing sweep arm.
     public var tauSpan: Int
 
+    /// WP-2b-2 non-linear dynamic confidence threshold schedule (arXiv:2601.17917, enhanced).
+    public enum DynamicTauSchedule: String, Sendable, Equatable, CaseIterable {
+        /// Half-cosine decay: τ(u) = τ0·(1 − α·½(1 − cos(π·u))), with zero derivative at u=0
+        /// and u=1, protecting early context and smoothing late arrival at the floor.
+        case cosine
+        /// Convex power decay: τ(u) = τ0·(1 − α·u^p), concentrating threshold drop into the final positions.
+        case power
+        /// Linear decay: τ(u) = τ0·(1 − α·u) (legacy Streaming-dLLM formulation).
+        case linear
+    }
+
     /// WP-2b-2 dynamic confidence threshold (arXiv:2601.17917): adaptation strength α in
-    /// τ(t) = τ0·(1 − α(1 − r_mask)), where r_mask is the start-of-step masked fraction over
+    /// τ(t) = τ0·(1 − α·g(1 − r_mask)), where r_mask is the start-of-step masked fraction over
     /// the slot's *generated* positions. `0` disables (τ(t) ≡ τ0 — exact parity); the paper's
-    /// optimum is α≈0.6 at τ0=0.9. Applies to τ_mask (Γ) only — τ_edit stays static
-    /// (decision 2026-07-11, one-variable discipline; see wp2b logbook).
+    /// optimum is α≈0.6 at τ0=0.9.
     public var dynamicTauAlpha: Float
+    /// Schedule shape for dynamic confidence thresholding (WP-2b). Default: `.cosine`.
+    public var dynamicTauSchedule: DynamicTauSchedule
+    /// Exponent p for `.power` schedule (default: 2.0).
+    public var dynamicTauPower: Float
+    /// Floor clamp for dynamic confidence thresholding (WP-2b).
+    /// Guarantees τ(t) >= dynamicTauFloor, eliminating the un-editable deadband where tokens
+    /// unmasked with confidence < editingThreshold could never be corrected by Δ.
+    /// When nil (default), the engine clamps at `editingThreshold` (0.50 in Q mode).
+    /// To reproduce legacy un-clamped behavior, set explicitly to 0.0.
+    public var dynamicTauFloor: Float?
     /// WP-2b-3 EOS early exit (arXiv:2601.17917): once a Γ/Δ-settled, non-prompt EOS exists
     /// in the front block, every still-masked window position after the first EOS is filled
     /// with EOS in-graph, so the block (and any trailing slot) settles immediately. Output is
@@ -194,6 +214,9 @@ public struct GenerationParams: Sendable, Equatable {
         speculation: SpeculationKind = .none,
         tauSpan: Int = 1,
         dynamicTauAlpha: Float = 0.0,
+        dynamicTauSchedule: DynamicTauSchedule = .cosine,
+        dynamicTauPower: Float = 2.0,
+        dynamicTauFloor: Float? = nil,
         eosEarlyExit: Bool = false,
         elasticCacheEnabled: Bool = false,
         elasticGamma: Float = 0.9,
@@ -236,6 +259,9 @@ public struct GenerationParams: Sendable, Equatable {
         self.speculation = speculation
         self.tauSpan = tauSpan
         self.dynamicTauAlpha = dynamicTauAlpha
+        self.dynamicTauSchedule = dynamicTauSchedule
+        self.dynamicTauPower = dynamicTauPower
+        self.dynamicTauFloor = dynamicTauFloor
         self.eosEarlyExit = eosEarlyExit
         self.elasticCacheEnabled = elasticCacheEnabled
         self.elasticGamma = elasticGamma

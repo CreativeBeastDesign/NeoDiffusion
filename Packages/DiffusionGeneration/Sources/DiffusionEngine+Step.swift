@@ -537,20 +537,34 @@ extension DiffusionEngine {
                 let r = (s * slotLen) ..< ((s + 1) * slotLen)
                 let slotMask = activeMask[0..., r]
                 let slotConf = maskConf[0..., r]
-                // WP-2b-2 dynamic τ (arXiv:2601.17917): τ(t) = τ0·(1 − α(1 − r_mask)), with
-                // r_mask the start-of-step masked fraction over this slot's *generated*
-                // positions (prompt positions are never masked, so the raw masked count is
-                // already generated-only). α == 0 keeps the static scalar — exact parity.
-                // Note: the threshold LOOSENS as the block fills (τ0 at r_mask=1 → τ0(1−α)
-                // at r_mask=0) — the formula is authoritative over the source note's prose
-                // (logbook note, WP-2b).
+                // WP-2b-2 enhanced dynamic τ (arXiv:2601.17917 + deadband elimination):
+                // τ(t) = max(τ0·(1 − α·g(1 − r_mask)), τ_floor)
+                // where:
+                // - r_mask is the start-of-step masked fraction over generated positions.
+                // - u = 1 - r_mask is decoding progress in [0, 1].
+                // - g(u) is the non-linear schedule (.cosine, .power, or .linear).
+                // - τ_floor guarantees τ(t) >= dynamicTauFloor (default: editingThreshold = 0.50),
+                //   completely eliminating the un-editable deadband [τ(t), τ_edit) that previously
+                //   caused un-correctable token corruption when α >= 0.6.
                 let tauMask: MLXArray
                 if params.dynamicTauAlpha > 0 {
                     let genCount = Float(slotLen - slotPromptCounts[s])
                     let rMask = slotMask.asType(.float32).sum() / MLXArray(genCount)
-                    tauMask = MLXArray(params.threshold)
-                        * (MLXArray(Float(1)) - MLXArray(params.dynamicTauAlpha)
-                            * (MLXArray(Float(1)) - rMask))
+                    let u = MLX.maximum(MLXArray(Float(0)), MLX.minimum(MLXArray(Float(1)), MLXArray(Float(1)) - rMask))
+                    let progressDecay: MLXArray
+                    switch params.dynamicTauSchedule {
+                    case .linear:
+                        progressDecay = u
+                    case .cosine:
+                        let pi_u = u * MLXArray(Float.pi)
+                        progressDecay = (MLXArray(Float(1)) - cos(pi_u)) * MLXArray(Float(0.5))
+                    case .power:
+                        progressDecay = pow(u, MLXArray(params.dynamicTauPower))
+                    }
+                    let tauRaw = MLXArray(params.threshold)
+                        * (MLXArray(Float(1)) - MLXArray(params.dynamicTauAlpha) * progressDecay)
+                    let floorVal = MLXArray(params.dynamicTauFloor ?? params.editingThreshold)
+                    tauMask = MLX.maximum(tauRaw, floorVal)
                 } else {
                     tauMask = MLXArray(params.threshold)
                 }

@@ -117,6 +117,107 @@ final class WP2bTests: XCTestCase {
         print("[WP-2b-2] speculation invariance holds at α=0.6 (K=1 vs K=4)")
     }
 
+    /// Forensic proof of deadband elimination:
+    /// Positions 0..<8 have conf = 0.80 (clear τ0=0.7 immediately, bringing u = 0.5).
+    /// Positions 8..<16 have conf = 0.40 (inside the deadband [0.28, 0.50)).
+    /// Under un-clamped legacy schedule (floor = 0.0), τ(t) drops to 0.28, accepting low-confidence
+    /// tokens in a burst where Δ (editingThreshold = 0.50) can NEVER correct them.
+    /// Under the improved floor-clamped schedule (floor = editingThreshold = 0.50), τ(t) >= 0.50 at
+    /// all times, so deadband tokens are NEVER accepted by threshold — strictly eliminating the pathology.
+    func testDynamicTauDeadbandElimination() throws {
+        let vocab = 1000
+        let forward: DiffusionEngine.Forward = { windowIds, activeLen, frozen in
+            var logits = [Float](repeating: 0, count: activeLen * vocab)
+            for i in 0 ..< activeLen {
+                let confVal: Float = (i < 8) ? 8.29 : 6.50 // conf ≈ 0.80 for 0..<8, conf ≈ 0.40 for 8..<16
+                logits[i * vocab + 7] = confVal
+            }
+            return MLXArray(logits).reshaped(1, activeLen, vocab)
+        }
+        let prompt = Array(1...16)
+        let engine = DiffusionEngine(model: model, speculationK: 4)
+
+        // 1. Un-clamped legacy: floor = 0.0, linear
+        var pLegacy = GenerationParams(
+            threshold: 0.7, editingThreshold: 0.5,
+            blockLength: 16, genLength: 16,
+            maskId: 999, eosId: 998,
+            dynamicTauAlpha: 0.6)
+        pLegacy.dynamicTauSchedule = .linear
+        pLegacy.dynamicTauFloor = 0.0
+
+        let resLegacy = engine.run(prompt: prompt, params: pLegacy, forward: forward, streamBlock: nil)
+
+        // 2. Improved deadband-free schedule: default floor = editingThreshold = 0.50, cosine schedule
+        var pImproved = GenerationParams(
+            threshold: 0.7, editingThreshold: 0.5,
+            blockLength: 16, genLength: 16,
+            maskId: 999, eosId: 998,
+            dynamicTauAlpha: 0.6)
+        pImproved.dynamicTauSchedule = .cosine
+        pImproved.dynamicTauFloor = nil // resolves to editingThreshold = 0.50
+
+        let resImproved = engine.run(prompt: prompt, params: pImproved, forward: forward, streamBlock: nil)
+
+        // Under legacy, τ(t) drops to 0.28 < 0.40, accepting the remaining 0.40 deadband tokens via threshold burst.
+        XCTAssertLessThanOrEqual(resLegacy.stepsPerBlock[0], 7,
+            "Legacy schedule should plunge into deadband and burst-accept 0.40 tokens")
+
+        // Under improved schedule, τ(t) >= 0.50, so 0.40 tokens never clear threshold and must be unmasked
+        // by forced top-1 fallback one-by-one (taking 10 steps to complete).
+        XCTAssertGreaterThanOrEqual(resImproved.stepsPerBlock[0], 10,
+            "Improved schedule must never drop below 0.50, rejecting deadband tokens from threshold acceptance")
+
+        print("[WP-2b-2] deadband elimination verified: legacy burst=\(resLegacy.stepsPerBlock[0]) steps "
+            + "vs protected=\(resImproved.stepsPerBlock[0]) steps")
+    }
+
+    /// Non-linear schedule validation: verifies that .cosine, .power, and .linear schedules
+    /// all execute cleanly, maintain parity on deterministic argmax, and respect floor clamping.
+    func testDynamicTauNonlinearSchedules() throws {
+        let vocab = 1000
+        // conf = 0.60
+        let forward: DiffusionEngine.Forward = { windowIds, activeLen, frozen in
+            var logits = [Float](repeating: 0, count: activeLen * vocab)
+            for i in 0 ..< activeLen { logits[i * vocab + 7] = 7.313 }
+            return MLXArray(logits).reshaped(1, activeLen, vocab)
+        }
+        let prompt = Array(1...16)
+        let engine = DiffusionEngine(model: model, speculationK: 4)
+
+        for schedule in [GenerationParams.DynamicTauSchedule.cosine, .power, .linear] {
+            var p = GenerationParams(
+                threshold: 0.7, editingThreshold: 0.5,
+                blockLength: 16, genLength: 16,
+                maskId: 999, eosId: 998,
+                dynamicTauAlpha: 0.5)
+            p.dynamicTauSchedule = schedule
+            let res = engine.run(prompt: prompt, params: p, forward: forward, streamBlock: nil)
+            XCTAssertEqual(res.tokens, [Int](repeating: 7, count: 16))
+            XCTAssertLessThanOrEqual(res.stepsPerBlock[0], 12,
+                "\(schedule) should burst once threshold clears conf 0.60")
+            XCTAssertEqual(res.metrics.effectiveDynamicTauSchedule, schedule.rawValue)
+            XCTAssertEqual(res.metrics.effectiveDynamicTauFloor, 0.50)
+        }
+        print("[WP-2b-2] all non-linear schedules (.cosine, .power, .linear) verified")
+    }
+
+    /// Verification of engine effective echoes (rule F7).
+    func testDynamicTauEffectiveEchoes() throws {
+        var p = GenerationParams(
+            threshold: 0.7, editingThreshold: 0.5,
+            blockLength: 16, genLength: 16,
+            maskId: 999, eosId: 998,
+            dynamicTauAlpha: 0.6)
+        p.dynamicTauSchedule = .cosine
+        p.dynamicTauFloor = 0.50
+        let engine = DiffusionEngine(model: model, speculationK: 4)
+        let un = engine.generate(prompt: [1, 2, 3], params: p)
+        XCTAssertEqual(un.metrics.effectiveDynamicTauAlpha, 0.6)
+        XCTAssertEqual(un.metrics.effectiveDynamicTauSchedule, "cosine")
+        XCTAssertEqual(un.metrics.effectiveDynamicTauFloor, 0.50)
+    }
+
     // MARK: - 2b-3 EOS early exit (synthetic forward)
 
     /// Synthetic forward: every active position predicts EOS, all below τ_mask=0.7 so only the
