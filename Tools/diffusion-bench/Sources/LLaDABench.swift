@@ -255,6 +255,8 @@ struct LLaDARunResult: Codable {
     let tpfWidthCorrected: Double
     // WP-2b — engine effective echoes (rule F7).
     let dynamicTauAlpha: Float
+    let dynamicTauSchedule: String
+    let dynamicTauFloor: Float
     let eosEarlyExit: Bool
     let elasticCacheEnabled: Bool
     let elasticGamma: Float
@@ -427,6 +429,10 @@ func runLLaDABench() async throws {
 
     // WP-2b: dynamic τ (2b-2) + EOS early exit (2b-3). Rows record engine echoes (rule F7).
     let dynTauAlpha = Float(argValue("--dyn-tau-alpha") ?? "0.0") ?? 0.0
+    let dynTauScheduleStr = argValue("--dyn-tau-schedule") ?? "cosine"
+    let dynTauSchedule = GenerationParams.DynamicTauSchedule(rawValue: dynTauScheduleStr) ?? .cosine
+    let dynTauPower = Float(argValue("--dyn-tau-power") ?? "2.0") ?? 2.0
+    let dynTauFloor = argValue("--dyn-tau-floor").flatMap(Float.init)
     let eosEarlyExit = hasFlag("--eos-early-exit")
 
     // Credit Decoding parsing
@@ -525,12 +531,34 @@ func runLLaDABench() async throws {
             // one-variable discipline; a τ_add sweep is a separate experiment.
             LLaDAArm(name: "dt-tau", mode: .q, cached: true, mask: .strict) {
                 $0.dynamicTauAlpha = 0.6
+                $0.dynamicTauSchedule = .cosine
             },
             // Step-1 α=0.3 arm (final-plan §1.5): α=0.6 failed its chat quality gate (§1.4);
             // 0.3 is the gentler point the quality evidence supports. Interleave with q-cached
             // (control) + dt-tau (α=0.6) in ONE process so all three compare drift-free.
             LLaDAArm(name: "dt-tau-a03", mode: .q, cached: true, mask: .strict) {
                 $0.dynamicTauAlpha = 0.3
+                $0.dynamicTauSchedule = .cosine
+            },
+            // Legacy un-clamped Streaming-dLLM formula (linear decay, floor=0.0). Demonstrates
+            // the un-editable deadband [0.28, 0.50) and reproduces chat token corruption.
+            LLaDAArm(name: "dt-legacy", mode: .q, cached: true, mask: .strict) {
+                $0.dynamicTauAlpha = 0.6
+                $0.dynamicTauSchedule = .linear
+                $0.dynamicTauFloor = 0.0
+            },
+            // Clamped linear decay (floor = editingThreshold = 0.50).
+            LLaDAArm(name: "dt-linear-clamped", mode: .q, cached: true, mask: .strict) {
+                $0.dynamicTauAlpha = 0.6
+                $0.dynamicTauSchedule = .linear
+                $0.dynamicTauFloor = nil
+            },
+            // Convex power decay schedule (u^2, floor = editingThreshold = 0.50).
+            LLaDAArm(name: "dt-power", mode: .q, cached: true, mask: .strict) {
+                $0.dynamicTauAlpha = 0.6
+                $0.dynamicTauSchedule = .power
+                $0.dynamicTauPower = 2.0
+                $0.dynamicTauFloor = nil
             },
             LLaDAArm(name: "dt-mbd", mode: .q, cached: true, mask: .strict) {
                 $0.nBuf = 2
@@ -812,7 +840,11 @@ func runLLaDABench() async throws {
         // Speculation (WP-2a)
         p.speculation = speculation; p.tauSpan = tauSpan
         // Dynamic-τ / EOS early exit (WP-2b)
-        p.dynamicTauAlpha = dynTauAlpha; p.eosEarlyExit = eosEarlyExit
+        p.dynamicTauAlpha = dynTauAlpha
+        p.dynamicTauSchedule = dynTauSchedule
+        p.dynamicTauPower = dynTauPower
+        p.dynamicTauFloor = dynTauFloor
+        p.eosEarlyExit = eosEarlyExit
         // Elastic-Cache (WP-1a)
         p.elasticCacheEnabled = elasticCache; p.elasticGamma = elasticGamma
         p.elasticBeta = elasticBeta; p.elasticStaticBoundary = elasticStaticBoundary
@@ -1067,6 +1099,8 @@ func runLLaDABench() async throws {
                     / (Double(output.metrics.tokensProcessedInForwards) / Double(blockLength))
                 : 0,
             dynamicTauAlpha: output.metrics.effectiveDynamicTauAlpha,
+            dynamicTauSchedule: output.metrics.effectiveDynamicTauSchedule,
+            dynamicTauFloor: output.metrics.effectiveDynamicTauFloor,
             eosEarlyExit: output.metrics.effectiveEosEarlyExit,
             elasticCacheEnabled: arm.cached && elasticCache,
             elasticGamma: elasticGamma,

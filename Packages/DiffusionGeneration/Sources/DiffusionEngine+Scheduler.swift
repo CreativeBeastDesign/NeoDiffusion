@@ -388,6 +388,8 @@ extension DiffusionEngine {
                 effectiveSpeculation: params.speculation.rawValue,
                 effectiveTauSpan: params.tauSpan,
                 effectiveDynamicTauAlpha: params.dynamicTauAlpha,
+                effectiveDynamicTauSchedule: params.dynamicTauAlpha > 0 ? params.dynamicTauSchedule.rawValue : "none",
+                effectiveDynamicTauFloor: params.dynamicTauAlpha > 0 ? (params.dynamicTauFloor ?? params.editingThreshold) : 0,
                 effectiveEosEarlyExit: params.eosEarlyExit,
                 effectiveJotEnabled: params.jotEnabled,
                 effectiveJotK: params.jotK,
