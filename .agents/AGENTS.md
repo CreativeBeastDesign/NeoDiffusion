@@ -16,7 +16,7 @@ Any agent working on the NeoDiffusion codebase must strictly adhere to the follo
   - Every benchmark run must capture system telemetry (swap used before/after, free memory pages, and OS thermal state).
   - A benchmark row is only considered valid if:
     - Swap growth during the run is $\le 256$ MB.
-    - Free memory at the start is $\ge 1024$ MB.
+    - Free memory at the start is $\ge 1024$ MB (v1). **Amended 2026-10-18 (v2, André):** on hosts with ≤ 32 GB RAM the floor applies to *available* memory (free + inactive + speculative + purgeable, row field `env.availableMemoryMBBefore`) instead of free pages — with the 9.6 GB model resident the dev M1 never has 1 GB *free*, so v1 rejected every row (B-1). Larger hosts keep the free-page floor (1/16 of RAM). Rows carry both `envValid` (v2) and `envValidV1`.
     - OS thermal state is `nominal` or `fair`.
   - Staging/analysis scripts must only draw conclusions and evaluate performance gates using valid rows.
 - **Engine Effective Echoes**: JSONL logs and benchmark output must record the *effective parameters* actually executed by the generation engine (e.g., `nBuf`, `tauAdd`, `speculationK`), not the raw CLI command-line inputs. This prevents silent execution bugs (e.g., unquoted CLI strings falling back to defaults) from contaminating the results.

@@ -54,6 +54,26 @@ func freeMemoryMB() -> Double {
     return Double(stats.free_count) * Double(pageSize) / 1_048_576
 }
 
+/// Free + inactive + speculative + purgeable pages (MB): memory the kernel can hand out without
+/// swapping. Added 2026-10-18 for the envValid v2 rule (see `EnvSnapshot.isValid`).
+func availableMemoryMB() -> Double {
+    var stats = vm_statistics64()
+    var count = mach_msg_type_number_t(
+        MemoryLayout<vm_statistics64>.size / MemoryLayout<integer_t>.size)
+    let result = withUnsafeMutablePointer(to: &stats) {
+        $0.withMemoryRebound(to: integer_t.self, capacity: Int(count)) {
+            host_statistics64(mach_host_self(), HOST_VM_INFO64, $0, &count)
+        }
+    }
+    guard result == KERN_SUCCESS else { return -1 }
+    var pageSize: Int = 0
+    var sizeSize = MemoryLayout<Int>.size
+    sysctlbyname("hw.pagesize", &pageSize, &sizeSize, nil, 0)
+    let pages = Double(stats.free_count) + Double(stats.inactive_count)
+        + Double(stats.speculative_count) + Double(stats.purgeable_count)
+    return pages * Double(pageSize) / 1_048_576
+}
+
 /// Reclaims clean inactive VFS page-cache pages (left over from reading `model.safetensors`)
 /// into XNU's `vm_page_free_count` when `freeMemoryMB()` sits below the 1024 MB floor after
 /// Metal wires the 9.56 GB model weights on a 16 GB host.
@@ -108,6 +128,11 @@ struct EnvSnapshot: Codable {
     var swapUsedMBPreReclaim: Double? = nil
     var freeMemoryMBPreReclaim: Double? = nil
 
+    /// Free + inactive + speculative + purgeable at row start (MB). nil on rows before 2026-10-18.
+    var availableMemoryMBBefore: Double? = nil
+    /// Which validity rule `isValid` applied ("v2" since 2026-10-18; rows before carry v1 semantics).
+    var envRule: String = "v2"
+
     /// Swap growth over the row, from the earliest baseline taken.
     var swapGrowthMB: Double { swapUsedMBAfter - (swapUsedMBPreReclaim ?? swapUsedMBBefore) }
 
@@ -130,9 +155,28 @@ struct EnvSnapshot: Codable {
     /// 0, and 4.4 GB free cleared a 1 GB floor 4× over. Swap growth cannot see a machine that
     /// was already saturated before the row started; only the free-page level can.
     var isValid: Bool {
+        swapGrowthMB <= 256 && memoryFloorMet
+            && (thermalBefore == "nominal" || thermalBefore == "fair")
+    }
+
+    /// The original (v1) rule, kept on every row as `envValidV1` so old and new rows stay comparable.
+    var isValidV1: Bool {
         swapGrowthMB <= 256
             && freeMemoryMBBefore >= minFreeMemoryMB
             && (thermalBefore == "nominal" || thermalBefore == "fair")
+    }
+
+    /// v2 memory floor (amended 2026-10-18, André; Plans/b1-speculation-k-m1-prereg.md §5–6).
+    /// On hosts with ≤ 32 GB the resident 9.6 GB model keeps *free* pages under 1 GB by construction
+    /// (B-1: 79–653 MB free on every row, swap flat, ms/forward normal), so v1 rejected every row on
+    /// the dev M1. There the floor is applied to *available* memory (free + inactive + speculative +
+    /// purgeable) instead. Larger hosts keep the v1 free-page floor, which is what caught the Studio
+    /// saturation case (flat swap, ~1 TPS rows) on 2026-07-14.
+    var memoryFloorMet: Bool {
+        if totalMemoryMB <= 32 * 1024, let avail = availableMemoryMBBefore, avail >= 0 {
+            return avail >= minFreeMemoryMB
+        }
+        return freeMemoryMBBefore >= minFreeMemoryMB
     }
 
     var note: String {
@@ -143,9 +187,9 @@ struct EnvSnapshot: Codable {
         if reclaimPerformed {
             parts.append(String(format: "reclaim ran (free %.0f MB before it)", freeMemoryMBPreReclaim ?? -1))
         }
-        if freeMemoryMBBefore < minFreeMemoryMB {
-            parts.append(String(format: "free %.0f MB < %.0f MB floor (1/16 of %.0f MB RAM)",
-                                freeMemoryMBBefore, minFreeMemoryMB, totalMemoryMB))
+        if !memoryFloorMet {
+            parts.append(String(format: "free %.0f / available %.0f MB < %.0f MB floor (1/16 of %.0f MB RAM, rule %@)",
+                                freeMemoryMBBefore, availableMemoryMBBefore ?? -1, minFreeMemoryMB, totalMemoryMB, envRule))
         }
         if thermalBefore != "nominal" && thermalBefore != "fair" {
             parts.append("thermal \(thermalBefore)")
@@ -354,6 +398,8 @@ struct LLaDARunResult: Codable {
     let toolchain: BuildProvenance
     let env: EnvSnapshot
     let envValid: Bool
+    /// The pre-2026-10-18 free-page rule, for comparability with older rows.
+    var envValidV1: Bool = false
     let textPrefix: String
     let date: String
     /// Execution schedule (P-3, 2026-10-18): "blocked" = every prompt of an arm before the next
@@ -498,7 +544,8 @@ func runLLaDABench() async throws {
     } else {
         blockLength = Int(argValue("--block-length") ?? "32") ?? 32
     }
-    let speculationKInput = Int(argValue("--speculation-k") ?? "4") ?? 4
+    // Default K=1 since 2026-10-18 (matches the served default; B-1). Rows record speculationK.
+    let speculationKInput = Int(argValue("--speculation-k") ?? "1") ?? 1
     let speculationK = (baselineCheck || iceSweep) ? 1 : speculationKInput
     let eosEarlyStop = !hasFlag("--no-early-stop")
     let instrument = !hasFlag("--no-instrument")
@@ -519,7 +566,9 @@ func runLLaDABench() async throws {
     let tauSemi = Float(argValue("--tau-semi") ?? "0.9") ?? 0.9
     // Full-text dump for blind quality scoring (JSONL keeps only 160-char prefixes):
     // one JSON line per generation {arm, suite, promptId, run, text, tokens, eosBlock}.
-    let dumpTextPath = argValue("--dump-text")
+    // `--text-out` accepted as an alias since 2026-10-18 (older logbook commands used it; it was
+    // silently ignored before, so those runs' text files came from elsewhere or not at all).
+    let dumpTextPath = argValue("--dump-text") ?? argValue("--text-out")
 
     // WP-2a speculation. JSONL rows record ENGINE effective echoes (rule F7).
     let speculation: GenerationParams.SpeculationKind =
@@ -1179,6 +1228,7 @@ func runLLaDABench() async throws {
         if reclaimed { reclaimCleanInactivePagesIfNeeded() }
         let swapBefore = swapUsedMB()
         let freeBefore = freeMemoryMB()
+        let availBefore = availableMemoryMB()
         let thermalBefore = thermalStateName()
         let start = Date()
         var lastCommit = start
@@ -1309,7 +1359,8 @@ func runLLaDABench() async throws {
             thermalAfter: thermalStateName(),
             reclaimPerformed: reclaimed,
             swapUsedMBPreReclaim: reclaimed ? swapPreReclaim : nil,
-            freeMemoryMBPreReclaim: reclaimed ? freePreReclaim : nil)
+            freeMemoryMBPreReclaim: reclaimed ? freePreReclaim : nil,
+            availableMemoryMBBefore: availBefore)
         return (finalOutput, seconds, Double(Memory.peakMemory) / 1_073_741_824, env, warmup)
     }
 
@@ -1453,6 +1504,7 @@ func runLLaDABench() async throws {
             envValid: env.isValid,
             textPrefix: String(text.prefix(160)),
             date: isoFormatter.string(from: Date()))
+        result.envValidV1 = env.isValidV1
         result.schedule = currentSchedule
         result.scheduleIndex = scheduleCounter
         scheduleCounter += 1
@@ -1870,9 +1922,11 @@ func runLLaDABench() async throws {
         let promptIds = try encodePrompt(firstPrompt.user)
         let (output, seconds, peakGB, env, warmup) = generate(firstArm, promptIds: promptIds)
         let text = tokenizer.decode(tokens: output.tokens)
+        currentSchedule = "warmup"
         appendResult(firstArm, run: -1, suite: firstSuite.name, prompt: firstPrompt,
                      promptIds: promptIds, output: output, seconds: seconds,
                      peakGB: peakGB, env: env, warmup: warmup, text: text)
+        currentSchedule = "blocked"
         print(String(format: "[warmup-once | %@ | %@] completed in %.1fs (excluded from steady-state run>=0 rows)",
                      firstArm.name, firstPrompt.id, seconds))
     }
@@ -1960,6 +2014,7 @@ func runLLaDABench() async throws {
     let interleave = hasFlag("--interleave")
     precondition(!(interleave && hasFlag("--arm-major")), "--interleave and --arm-major are mutually exclusive")
     let armMajor = hasFlag("--arm-major")
+    rejectUnknownFlags(context: "diffusion-bench llada")
     var armTotals: [String: [Double]] = [:]
     var firstUnit = true
     if interleave {

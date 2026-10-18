@@ -54,3 +54,22 @@ identical output, unchanged ms/forward, flat swap) is strong, but changing the M
 the decision list in the session report: either (a) amend the validity rule for the M1 (e.g. swap growth + an
 "available incl. reclaimable cache" floor instead of free pages) and re-judge, or (b) accept this run as an
 explicit exception.
+
+## 6. Decision and amendments (2026-10-18, André)
+
+- **Decision**: option A — amend the validity rule, re-judge, and set **K=1 on every host** (server
+  `hostAwareDefaultSpeculationK` → 1; bench default `--speculation-k` → 1).
+- **envValid v2** (`.agents/AGENTS.md`, `EnvSnapshot.memoryFloorMet`): on hosts ≤ 32 GB the 1/16-RAM floor
+  applies to *available* memory (free + inactive + speculative + purgeable); larger hosts keep the free-page
+  floor. Rows now carry `env.availableMemoryMBBefore`, `envValid` (v2) and `envValidV1`.
+- **Re-judgement of this run under v2**: the B-1 rows predate the `availableMemoryMBBefore` field, so the v2
+  memory floor cannot be evaluated for them; the remaining v2 conditions (swap growth ≤ 256 MB, thermal
+  nominal/fair) hold on **48/48** rows. Re-judged as **valid-partial (v2 without the memory floor)**. André's
+  decision ("amend, re-judge, set K=1") was taken with this limitation stated in the report; the next
+  run with v2 rows (E-001, all arms at K=1) is the first fully v2-valid evidence.
+- **Correction (found while preparing E-001)**: the script passed `--text-out`, which was not a bench flag
+  (the real one is `--dump-text`) and was silently ignored, so **no full-text dump exists** for this run. The
+  "text identical on 24/24" above compares `textPrefix` (first 160 characters) only. K is output-invariant by
+  construction and the BF16/FP32 parity tests cover it, so the verdict stands, but the 24/24 claim is a
+  prefix check. Fixes: `--text-out` is now an alias, and the bench refuses unknown flags
+  (`rejectUnknownFlags`, override `--allow-unknown-flags`).

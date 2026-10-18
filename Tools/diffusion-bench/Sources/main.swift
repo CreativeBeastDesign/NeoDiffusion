@@ -63,7 +63,13 @@ struct RunResult: Codable {
     let date: String
 }
 
+/// Every flag name the bench has asked about. Unknown flags used to be silently ignored — the
+/// 2026-10-18 B-1 run passed `--text-out` (not a flag; the real one is `--dump-text`) and lost its
+/// full-text dump without a word. `rejectUnknownFlags()` turns that into a hard error.
+nonisolated(unsafe) var queriedFlags = Set<String>()
+
 func argValue(_ name: String) -> String? {
+    queriedFlags.insert(name)
     guard let i = CommandLine.arguments.firstIndex(of: name),
         i + 1 < CommandLine.arguments.count
     else { return nil }
@@ -71,7 +77,21 @@ func argValue(_ name: String) -> String? {
 }
 
 func hasFlag(_ name: String) -> Bool {
-    CommandLine.arguments.contains(name)
+    queriedFlags.insert(name)
+    return CommandLine.arguments.contains(name)
+}
+
+/// Fails if any `--flag` on the command line was never queried by the code path that ran.
+/// Call once all of a mode's flags have been read (before the long-running part).
+func rejectUnknownFlags(context: String) {
+    let given = CommandLine.arguments.filter { $0.hasPrefix("--") }
+    let unknown = given.filter { !queriedFlags.contains($0) && $0 != "--allow-unknown-flags" }
+    guard !unknown.isEmpty else { return }
+    if CommandLine.arguments.contains("--allow-unknown-flags") {
+        print("WARNING [\(context)]: unrecognised flags ignored: \(unknown)")
+    } else {
+        fatalError("[\(context)] unrecognised flags \(unknown) — not read by this mode (typo? e.g. the text dump is --dump-text). Pass --allow-unknown-flags to run anyway.")
+    }
 }
 
 func percentile(_ sorted: [Double], _ p: Double) -> Double {

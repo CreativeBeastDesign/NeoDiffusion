@@ -259,3 +259,19 @@ paper/
 4. **Order of work**: recommendation — A-0 and P-1…P-4 first (no GPU), then B-1 (30 min GPU), then A-1
    overnight. B-2 (session cache) can be developed in parallel because it needs no GPU until its final check.
 5. **`dual-k8v4`**: retire (recommended) or re-measure?
+
+
+## 7. Decisions taken 2026-10-18 (evening) and what was done
+
+1. **B-NT** — André: option A, then B. A landed (`6df064a`): `effectiveMaxStepsPerBlock` (default 4·B + maxPostSteps)
+   force-commits a non-terminating block, logged as `Metrics.stepCapHits`; output-neutral on all 32 fixture runs;
+   the former hang now ends in 1.9 s. B landed **default-off** (`suppressMaskToken`); needs its own evaluation
+   (trajectory + quality) before any default change — added as a future arm, not part of E-001.
+2. **Session cache** — André: option C, opt-in until B-NT soaks. Merged: impl-x (Opus) engine design and tests +
+   impl-y (Fable) eligibility allowlist (`GenerationParams.sessionReuseEligible`, incl. `iceTemplate` bypass),
+   default cap 8,192 tokens with leading-block retention, sync-point and allowlist tests. MultiBD stays excluded
+   (impl-x's exactness test kept as the relaxation evidence). Server: `--session-cache`, `--session-max-tokens`.
+3. **App model files** — committed after a secret scan (no credentials/hosts; URLs are templates).
+4. **B-1** — André: amend the validity rule (v2) and set K=1 everywhere. See `Plans/b1-speculation-k-m1-prereg.md` §6.
+5. **E-001** — analysis script `paper/scripts/e001_analysis.py` committed before the run; overnight script
+   `Tools/run-overnight-e001.sh` (refuses a dirty tree). Run by André with the Claude app quit.
