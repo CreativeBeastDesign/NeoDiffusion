@@ -250,6 +250,13 @@ public final class DiffusionEngine {
         /// and only the ones the served config reaches carry the switch — this echo is what makes
         /// that verifiable from the JSONL instead of by inspection.
         public let effectiveModuleAblation: ModuleAblation
+
+        // MARK: B-NT (2026-10-18)
+        /// Blocks force-committed by the step cap (should be 0; > 0 means the loop would not have
+        /// terminated on its own — such a block may contain `[MASK]`).
+        public var stepCapHits: Int = 0
+        public var effectiveMaxStepsPerBlock: Int = 0
+        public var effectiveSuppressMaskToken: Bool = false
     }
 
     /// Mutable stats shared between the cached entry point's closures and `run` (the capture

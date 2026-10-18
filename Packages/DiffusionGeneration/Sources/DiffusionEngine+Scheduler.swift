@@ -90,6 +90,7 @@ extension DiffusionEngine {
 
         var buffer = BlockBuffer(nBuf: params.nBuf)
         var syncPoints = 0
+        var stepCapHits = 0   // B-NT
 
         // Committed prefix: the pure-prompt blocks [0, prefillBlocks). Their ids are prompt
         // tokens by construction (prefillBlocks * B <= promptLength).
@@ -286,6 +287,7 @@ extension DiffusionEngine {
                 }
 
             case .frontBreak:
+                if phase.stepCapHit { stepCapHits += 1 }
                 // Commit the front block in order (streaming contract). The trailing slot,
                 // if any, is promoted and keeps its in-flight tokens and post-steps counter.
                 let front = slots.removeFirst()
@@ -425,7 +427,10 @@ extension DiffusionEngine {
                 kvCacheLogicalBytes: stats?.kvCacheLogicalBytes ?? 0,
                 kvCacheAllocatedBytes: stats?.kvCacheAllocatedBytes ?? 0,
                 committedTokensCount: stats?.committedTokensCount ?? committedIds.count,
-                effectiveModuleAblation: params.moduleAblation),
+                effectiveModuleAblation: params.moduleAblation,
+                stepCapHits: stepCapHits,
+                effectiveMaxStepsPerBlock: params.effectiveMaxStepsPerBlock,
+                effectiveSuppressMaskToken: params.suppressMaskToken),
             trajectorySequences: params.temporalVotingEnabled ? trajectorySequences : nil)
     }
 }

@@ -45,6 +45,9 @@ extension DiffusionEngine {
         let frontPostAtBreak: Int
         /// The frozen-prefix length to commit early (valid on `.prefixCommit`; 0 otherwise).
         var prefixCommitN: Int = 0
+        /// B-NT (2026-10-18): this `.frontBreak` was forced by `effectiveMaxStepsPerBlock`, not by a
+        /// settle or the post-steps budget. The block may still hold `[MASK]` tokens.
+        var stepCapHit: Bool = false
         // Step 3 (final-plan §2): sub-phase wall-clock summed over the phase's applied logical
         // steps, non-zero only under `instrument`. forward/sampler/selection come from windowStep;
         // loopControl is the batch readback (the one real sync). 0 on the served path.
@@ -358,6 +361,23 @@ extension DiffusionEngine {
             frozenMask = specFrozenMask
             credit = specCredit
 
+            // B-NT safety cap (2026-10-18, deviation from the reference — phase-2 §5): the per-block
+            // loop has no global bound in the reference either. Post-steps only count mask-free
+            // iterations, and nothing stops x0 from being `mask_id`, so a block can stay masked
+            // forever (reproduced: DenoisingLoopParityTests.testReproSModeNonTermination). Force a
+            // commit once the front block has taken `effectiveMaxStepsPerBlock` steps. Host-side int
+            // check at the batch boundary — no new GPU readback on the normal path; the post
+            // counter is read (one memcpy-class sync) only when the cap actually fires. A normal
+            // block settles within B + maxPostSteps + 1 steps, far below the default cap
+            // (4·B + maxPostSteps), so the cap is output-neutral unless the loop would not end.
+            if slots[0].stepsTaken >= params.effectiveMaxStepsPerBlock {
+                let frontPost = Int(posts[0].item(Int32.self))
+                syncPoints += 1
+                var r = makePhaseResult(event: .frontBreak, frontPostAtBreak: frontPost)
+                r.stepCapHit = true
+                return r
+            }
+
             // Min-span routing update from the batch's last evaluated step (memcpy, no sync):
             // masks remaining in the front block is the span-length proxy.
             if specActive && params.tauSpan > 1 {
@@ -460,12 +480,18 @@ extension DiffusionEngine {
         // One forward over the full window, logits for the active columns only.
         let window = prefixLen > 0 ? concatenated([prefix, windowActive], axis: 1) : windowActive
         let forwardStart = instrument ? Date() : nil
-        let logits = forward(window, A, (params.jotEnabled || params.sureLockEnabled) ? frozenMask : nil)                     // [1, A, V] FP32
+        var logits = forward(window, A, (params.jotEnabled || params.sureLockEnabled) ? frozenMask : nil)                     // [1, A, V] FP32
         if let forwardStart { eval(logits); forwardSeconds = Date().timeIntervalSince(forwardStart) }
 
         // Raw model predictions. These govern EDITING (Δ), JOT freezing, the ICE answer-
         // confidence signal, and every diagnostic — none of which credit is allowed to bias.
         let samplerStart = instrument ? Date() : nil
+        // B-NT option B (2026-10-18, default OFF — changes outputs, needs its own evaluation):
+        // never predict `[MASK]` as a token. The reference does not suppress it.
+        if params.suppressMaskToken {
+            logits = which(MLXArray(0 ..< Int32(logits.dim(-1))) .== Int32(params.maskId),
+                           MLXArray(-Float.infinity), logits)
+        }
         let probs = softmax(logits, axis: -1)
         let x0 = argMax(logits, axis: -1).asType(.int32)
         let x0p = probs.max(axis: -1)

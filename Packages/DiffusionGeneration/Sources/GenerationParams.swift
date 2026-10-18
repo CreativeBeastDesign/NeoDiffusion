@@ -177,6 +177,19 @@ public struct GenerationParams: Sendable, Equatable {
     /// `pendingKeys`/`pendingValues` already hold the clean K/V for `committedActive` (saves 1 full forward per block with 100% bitwise parity).
     public var skipRedundantCommitForward: Bool = true
 
+    /// B-NT safety cap (2026-10-18): maximum denoising steps the front block may take before it is
+    /// force-committed. `nil` = default `4 · blockLength + maxPostSteps`, which a terminating block
+    /// never reaches (it settles within `blockLength + maxPostSteps + 1`), so the default is
+    /// output-neutral and only turns a would-be infinite loop into a logged commit
+    /// (`Metrics.stepCapHits`). Deviation from the reference, which has no bound.
+    public var maxStepsPerBlock: Int? = nil
+    public var effectiveMaxStepsPerBlock: Int { maxStepsPerBlock ?? (4 * blockLength + maxPostSteps) }
+
+    /// B-NT option B (2026-10-18, default OFF): mask the `[MASK]` logit before x0/confidence, so
+    /// the sampler can never emit `mask_id`. Changes outputs (softmax renormalises without the mask
+    /// column) — needs its own trajectory/quality evaluation before any default change.
+    public var suppressMaskToken: Bool = false
+
     /// Whether the clean-commit skip may actually fire for this configuration.
     ///
     /// The skip commits the settle step's pending K/V instead of recomputing it. That is exact only
