@@ -210,7 +210,7 @@ def main() -> int:
         if old is None:
             errors.append(f"L5 {f.relative_to(REPO)}: registered_commit {m.group(1)} does not contain this file")
             continue
-        strip = lambda t: re.sub(r"^registered_commit:.*$", "", t.split(RESULTS_MARKER)[0], flags=re.M)
+        strip = lambda t: re.sub(r"^registered_commit:.*\n?", "", t.split(RESULTS_MARKER)[0], flags=re.M)  # whole line incl. newline
         if strip(old) != strip(text):
             errors.append(f"L5 {f.relative_to(REPO)}: pre-registered section changed since {m.group(1)}")
 

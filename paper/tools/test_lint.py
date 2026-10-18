@@ -48,5 +48,24 @@ for name, tree, want_rc, want_text in cases:
     ok = rc == want_rc and (want_text is None or want_text in out)
     fails += not ok
     print(("PASS " if ok else "FAIL ") + name + ("" if ok else f"\n  rc={rc}\n  " + out.replace("\n", "\n  ")))
+# L5 needs a real git history: registration frozen at a commit; results may be appended, the
+# pre-registered part may not change. (Regression for the 2026-10-18 strip bug, which left a blank line.)
+def l5_case() -> tuple[int, int]:
+    with tempfile.TemporaryDirectory() as d:
+        r = Path(d); e = r / "paper" / "experiments" / "E-001.md"; e.parent.mkdir(parents=True)
+        base = "id: E-001\ntests: x\nprediction: steps go up\n"
+        e.write_text(base)
+        g = lambda *a: subprocess.run(["git", "-C", d, "-c", "user.email=t@t", "-c", "user.name=t", *a], capture_output=True, text=True)
+        g("init", "-q"); g("add", "."); g("commit", "-qm", "reg")
+        sha = g("rev-parse", "--short", "HEAD").stdout.strip()
+        lint = lambda: subprocess.run([sys.executable, str(LINT)], env={**os.environ, "PAPER_ROOT": str(r / "paper")}, capture_output=True, text=True).returncode
+        e.write_text(base.replace("prediction:", f"registered_commit: {sha}\nprediction:") + "--- RESULTS ---\nok\n")
+        a = lint()
+        e.write_text(e.read_text().replace("steps go up", "steps go down"))
+        return a, lint()
+a, b = l5_case()
+for name, got, want in [("L5 frozen prereg + appended results passes", a, 0), ("L5 edited prereg fails", b, 1)]:
+    ok = got == want; fails += not ok; cases.append(name)
+    print(("PASS " if ok else "FAIL ") + name + ("" if ok else f" (rc={got})"))
 print(f"{len(cases) - fails}/{len(cases)} lint self-tests passed")
 sys.exit(1 if fails else 0)
