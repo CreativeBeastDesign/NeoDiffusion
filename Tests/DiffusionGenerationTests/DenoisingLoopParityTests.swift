@@ -346,6 +346,22 @@ final class DenoisingLoopParityTests: XCTestCase {
         }
     }
 
+    /// KNOWN BUG REPRO (found 2026-10-18 by the Exp-5B hidden test; logbook `Plans/exp5b-opus-vs-fable-logbook.md`
+    /// §9.4). S mode (τ_edit = 0.0) on this 88-token toy prompt never terminates on the base engine: the
+    /// sampler can emit `mask_id` as x0, so the block is never mask-free and `max_post_steps` never starts
+    /// counting; there is no global step cap. Reference `generate()` has the same structure. Opt-in only —
+    /// it HANGS today. Expected to pass (finish quickly) once a step cap / mask suppression lands.
+    func testReproSModeNonTermination() throws {
+        try XCTSkipUnless(ProcessInfo.processInfo.environment["NEODIFFUSION_REPRO_HANG"] == "1",
+                          "opt-in: hangs on the current engine")
+        let c = traces.cases.first { $0.name.hasPrefix("p20_s_noeos") }!
+        let prompt: [Int] = [615, 530, 213, 157, 704, 530, 577, 976, 854, 689, 558, 959, 890, 948, 90, 819, 977, 59, 238, 861, 901, 437, 383, 457, 2, 809, 749, 487, 19, 19, 226, 749, 8, 319, 754, 593, 226, 749, 226, 226, 226, 226, 248, 99, 583, 176, 437, 437, 429, 635, 671, 589, 898, 437, 294, 943, 970, 898, 754, 977, 899, 283, 898, 112, 152, 174, 545, 146, 615, 530, 213, 157, 704, 530, 577, 976, 854, 689, 558, 959, 890, 948, 90, 819, 977, 59, 238, 861]
+        var p = c.params.toGenerationParams()
+        p.genLength = 48
+        let out = DiffusionEngine(model: model, speculationK: 1).generateCached(prompt: prompt, params: p)
+        XCTAssertFalse(out.finalSequence.contains(p.maskId))
+    }
+
     private func firstDiff(_ a: [Int], _ b: [Int]) -> String {
         let n = min(a.count, b.count)
         for i in 0 ..< n where a[i] != b[i] { return "idx \(i): \(a[i]) != \(b[i])" }

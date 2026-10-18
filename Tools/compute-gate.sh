@@ -36,12 +36,12 @@ avail_mb() {
 }
 
 acquire() {
+  local owner_pid=""   # declared once: zsh prints `name=value` when `local` re-declares a set variable
   while true; do
     if mkdir "$LOCK_DIR" 2>/dev/null; then
       print -r -- "$$ $LABEL $(date -u +%s)" > "$LOCK_DIR/owner"
       return 0
     fi
-    local owner_pid
     owner_pid=$(awk '{print $1}' "$LOCK_DIR/owner" 2>/dev/null)
     if [[ -n "$owner_pid" ]] && ! kill -0 "$owner_pid" 2>/dev/null; then
       log "stale-lock owner=$owner_pid removed"

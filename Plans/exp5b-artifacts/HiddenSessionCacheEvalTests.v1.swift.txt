@@ -1,0 +1,215 @@
+// HIDDEN EVALUATION for Exp-5B (Opus vs Fable). Written 2026-10-18 by the orchestrating session
+// BEFORE either implementation existed, against the API fixed in the shared brief. Not shown to
+// either agent. Copied into each worktree only at evaluation time.
+//
+// Part A (toy FP32 fixtures, always runs if fixtures exist): correctness of cross-turn reuse.
+// Part B (real 4-bit model, opt-in NEODIFFUSION_SESSION_EVAL_REAL=1): bit-exactness on the served
+//         artefact + prefill wall-clock with/without the session cache, written as JSONL.
+import XCTest
+import MLX
+import DiffusionCore
+@testable import DiffusionModel
+@testable import DiffusionGeneration
+
+final class HiddenSessionCacheEvalTests: XCTestCase {
+    static let repo = "/Users/andrebarlocher/Documents/Swift/NeoDiffusion"
+
+    struct Manifest: Decodable { let config: LLaDA2MoeConfig }
+    struct Params: Decodable {
+        let threshold: Float, editing_threshold: Float, max_post_steps: Int, num_to_transfer: Int
+        let eos_early_stop: Bool, temperature: Float, block_length: Int, gen_length: Int
+        let mask_id: Int, eos_id: Int
+        func gp() -> GenerationParams {
+            GenerationParams(threshold: threshold, editingThreshold: editing_threshold,
+                             maxPostSteps: max_post_steps, numToTransfer: num_to_transfer,
+                             eosEarlyStop: eos_early_stop, temperature: temperature,
+                             blockLength: block_length, genLength: gen_length,
+                             maskId: mask_id, eosId: eos_id)
+        }
+    }
+    struct Case: Decodable { let name: String; let prompt: [Int]; let params: Params }
+    struct Traces: Decodable { let cases: [Case] }
+
+    var model: LLaDA2MoeModel!
+    var traces: Traces!
+
+    override func setUpWithError() throws {
+        let dir = URL(fileURLWithPath: "\(Self.repo)/scratch/loop_fixtures")
+        try XCTSkipUnless(FileManager.default.fileExists(atPath: dir.appendingPathComponent("traces.json").path))
+        let m = try JSONDecoder().decode(Manifest.self, from: Data(contentsOf: dir.appendingPathComponent("manifest.json")))
+        traces = try JSONDecoder().decode(Traces.self, from: Data(contentsOf: dir.appendingPathComponent("traces.json")))
+        let dm = DiffusionModel(config: m.config)
+        try dm.loadWeights(from: dir.appendingPathComponent("weights.safetensors"))
+        model = dm.model
+    }
+
+    /// Turn-2 prompt = turn-1 prompt + turn-1 generated tokens (EOS stripped) + `extra`.
+    func followUp(_ prompt: [Int], _ out: DiffusionEngine.Output, eos: Int, extra: [Int]) -> [Int] {
+        prompt + out.tokens.filter { $0 != eos } + extra
+    }
+
+    func expectedReuse(session committed: [Int], prompt: [Int], B: Int) -> Int {
+        var lcp = 0
+        while lcp < min(committed.count, prompt.count) && committed[lcp] == prompt[lcp] { lcp += 1 }
+        return min(lcp / B, prompt.count / B) * B
+    }
+
+    // A1: reuse never changes outputs, and reuses the block-aligned common prefix.
+    func testA1_TwoTurnExactAndReuses() throws {
+        var fails: [String] = []
+        for k in [1, 4] {
+            let engine = DiffusionEngine(model: model, speculationK: k)
+            for c in traces.cases {
+                let p = c.params.gp()
+                let session = SessionPrefixCache()
+                let o1 = engine.generateCached(prompt: c.prompt, params: p, session: session)
+                let o1ref = engine.generateCached(prompt: c.prompt, params: p)
+                if o1.finalSequence != o1ref.finalSequence { fails.append("\(c.name) K\(k): turn-1 changed by session") }
+                if o1.metrics.sessionReusedTokens != 0 { fails.append("\(c.name) K\(k): turn-1 reused \(o1.metrics.sessionReusedTokens)") }
+                let extra = Array(c.prompt.prefix(40))
+                let p2 = followUp(c.prompt, o1, eos: p.eosId, extra: extra)
+                let o2 = engine.generateCached(prompt: p2, params: p, session: session)
+                let o2ref = engine.generateCached(prompt: p2, params: p)
+                if o2.finalSequence != o2ref.finalSequence { fails.append("\(c.name) K\(k): turn-2 output differs with session") }
+                if o2.metrics.sessionReusedTokens == 0 && p2.count >= 2 * p.blockLength && c.prompt.count >= p.blockLength {
+                    fails.append("\(c.name) K\(k): no reuse on a follow-up turn (prompt \(c.prompt.count), p2 \(p2.count))")
+                }
+                if o2.metrics.sessionReusedTokens % p.blockLength != 0 { fails.append("\(c.name): reuse not block-aligned") }
+                if o2.metrics.sessionReusedTokens > (p2.count / p.blockLength) * p.blockLength { fails.append("\(c.name): reused past prompt's full blocks") }
+                // Three turns: the session must keep working after a reuse.
+                let p3 = followUp(p2, o2, eos: p.eosId, extra: Array(c.prompt.suffix(20)))
+                let o3 = engine.generateCached(prompt: p3, params: p, session: session)
+                let o3ref = engine.generateCached(prompt: p3, params: p)
+                if o3.finalSequence != o3ref.finalSequence { fails.append("\(c.name) K\(k): turn-3 output differs") }
+                if o3.metrics.sessionReusedTokens < o2.metrics.sessionReusedTokens { fails.append("\(c.name) K\(k): turn-3 reused less than turn-2") }
+            }
+        }
+        XCTAssertTrue(fails.isEmpty, fails.joined(separator: "\n"))
+    }
+
+    // A2: unrelated prompt → no reuse, same output. Divergence mid-block → reuse stops at the boundary.
+    func testA2_DivergenceAndUnrelated() throws {
+        let engine = DiffusionEngine(model: model, speculationK: 1)
+        var fails: [String] = []
+        for c in traces.cases where c.prompt.count >= c.params.block_length {
+            let p = c.params.gp(); let B = p.blockLength
+            let session = SessionPrefixCache()
+            _ = engine.generateCached(prompt: c.prompt, params: p, session: session)
+            let unrelated = c.prompt.map { ($0 + 7) % max(p.maskId, 2) }.map { $0 == p.maskId || $0 == p.eosId ? 1 : $0 }
+            let ou = engine.generateCached(prompt: unrelated, params: p, session: session)
+            if ou.metrics.sessionReusedTokens != 0 { fails.append("\(c.name): reused \(ou.metrics.sessionReusedTokens) on unrelated prompt") }
+            if ou.finalSequence != engine.generateCached(prompt: unrelated, params: p).finalSequence { fails.append("\(c.name): unrelated output differs") }
+            // Fresh session for the divergence test.
+            let s2 = SessionPrefixCache()
+            let o1 = engine.generateCached(prompt: c.prompt, params: p, session: s2)
+            var p2 = followUp(c.prompt, o1, eos: p.eosId, extra: Array(c.prompt.prefix(8)))
+            let flip = B + B / 2          // inside block 1
+            if p2.count > flip + 1 {
+                p2[flip] = p2[flip] == 1 ? 2 : 1
+                let o2 = engine.generateCached(prompt: p2, params: p, session: s2)
+                if o2.metrics.sessionReusedTokens > B { fails.append("\(c.name): reused \(o2.metrics.sessionReusedTokens) past a divergence at \(flip)") }
+                if o2.finalSequence != engine.generateCached(prompt: p2, params: p).finalSequence { fails.append("\(c.name): diverged output differs") }
+            }
+        }
+        XCTAssertTrue(fails.isEmpty, fails.joined(separator: "\n"))
+    }
+
+    // A3: a session must not be reused across incompatible params (block length, KV quantization).
+    func testA3_IncompatibleParamsDoNotReuse() throws {
+        let engine = DiffusionEngine(model: model, speculationK: 1)
+        guard let c = traces.cases.first(where: { $0.prompt.count >= 2 * $0.params.block_length }) ?? traces.cases.first else { return }
+        var p = c.params.gp()
+        let session = SessionPrefixCache()
+        let o1 = engine.generateCached(prompt: c.prompt, params: p, session: session)
+        let p2 = followUp(c.prompt, o1, eos: p.eosId, extra: [1, 2, 3])
+        p.kvQuantization = .k8v4
+        let o2 = engine.generateCached(prompt: p2, params: p, session: session)
+        XCTAssertEqual(o2.metrics.sessionReusedTokens, 0, "reused FP16 K/V for a k8v4 request")
+        XCTAssertEqual(o2.finalSequence, engine.generateCached(prompt: p2, params: p).finalSequence)
+    }
+
+    // A4: reuse under KV quantization stays exact relative to the same quantized config.
+    func testA4_QuantizedSessionExact() throws {
+        let engine = DiffusionEngine(model: model, speculationK: 1)
+        var fails: [String] = []
+        for q in [KVCacheQuantization.k8v4, .kivi4] {
+            for c in traces.cases {
+                var p = c.params.gp(); p.kvQuantization = q
+                let session = SessionPrefixCache()
+                let o1 = engine.generateCached(prompt: c.prompt, params: p, session: session)
+                let p2 = followUp(c.prompt, o1, eos: p.eosId, extra: Array(c.prompt.prefix(33)))
+                let o2 = engine.generateCached(prompt: p2, params: p, session: session)
+                if o2.finalSequence != engine.generateCached(prompt: p2, params: p).finalSequence { fails.append("\(c.name) \(q): differs") }
+            }
+        }
+        XCTAssertTrue(fails.isEmpty, fails.joined(separator: "\n"))
+    }
+
+    // A5: reset() empties the session; forwards saved equals reused blocks.
+    func testA5_ResetAndForwardAccounting() throws {
+        let engine = DiffusionEngine(model: model, speculationK: 1)
+        guard let c = traces.cases.max(by: { $0.prompt.count < $1.prompt.count }) else { return }
+        let p = c.params.gp()
+        let session = SessionPrefixCache()
+        let o1 = engine.generateCached(prompt: c.prompt, params: p, session: session)
+        XCTAssertGreaterThan(session.cachedTokenCount, 0)
+        let p2 = followUp(c.prompt, o1, eos: p.eosId, extra: [5, 6, 7])
+        let ref = engine.generateCached(prompt: p2, params: p)
+        let o2 = engine.generateCached(prompt: p2, params: p, session: session)
+        XCTAssertEqual(ref.metrics.forwardsEvaluated - o2.metrics.forwardsEvaluated,
+                       o2.metrics.sessionReusedTokens / p.blockLength,
+                       "each reused block should save exactly one prefill forward")
+        session.reset()
+        XCTAssertEqual(session.cachedTokenCount, 0)
+        let o3 = engine.generateCached(prompt: p2, params: p, session: session)
+        XCTAssertEqual(o3.metrics.sessionReusedTokens, 0)
+    }
+}
+
+/// Part B — real 4-bit model. Opt-in; writes one JSONL row per measurement to
+/// $NEODIFFUSION_SESSION_EVAL_OUT (default scratch/2026-10-18/exp5b_session_perf.jsonl).
+final class HiddenSessionCacheRealEvalTests: XCTestCase {
+    func testB1_RealModelExactnessAndPrefill() async throws {
+        try XCTSkipUnless(ProcessInfo.processInfo.environment["NEODIFFUSION_SESSION_EVAL_REAL"] == "1", "opt-in")
+        let repo = HiddenSessionCacheEvalTests.repo
+        let label = ProcessInfo.processInfo.environment["NEODIFFUSION_SESSION_EVAL_LABEL"] ?? "unlabelled"
+        let outPath = ProcessInfo.processInfo.environment["NEODIFFUSION_SESSION_EVAL_OUT"] ?? "\(repo)/scratch/2026-10-18/exp5b_session_perf.jsonl"
+        let container = try DiffusionModel.load(from: URL(fileURLWithPath: "\(repo)/models/llada2-1-mini-4bit"))
+        let tok = try await DiffusionTokenizer.from(modelFolder: URL(fileURLWithPath: "\(repo)/models/llada2-1-mini"))
+        let engine = DiffusionEngine(model: container.model, speculationK: 1)
+        let para = "The quick brown fox studies distributed systems, caching, and numerical precision. "
+        let base = tok.encode(text: String(repeating: para, count: 24))       // long first turn
+        var p = GenerationParams.mode(.q, blockLength: 32, genLength: 64, maskId: tok.maskId, eosId: tok.eosId)
+        p.skipRedundantCommitForward = true
+        var rows: [String] = []
+        var mismatches = 0
+        // warmup (excluded)
+        _ = engine.generateCached(prompt: Array(base.prefix(64)), params: p)
+        for rep in 0 ..< 3 {
+            let session = SessionPrefixCache()
+            let o1 = engine.generateCached(prompt: base, params: p, session: session)
+            let p2 = base + o1.tokens.filter { $0 != tok.eosId } + tok.encode(text: " Summarise the previous answer in one sentence.")
+            // Alternate order so drift does not favour one arm.
+            var withS: DiffusionEngine.Output!, without: DiffusionEngine.Output!
+            var tWith = 0.0, tWithout = 0.0
+            for arm in (rep % 2 == 0 ? ["with", "without"] : ["without", "with"]) {
+                let t0 = Date()
+                if arm == "with" { withS = engine.generateCached(prompt: p2, params: p, session: session); tWith = Date().timeIntervalSince(t0) }
+                else { without = engine.generateCached(prompt: p2, params: p); tWithout = Date().timeIntervalSince(t0) }
+            }
+            if withS.finalSequence != without.finalSequence { mismatches += 1 }
+            rows.append(String(format: #"{"label":"%@","rep":%d,"promptTokens":%d,"reused":%d,"prefillWith":%.4f,"prefillWithout":%.4f,"totalWith":%.4f,"totalWithout":%.4f,"forwardsWith":%d,"forwardsWithout":%d,"identical":%@,"peakGB":%.3f}"#,
+                               label, rep, p2.count, withS.metrics.sessionReusedTokens,
+                               withS.metrics.prefillSeconds, without.metrics.prefillSeconds, tWith, tWithout,
+                               withS.metrics.forwardsEvaluated, without.metrics.forwardsEvaluated,
+                               withS.finalSequence == without.finalSequence ? "true" : "false",
+                               Double(Memory.peakMemory) / 1_073_741_824))
+        }
+        let fh = FileManager.default
+        if !fh.fileExists(atPath: outPath) { fh.createFile(atPath: outPath, contents: nil) }
+        let h = try FileHandle(forWritingTo: URL(fileURLWithPath: outPath)); h.seekToEndOfFile()
+        h.write((rows.joined(separator: "\n") + "\n").data(using: .utf8)!); try h.close()
+        rows.forEach { print("[exp5b] \($0)") }
+        XCTAssertEqual(mismatches, 0, "session reuse changed real-model output")
+    }
+}

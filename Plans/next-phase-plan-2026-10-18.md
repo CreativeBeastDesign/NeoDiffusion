@@ -122,6 +122,18 @@ diffusion). Also post-training-quantization studies of dLLMs (weights/activation
 `paper/sources/` entries + a one-page "what is known" note. **If someone already reports step inflation
 from KV quantization under threshold decoding, the contribution narrows to the mechanism and the fix.**
 
+**A-0 result (2026-10-18, literature agent; record: `paper/sources/S-001…S-018`, synthesis
+`paper/drafts/A-0-related-work.md`, lint clean)** `[Sourced: those files; full text read for S-001/2/4/5, abstracts only for the rest]`:
+(a) no verified paper reports step count / tokens-per-step / NFE under KV quantization with threshold
+decoding — every dLLM KV-quant paper found reports task accuracy only; SoloQ (arXiv:2610.07121) notices the
+trajectory changes but fixes the forward count for its latency comparison; "Quantization Meets dLLMs" lists
+step-count interaction as future work → **the measured effect looks novel**. (b) K-vs-V asymmetry is already
+reported *for accuracy* (Q-MaskAhead K/V-bit ablation incl. LLaDA-2.0-mini) → new only as a step-count effect
+with a mechanism. (c) Per-channel (KIVI-style) keys are standard in dLLM KV-quant work → new only as evidence
+that it removes step inflation; no paper found quantizing keys before the qk-norm gain. Closest prior work:
+Q-MaskAhead, SoloQ, FAIR-Calib (margins/decision flips, but for W4A4, not KV).
+Caveat: a step table could exist in bodies only skimmed via abstracts; re-check before publishing.
+
 ### 2.3 Hypotheses (pre-registered before any new run)
 
 - **H1 (effect)**: At fixed bytes, int4 per-token Keys increase logical steps per block relative to FP16
@@ -185,9 +197,10 @@ any gate is open.
 
 | Order | Item | Why this position | GPU on M1? |
 |---|---|---|---|
+| **B-NT** (new 2026-10-18, correctness — ahead of everything) | **Latent non-termination of the denoising loop**: nothing prevents x0 = `mask_id`, so a block can stay masked forever; `max_post_steps` only counts mask-free iterations and there is no global cap. Reproduced on the base engine with the toy model in S mode (`DenoisingLoopParityTests.testReproSModeNonTermination`, opt-in, hangs today; evidence `Plans/exp5b-opus-vs-fable-logbook.md` §9.4). The reference `generate()` shares the flaw, so any fix is a **deviation from the reference** (phase-2 §5 list) — André's call: (a) parity-neutral hard cap on steps/block (only fires on a would-be hang; log it), (b) suppress `mask_id` (and arguably pad) logits in x0, or both. Recommendation: (a) now, (b) evaluated separately because it changes outputs | none to implement; repro is toy-only |
 | B-0 | Re-run the CSA2/dual arms with the fixed gate (or retire `dual-k8v4`) | Three published numbers are confounded; cheapest is to retire the preset, which has no use case at ≤ 4k context | ≈ 20 min if re-run |
 | B-1 | Same-process `spk-1` vs `spk-4` on M1 at gen 128, 3 suites | Output-invariant (no quality gate); data suggest K=4 wastes ~11 % forwards on M1 → possible free default change | ≈ 30 min |
-| B-2 | **Session prefix cache** (cross-turn reuse of committed 32-token blocks) | Largest product value for chat; developable on FP32 toy config. Corrections to the handoff: reuse is exact *mathematically*, not bit-exact on 4-bit (prefill tile shapes differ); re-tokenized history and end-of-turn tokens usually end reuse at the previous assistant reply; "80–95 % TTFT" is untested | dev: tests only |
+| B-2 | **Session prefix cache** (cross-turn reuse of committed 32-token blocks) | Largest product value for chat; developable on FP32 toy config. Corrections to the handoff: ~~reuse is exact *mathematically*, not bit-exact on 4-bit (prefill tile shapes differ)~~ **[self-correction 2026-10-18: prefill commits block by block with the same 32-token capture forward, so reuse should be bit-exact on 4-bit too — the tile-shape caveat applies to the uncached path only; checked by the Exp-5B hidden real-model test]**; re-tokenized history and end-of-turn tokens usually end reuse at the previous assistant reply; "80–95 % TTFT" is untested | dev: tests only |
 | B-3 | Prefix-length sweep (gen 512/1024) for FP16 vs k8v4 vs kivi4 | Decides whether KV compression has *any* engine value at the in-scope ≤ 4k context (FP16 KV at 4k ≈ 160 MiB vs 9.5 GB weights) — shared with Goal A | ≈ 1–2 h |
 | B-4 | Step-adaptive expert top-k (REFLEX-style probe) | Cheapest sync-free MoE lever; measure ms/forward on a fixed trajectory first. REFLEX itself reports ~15 % expert-compute saving, not the 50 % in the handoff. Needs a blind sheet | ≈ 30 min probe |
 | — | Deprioritised: DES coreset (Step 4c / WP-6f measured coalescing *slower*), FFN-output reuse (every active-block reuse so far inflated steps), long-context prefix selection (no long-context eval suite; small ceiling at ≤ 4k), Sumi Elastic-Cache (Studio, separate model) | | |

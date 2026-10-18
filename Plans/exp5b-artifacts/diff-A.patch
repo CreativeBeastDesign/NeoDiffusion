@@ -1,0 +1,1145 @@
+diff --git a/Packages/DiffusionCore/Sources/KVCacheCompression.swift b/Packages/DiffusionCore/Sources/KVCacheCompression.swift
+index b5cf223..3c6fe42 100644
+--- a/Packages/DiffusionCore/Sources/KVCacheCompression.swift
++++ b/Packages/DiffusionCore/Sources/KVCacheCompression.swift
+@@ -166,6 +166,53 @@ public struct CompressedKVTensor {
+         )
+     }
+     
++    /// Keeps only the first `length` sequence positions (session prefix-cache truncation, exp-5B).
++    ///
++    /// Every group is quantized independently (`MLX.quantized` per group of `groupSize` along the
++    /// quantized axis), and appends quantize each committed block on its own, so slicing whole
++    /// groups yields exactly the tensor an `append` chain over the kept blocks would have built:
++    /// - token-major layout (`perChannel == false`, packed `[.., L, D·bits/32]`, scales
++    ///   `[.., L, D/g]`): slice axis 2 to `length` — any `length` is valid.
++    /// - per-channel layout (kivi4 Keys, packed `[.., D, L·bits/32]`, scales `[.., D, L/g]`): slice
++    ///   axis 3 to `length·bits/32` / `length/g`; `length` must be a multiple of `groupSize` (a
++    ///   quantization group spans `groupSize` tokens) and of `32/bits` (packing). Block-aligned
++    ///   truncation always satisfies this because kivi4 appends are themselves group-aligned.
++    public func truncated(toLength length: Int) -> CompressedKVTensor {
++        let current = originalShape[2]
++        precondition(length > 0 && length <= current,
++            "CompressedKVTensor.truncated: length \(length) outside (0, \(current)]")
++        if length == current { return self }
++        let packedLen: Int
++        let groupsLen: Int
++        let axis: Int
++        if perChannel {
++            precondition(length % groupSize == 0 && (length * bits) % 32 == 0,
++                "CompressedKVTensor.truncated: per-channel tensor can only be cut at multiples of "
++                + "groupSize=\(groupSize) tokens (got \(length))")
++            axis = 3
++            packedLen = length * bits / 32
++            groupsLen = length / groupSize
++        } else {
++            axis = 2
++            packedLen = length
++            groupsLen = length
++        }
++        func cut(_ a: MLXArray, _ n: Int) -> MLXArray {
++            axis == 3 ? a[0..., 0..., 0..., 0 ..< n] : a[0..., 0..., 0 ..< n, 0...]
++        }
++        var newShape = originalShape
++        newShape[2] = length
++        return CompressedKVTensor(
++            packed: cut(packed, packedLen),
++            scales: cut(scales, groupsLen),
++            biases: biases.map { cut($0, groupsLen) },
++            groupSize: groupSize,
++            bits: bits,
++            originalShape: newShape,
++            perChannel: perChannel
++        )
++    }
++
+     /// Dequantizes the compressed tensor back to full-precision FP16.
+     public func dequantize(dtype: DType = .float16) -> MLXArray {
+         let deq = dequantized(
+diff --git a/Packages/DiffusionCore/Sources/KVCachePool.swift b/Packages/DiffusionCore/Sources/KVCachePool.swift
+index f8410ad..5a200b1 100644
+--- a/Packages/DiffusionCore/Sources/KVCachePool.swift
++++ b/Packages/DiffusionCore/Sources/KVCachePool.swift
+@@ -106,6 +106,18 @@ public final class KVCachePool {
+         committedLength = newLength
+     }
+     
++    /// Drops committed positions `[length, committedLength)` (session prefix-cache truncation,
++    /// exp-5B). Only the logical length moves: the buffers keep their capacity, and the stale
++    /// tail is overwritten in place by the next `commit` (`mlx_slice_update` at the new
++    /// `committedLength`). `keys`/`values` already return only `[0, committedLength)`, so the
++    /// dropped tail is unobservable. `length == 0` releases the buffers like `clear()`.
++    public func truncate(to length: Int) {
++        precondition(length >= 0 && length <= committedLength,
++            "KVCachePool.truncate: length \(length) outside [0, \(committedLength)]")
++        if length == 0 { clear(); return }
++        committedLength = length
++    }
++
+     public func clear() {
+         committedLength = 0
+         keysBuffer = nil
+diff --git a/Packages/DiffusionCore/Sources/LayerKVCache.swift b/Packages/DiffusionCore/Sources/LayerKVCache.swift
+index 3f863aa..15cc8aa 100644
+--- a/Packages/DiffusionCore/Sources/LayerKVCache.swift
++++ b/Packages/DiffusionCore/Sources/LayerKVCache.swift
+@@ -160,6 +160,58 @@ public final class LayerKVCache {
+         pendingValues = nil
+     }
+ 
++    // MARK: - Session prefix-cache support (exp-5B)
++
++    /// Drops committed positions `[length, committedLength)`, for every storage form this layer can
++    /// hold (raw, pool, compressed incl. the per-channel kivi4 Key layout). Pending K/V and the
++    /// per-call FlashBlock state are not touched — callers only truncate a store that is between
++    /// generation calls. Lazy: slices are views until the next commit concatenates/updates them.
++    public func truncateCommitted(to length: Int) {
++        let current = committedLength
++        precondition(length >= 0 && length <= current,
++            "LayerKVCache.truncateCommitted: length \(length) outside [0, \(current)]")
++        if length == current { return }
++        if let ck = compressedKeys, let cv = compressedValues {
++            if length == 0 {
++                compressedKeys = nil
++                compressedValues = nil
++            } else {
++                compressedKeys = ck.truncated(toLength: length)
++                compressedValues = cv.truncated(toLength: length)
++            }
++        } else if let pool {
++            pool.truncate(to: length)
++        } else if let rk = rawKeys, let rv = rawValues {
++            if length == 0 {
++                rawKeys = nil
++                rawValues = nil
++            } else {
++                rawKeys = rk[0..., 0..., 0 ..< length, 0...]
++                rawValues = rv[0..., 0..., 0 ..< length, 0...]
++            }
++        }
++    }
++
++    /// Moves `other`'s committed storage (raw / pool / compressed, plus its quantization mode) into
++    /// this layer and leaves `other` empty. Ownership is *moved*, not shared, so the pool's
++    /// in-place `mlx_slice_update` never sees a second reference to its buffer. This layer must be
++    /// empty (fresh) — it is how a session seeds a new call's per-call cache.
++    public func adoptCommittedStorage(from other: LayerKVCache) {
++        precondition(committedLength == 0 && pendingKeys == nil,
++            "adoptCommittedStorage: target layer must be empty")
++        rawKeys = other.rawKeys
++        rawValues = other.rawValues
++        pool = other.pool
++        compressedKeys = other.compressedKeys
++        compressedValues = other.compressedValues
++        quantizationMode = other.quantizationMode
++        other.rawKeys = nil
++        other.rawValues = nil
++        other.pool = nil
++        other.compressedKeys = nil
++        other.compressedValues = nil
++    }
++
+     /// Forces evaluation of the underlying stored tensors (compressed, pooled, or raw) without
+     /// triggering unnecessary dequantization.
+     public func evalStorage() {
+diff --git a/Packages/DiffusionGeneration/Sources/DiffusionEngine+Entry.swift b/Packages/DiffusionGeneration/Sources/DiffusionEngine+Entry.swift
+index 74c90ee..cef1efc 100644
+--- a/Packages/DiffusionGeneration/Sources/DiffusionEngine+Entry.swift
++++ b/Packages/DiffusionGeneration/Sources/DiffusionEngine+Entry.swift
+@@ -51,6 +51,23 @@ extension DiffusionEngine {
+         params: GenerationParams,
+         iceTemplate: [Int]? = nil,
+         streamBlock: (([Int]) -> Void)? = nil
++    ) -> Output {
++        generateCached(prompt: prompt, params: params, iceTemplate: iceTemplate,
++                       streamBlock: streamBlock, session: nil)
++    }
++
++    /// ``generateCached(prompt:params:iceTemplate:streamBlock:)`` with cross-call prefix reuse
++    /// (exp-5B). With a ``SessionPrefixCache``, the leading whole prompt blocks whose ids equal the
++    /// session's held ids skip their prefill capture forwards (their K/V are taken from the
++    /// session — exact, see the type doc); after the call the session holds this call's committed
++    /// blocks. `session: nil` is byte-for-byte the session-less path. Added host work is per call
++    /// (an `[Int]` prefix compare); no new GPU readbacks, none per step.
++    public func generateCached(
++        prompt: [Int],
++        params: GenerationParams,
++        iceTemplate: [Int]? = nil,
++        streamBlock: (([Int]) -> Void)? = nil,
++        session: SessionPrefixCache?
+     ) -> Output {
+         let B = params.blockLength
+         let cache = ExactPrefixCache(
+@@ -131,12 +148,40 @@ extension DiffusionEngine {
+             updateCacheTelemetry()
+         }
+ 
++        // Session prefix cache (exp-5B): seed the per-call cache with the session's reusable
++        // leading blocks (moved, not copied) and prefill only the remainder. Runs after every
++        // precondition above, so a trapping config never empties the session.
++        let sessionKey = SessionPrefixCache.CompatibilityKey(
++            model: ObjectIdentifier(model), layerCount: model.layerCount, blockLength: B,
++            kvQuantization: params.kvQuantization, kvPoolEnabled: params.kvPoolEnabled,
++            maskSemantics: .strict)
++        var activeSession: SessionPrefixCache? = session
++        if let s = session, SessionPrefixCache.bypassReason(params) != nil {
++            s.noteBypass()
++            activeSession = nil
++        }
++        var reusedTokens = 0
++        if let s = activeSession {
++            let checkout = s.checkout(prompt: prompt, key: sessionKey, model: model)
++            if let held = checkout.store {
++                for (dst, src) in zip(cache.layers, held.layers) {
++                    dst.adoptCommittedStorage(from: src)
++                }
++                reusedTokens = checkout.reusedTokens
++            }
++        }
++        precondition(cache.committedLength == reusedTokens && reusedTokens % B == 0,
++            "session seeding produced \(cache.committedLength) committed tokens, expected \(reusedTokens)")
++        stats.sessionReusedTokens = reusedTokens
++        updateCacheTelemetry()
++
+         // Prefill: commit the pure-prompt blocks [0, prefillBlocks) into the cache so the first
+         // generated block denoises against them. (Uniform with generated blocks — a prompt block
+         // is just a pre-settled block; within-block bidirectional, cross-block causal via cache.)
++        // Blocks [0, reusedTokens/B) are already committed from the session.
+         let prefillStart = Date()
+         let prefillBlocks = prompt.count / B
+-        for b in 0 ..< prefillBlocks {
++        for b in (reusedTokens / B) ..< prefillBlocks {
+             let ids = MLXArray(prompt[b * B ..< (b + 1) * B].map { Int32($0) }).reshaped(1, B)
+             captureAndCommit(ids, startPos: b * B)
+         }
+@@ -384,10 +429,17 @@ extension DiffusionEngine {
+             jotCache.dropPrefix(prefixIds.dim(1))
+         }
+ 
+-        return run(prompt: prompt, params: params, iceTemplate: iceTemplate, activeCache: activeCache, boundaryHolder: boundaryHolder,
++        let output = run(prompt: prompt, params: params, iceTemplate: iceTemplate, activeCache: activeCache, boundaryHolder: boundaryHolder,
+                    forward: forward, verifierForward: verifierForward,
+                    streamBlock: streamBlock, onBlockSettled: onSettled,
+                    onPrefixSettled: onPrefixSettled, stats: stats)
++        // Hand this call's committed blocks (prompt + generated, as committed) to the session.
++        // `finalSequence` is exactly the committed ids (`run`'s `committedIds`).
++        if let s = activeSession {
++            s.checkin(cache: cache, committedTokens: output.finalSequence, key: sessionKey,
++                      model: model)
++        }
++        return output
+     }
+ 
+     // Internal (not private): called from both the cached entry point and denoisePhase, which
+diff --git a/Packages/DiffusionGeneration/Sources/DiffusionEngine+Scheduler.swift b/Packages/DiffusionGeneration/Sources/DiffusionEngine+Scheduler.swift
+index 5ea408b..57d3cdf 100644
+--- a/Packages/DiffusionGeneration/Sources/DiffusionEngine+Scheduler.swift
++++ b/Packages/DiffusionGeneration/Sources/DiffusionEngine+Scheduler.swift
+@@ -425,7 +425,8 @@ extension DiffusionEngine {
+                 kvCacheLogicalBytes: stats?.kvCacheLogicalBytes ?? 0,
+                 kvCacheAllocatedBytes: stats?.kvCacheAllocatedBytes ?? 0,
+                 committedTokensCount: stats?.committedTokensCount ?? committedIds.count,
+-                effectiveModuleAblation: params.moduleAblation),
++                effectiveModuleAblation: params.moduleAblation,
++                sessionReusedTokens: stats?.sessionReusedTokens ?? 0),
+             trajectorySequences: params.temporalVotingEnabled ? trajectorySequences : nil)
+     }
+ }
+diff --git a/Packages/DiffusionGeneration/Sources/DiffusionEngine.swift b/Packages/DiffusionGeneration/Sources/DiffusionEngine.swift
+index 802e14e..f589a1e 100644
+--- a/Packages/DiffusionGeneration/Sources/DiffusionEngine.swift
++++ b/Packages/DiffusionGeneration/Sources/DiffusionEngine.swift
+@@ -250,6 +250,13 @@ public final class DiffusionEngine {
+         /// and only the ones the served config reaches carry the switch — this echo is what makes
+         /// that verifiable from the JSONL instead of by inspection.
+         public let effectiveModuleAblation: ModuleAblation
++
++        // MARK: Session prefix cache (exp-5B) — effective echo
++        /// Prompt tokens whose prefill capture forwards were **actually skipped** this call because
++        /// their committed K/V were taken from a ``SessionPrefixCache`` (whole blocks only). `0`
++        /// without a session, on an incompatible/reset session, and when the call bypassed the
++        /// session. `forwardsEvaluated` is lower by exactly `sessionReusedTokens / blockLength`.
++        public let sessionReusedTokens: Int
+     }
+ 
+     /// Mutable stats shared between the cached entry point's closures and `run` (the capture
+@@ -265,6 +272,8 @@ public final class DiffusionEngine {
+         var flashBlockReuses: Int = 0
+         var stepPendingKVSnapshots: [[(k: MLXArray?, v: MLXArray?)]] = []
+         var selectedBreakStepInBatch: Int? = nil
++        /// Session prefix-cache reuse actually applied this call (exp-5B echo).
++        var sessionReusedTokens: Int = 0
+     }
+ 
+     /// Signature of an injected forward: given the current window ids `[1, W]` and the count of
+diff --git a/Packages/DiffusionGeneration/Sources/SessionPrefixCache.swift b/Packages/DiffusionGeneration/Sources/SessionPrefixCache.swift
+new file mode 100644
+index 0000000..357dfaf
+--- /dev/null
++++ b/Packages/DiffusionGeneration/Sources/SessionPrefixCache.swift
+@@ -0,0 +1,194 @@
++import Foundation
++import MLX
++import DiffusionCore
++import DiffusionModel
++
++/// Cross-call (multi-turn) reuse of committed prefix blocks (exp-5B, engine track B-2).
++///
++/// Holds the committed K/V of the **last** `generateCached(…, session:)` call together with the
++/// token ids they were computed for. The next call reuses the longest leading run of whole
++/// `blockLength` blocks whose ids equal the held ids (capped at the new prompt's full blocks) and
++/// prefills only the rest — in multi-turn chat that is the previous prompt + answer.
++///
++/// **Exactness** `[Inferred: code reading, checked by SessionPrefixCacheTests in FP32]`: a block's
++/// committed K/V is a deterministic function of (model, block length, prefix storage form, the ids
++/// of that block and every block before it). Prefill computes it with `captureAndCommit` — one
++/// B-wide plain cached forward at absolute positions against the already-committed prefix. Every
++/// commit the session accepts was produced by that same computation: generated blocks commit via
++/// the same capture forward, or via the clean-commit skip, which `cleanCommitSkipEligible` allows
++/// only when the settle step was that same plain fresh forward over exactly the committed ids. So
++/// a held block equals what this call's prefill would compute — by induction over blocks, since
++/// block b's K/V depend on blocks < b only through the same held storage. The one feature that
++/// commits anything else is sub-block commit (Option C: n < B-token capture forwards, different
++/// within-block attention); calls using it bypass the session (see ``bypassReason(_:)``).
++///
++/// **Compatibility key** — what changes the K/V function or its storage, so it forces a fresh start:
++/// model instance, `blockLength`, `kvQuantization`, `kvPoolEnabled`, and mask semantics (the
++/// cached path is `.strict`-only today; the field is in the key so adding a semantics parameter to
++/// the cached path cannot silently reuse across semantics). Deliberately **not** in the key —
++/// they change *which* tokens get generated, never the K/V of given tokens: thresholds, nBuf
++/// (MultiBD commits still go through the B-wide capture forward), speculation policy and
++/// `speculationK`, dynamic τ, JOT / FlashBlock / CSA2 / Elastic / router reuse / ICE (all only
++/// shape the denoising forwards; the commit stays a plain capture or an allowlisted skip).
++///
++/// **Memory**: the session keeps the last call's `ExactPrefixCache` storage alive between calls —
++/// the same bytes that call already allocated, `2 · layers · nKV · headDim · bytesPerElement` per
++/// token for FP16 (40,960 B/tok on LLaDA2.1-mini, `[Sourced: KVCacheQuantization doc]`), less
++/// under KV quantization (e.g. 16,640 B/tok k8v4, 12,160 B/tok kivi4). With the pool on, the
++/// allocation is the pool capacity (geometric growth), not the committed length. The natural
++/// bound is one call's committed length (≤ prompt + genLength, rounded up to B); set
++/// ``maxCachedTokens`` for a hard cap (keeps the leading whole blocks).
++///
++/// **Threading**: one call at a time. State hand-over is lock-protected, and a call *takes* the
++/// storage out of the session for its duration, so a concurrent second call sees an empty session
++/// (correct, just no reuse) instead of racing on shared buffers.
++public final class SessionPrefixCache: @unchecked Sendable {
++    /// Configuration a held store was built under. Any difference ⇒ the store is dropped.
++    struct CompatibilityKey: Equatable {
++        let model: ObjectIdentifier
++        let layerCount: Int
++        let blockLength: Int
++        let kvQuantization: KVCacheQuantization
++        let kvPoolEnabled: Bool
++        let maskSemantics: BlockDiffusionMask.Semantics
++    }
++
++    /// Optional hard cap on held tokens (rounded down to whole blocks after each call). `nil` = the
++    /// last call's full committed length.
++    public let maxCachedTokens: Int?
++
++    private let lock = NSLock()
++    private var store: ExactPrefixCache?
++    private var tokens: [Int] = []
++    private var key: CompatibilityKey?
++    /// Weak so a session never keeps a ~9.5 GB model alive; a deallocated model ⇒ incompatible.
++    private weak var model: LLaDA2MoeModel?
++
++    /// Number of calls that reused ≥ 1 block / started fresh because of an incompatible key /
++    /// bypassed the session entirely — diagnostics for logs and tests.
++    public private(set) var reuseCount = 0
++    public private(set) var incompatibleResetCount = 0
++    public private(set) var bypassCount = 0
++
++    public init(maxCachedTokens: Int? = nil) {
++        precondition(maxCachedTokens.map { $0 >= 0 } ?? true, "maxCachedTokens must be >= 0")
++        self.maxCachedTokens = maxCachedTokens
++    }
++
++    /// Tokens whose K/V are currently held.
++    public var cachedTokenCount: Int {
++        lock.lock(); defer { lock.unlock() }
++        return tokens.count
++    }
++
++    /// The ids the held K/V belong to (diagnostic).
++    public var cachedTokens: [Int] {
++        lock.lock(); defer { lock.unlock() }
++        return tokens
++    }
++
++    /// Drop everything.
++    public func reset() {
++        lock.lock(); defer { lock.unlock() }
++        store = nil
++        tokens = []
++        key = nil
++        model = nil
++    }
++
++    /// Why a call with these params cannot use (read or write) a session, or `nil` if it can.
++    public static func bypassReason(_ params: GenerationParams) -> String? {
++        if params.subBlockCommit {
++            return "subBlockCommit (Option C commits n<B-token segments whose K/V differ from a "
++                + "B-wide prefill capture)"
++        }
++        return nil
++    }
++
++    // MARK: - Engine hand-over (internal)
++
++    /// Outcome of ``checkout``: storage to seed the call's cache with (already truncated to
++    /// `reusedTokens`), or nothing.
++    struct Checkout {
++        let reusedTokens: Int
++        let store: ExactPrefixCache?
++        let key: CompatibilityKey
++    }
++
++    /// Takes the reusable part of the held store out of the session (the session is left empty
++    /// until ``checkin``). Pure host-side work: an `[Int]` prefix compare plus lazy slices —
++    /// no GPU readback.
++    func checkout(prompt: [Int], key newKey: CompatibilityKey, model newModel: LLaDA2MoeModel)
++        -> Checkout
++    {
++        lock.lock(); defer { lock.unlock() }
++        let B = newKey.blockLength
++        guard let held = store, key == newKey, model === newModel else {
++            if store != nil { incompatibleResetCount += 1 }
++            store = nil; tokens = []; key = nil; model = nil
++            return Checkout(reusedTokens: 0, store: nil, key: newKey)
++        }
++        // Longest leading run of whole blocks equal to the held ids, never past the prompt's full
++        // blocks (the prompt tail shares its block with generation and is not prefilled).
++        let maxBlocks = min(prompt.count / B, tokens.count / B, held.committedLength / B)
++        var reuseBlocks = 0
++        while reuseBlocks < maxBlocks {
++            let lo = reuseBlocks * B, hi = lo + B
++            if prompt[lo ..< hi].elementsEqual(tokens[lo ..< hi]) { reuseBlocks += 1 } else { break }
++        }
++        let reused = reuseBlocks * B
++        store = nil; tokens = []; key = nil; model = nil
++        guard reused > 0 else {
++            return Checkout(reusedTokens: 0, store: nil, key: newKey)
++        }
++        for layer in held.layers { layer.truncateCommitted(to: reused) }
++        reuseCount += 1
++        return Checkout(reusedTokens: reused, store: held, key: newKey)
++    }
++
++    /// Hands a finished call's cache to the session. `committedTokens` must be exactly the ids
++    /// whose K/V `cache` holds (`Output.finalSequence`, all of which was committed).
++    func checkin(cache: ExactPrefixCache, committedTokens: [Int], key newKey: CompatibilityKey,
++                 model newModel: LLaDA2MoeModel)
++    {
++        lock.lock(); defer { lock.unlock() }
++        // Defensive: a store whose length disagrees with its ids is never kept.
++        guard cache.committedLength == committedTokens.count,
++              cache.layers.allSatisfy({ $0.committedLength == committedTokens.count })
++        else {
++            store = nil; tokens = []; key = nil; model = nil
++            return
++        }
++        var keep = committedTokens.count
++        if let cap = maxCachedTokens {
++            keep = min(keep, (cap / newKey.blockLength) * newKey.blockLength)
++        }
++        guard keep > 0 else {
++            store = nil; tokens = []; key = nil; model = nil
++            return
++        }
++        // Drop per-call transient state so the session holds only committed K/V (the next call
++        // seeds a *fresh* per-call cache from this storage; FlashBlock/pending state never crosses).
++        for layer in cache.layers {
++            layer.pendingKeys = nil
++            layer.pendingValues = nil
++            layer.attnOutPast = nil
++            layer.logsumexp = nil
++            layer.flashBlockRunner = nil
++            layer.blockTables = nil
++            layer.ctxLens = nil
++        }
++        if keep < committedTokens.count {
++            for layer in cache.layers { layer.truncateCommitted(to: keep) }
++        }
++        store = cache
++        tokens = Array(committedTokens.prefix(keep))
++        key = newKey
++        model = newModel
++    }
++
++    func noteBypass() {
++        lock.lock(); defer { lock.unlock() }
++        bypassCount += 1
++    }
++}
+diff --git a/Plans/exp5b-notes-impl-?.md b/Plans/exp5b-notes-impl-?.md
+new file mode 100644
+index 0000000..149cc29
+--- /dev/null
++++ b/Plans/exp5b-notes-impl-?.md
+@@ -0,0 +1,151 @@
++# Exp-5B notes — impl-?: cross-turn session prefix cache
++
++**Author**: impl-? (Claude MODEL), 2026-10-18. **Host**: dev M1 16 GB, toy FP32 fixtures only (no real model loaded).
++**Branch**: `exp5b-impl-?` in worktree `.claude/worktrees/agent-ae8403ea4fa3150dc`, based on `5f05bf9`.
++
++## 0. Setup deviation (read first)
++
++The worktree I was given was checked out at `16794ec` (`main`, GPU-control commits). That tree has no
++`KVCacheCompression.swift`, `KVCachePool.swift`, `cleanCommitSkipEligible` or `Tools/compute-gate.sh` — the
++brief cannot be followed on it. The pre-registered base (`exp5b-MODEL-vs-MODEL-logbook.md` §7) is `5f05bf9`
++(`kernel` branch). A `git reset --hard` was refused by the sandbox, so I created branch **`exp5b-impl-?` at
++`5f05bf9`** (the original worktree branch `worktree-agent-ae8403ea4fa3150dc` is untouched at `16794ec`). All
++work and the commit are on `exp5b-impl-?`. `[Sourced: git log; diff -rq against the main checkout showed the
++source trees then matched, except the orchestrator's uncommitted LLaDABench.swift]`.
++
++## 1. Design
++
++- **`SessionPrefixCache`** (new, `Packages/DiffusionGeneration/Sources/SessionPrefixCache.swift`) owns the last
++  call's `ExactPrefixCache` *storage* + the ids it was computed for + a compatibility key.
++- **Checkout** (start of `generateCached(…, session:)`, after all preconditions): compare the prompt with the held
++  ids block by block; reuse `r` = longest leading run of whole equal blocks, capped at `prompt.count / B` and at
++  the held length. The held layers are truncated to `r` tokens and their storage is **moved** (not shared) into
++  the call's fresh `ExactPrefixCache` (`LayerKVCache.adoptCommittedStorage`). The prefill loop starts at block
++  `r / B`. The session is empty for the duration of the call.
++- **Checkin** (after `run`): the session takes the call's cache and `Output.finalSequence` (== exactly the
++  committed ids — `run`'s `committedIds`; checked against every layer's `committedLength`, mismatch ⇒ session
++  dropped). Per-call transient state (pending K/V, FlashBlock accumulators/runner/tables) is cleared first.
++- **Storage truncation** for every form `LayerKVCache` holds: raw (slice axis 2), pool (`KVCachePool.truncate` —
++  logical length only, tail overwritten in place on next commit), `CompressedKVTensor.truncated(toLength:)`
++  token-major (slice axis 2) and per-channel kivi4 Keys (slice axis 3 to `n·bits/32` packed / `n/g` groups;
++  precondition `n % groupSize == 0`). Length 0 frees the storage.
++- `Metrics.sessionReusedTokens` (+ `RunStats.sessionReusedTokens`) is set from what was actually adopted;
++  `forwardsEvaluated` drops by exactly `sessionReusedTokens / B` (asserted in every test turn).
++- Old `generateCached(prompt:params:iceTemplate:streamBlock:)` now forwards to the new overload with
++  `session: nil`; that path skips every session branch (no behaviour change).
++
++## 2. Exactness argument `[Inferred: code reading; verified FP32 toy + quantized-KV toy, not 4-bit weights]`
++
++Block b's committed K/V is a deterministic function of (model weights, B, prefix storage form, ids of blocks
++0…b). Prefill computes it with `captureAndCommit`: one B-wide plain cached forward (`model(ids, positionIds:,
++caches:)`, mask nil, frozen nil, no router reuse/ablation) at absolute positions against the committed prefix.
++Every commit the session can hold came from that same computation:
++1. prompt blocks — the same `captureAndCommit`;
++2. generated blocks — `captureAndCommit` over the final ids, or the clean-commit skip, which
++   `cleanCommitSkipEligible` (allowlist) permits only when the settle step was that same plain fresh forward
++   over exactly the committed ids (same overload; `frozen` is nil unless JOT/SureLock, both excluded);
++3. MultiBD (nBuf=2) commits still go through `onSettled` → B-wide `captureAndCommit` against the prefix only
++   (skip ineligible at nBuf≠1), so they are canonical too.
++By induction over blocks (block b sees blocks < b only through the same held storage), a held block is
++bit-identical to what this call's prefill computes, **given MLX determinism for identical op sequences at
++identical shapes/dtypes** `[Inferred]`. The one exception, **sub-block commit** (Option C: n<B-token capture
++forwards — different within-block attention and non-block-aligned lengths), bypasses the session.
++
++Residual risk for the 4-bit artefact `[Speculative]`: the clean-commit skip's K/V comes from a step forward that
++was built inside a K-step speculative graph and also produced logits; I rely on MLX evaluating each op with the
++same kernel regardless of graph context (no `compile` is used on this path). The hidden real-model B1 test is
++the authority here; the FP32 toy tests at K=1 and K=4 with skip on and off pass.
++
++## 3. Decisions
++
++| Decision | Reason |
++|---|---|
++| Compatibility key = model instance (weak ref + `ObjectIdentifier`), layerCount, `blockLength`, `kvQuantization`, `kvPoolEnabled`, mask semantics (`.strict` constant) | These change the K/V function or its storage. Pool is included conservatively: the pool view is a strided slice of a capacity-sized buffer, and I did not want to depend on attention kernels being stride-invariant bit-for-bit. Mask semantics is constant today (cached path is `.strict`-only); it is in the key so a future parameter cannot silently mix. |
++| Incompatible key ⇒ **start fresh** (drop the store, run without reuse, then hold this call's blocks) | The new configuration is what the client is using now; keeping the stale store would never be reused. Counted in `incompatibleResetCount`. |
++| `subBlockCommit` ⇒ **bypass** (no read, no write, session untouched; `bypassCount`) | Its commits are not canonical B-wide K/V; the existing store is still valid for compatible later calls. |
++| NOT in the key: thresholds/mode, nBuf, speculation policy, `speculationK`, dyn-τ, JOT/FlashBlock/CSA2/Elastic/router reuse/capacity/ICE/credit, `skipRedundantCommitForward` | They change which tokens are generated, not the K/V of given tokens (commit is always a plain capture or an allowlisted skip). nBuf=2→1 mixing is tested. |
++| Move storage instead of sharing | `KVCachePool` uses `mlx_slice_update`; with a second reference the buffer could not be donated (silent copy per commit). Moving also makes a concurrent call see an empty session instead of racing. |
++| Weak model reference | A session must never keep a 9.5 GB model alive; a deallocated model ⇒ incompatible. |
++| `@unchecked Sendable` + `NSLock` around hand-over | The server is single-request (RequestQueue) but handlers run in tasks; the lock makes misuse safe (no reuse) rather than racy. |
++| Reuse capped at `prompt.count / B` even when held ids match further | Brief + engine semantics: the prompt tail shares its block with generation and is never prefilled. |
++| Optional `maxCachedTokens` (default nil) | Hard cap, rounded down to whole blocks after each call. |
++
++## 4. Cost
++
++- **Host / sync**: per call, one `[Int]` prefix compare (≤ prompt.count elements) and lazy slices. **No new GPU
++  readbacks, none per step.** The denoising loop is unchanged.
++- **Memory** `[Sourced: KVCacheQuantization doc for bytes/token]`: the session keeps the *last* call's prefix
++  store alive between calls — bytes the call already allocated. FP16: `2·layers·nKV·headDim·2` = **40,960 B/token**
++  on LLaDA2.1-mini (≈ 40 MB per 1k tokens); k8v4 16,640; kivi4 12,160; fp8 21,760 B/token. With the pool, the
++  footprint is the pool capacity (geometric growth, truncation does not shrink it). Bound: one call's committed
++  length (≤ prompt + genLength rounded up to B); `maxCachedTokens` gives a hard cap. Truncated raw/compressed
++  slices keep the old buffer alive only until the next commit concatenates.
++
++## 5. Server
++
++`Tools/diffusion-server`: `--session-cache` or `NEODIFFUSION_SESSION_CACHE=1` (default OFF; startup prints
++`Session prefix cache: ON|off`). One `SessionPrefixCache` for the process; blocking and streaming handlers pass it
++and print `[Session] <id>: reused R/P prompt tokens (forwardsEvaluated=N), session now holds H tokens (…)` from
++the engine's effective echo. Flag off ⇒ the exact pre-existing `generateCached` calls. Not run (needs the model).
++
++## 6. Tests
++
++`Tests/DiffusionGenerationTests/SessionPrefixCacheTests.swift` (8 tests). Every session turn is compared against
++the same call without a session: `finalSequence`, `tokens`, `blockCommits`, `stepsPerBlock` identical; reuse echo
++equals an independent re-statement of the rule; `forwardsEvaluated` lower by exactly reused/B; the session holds
++the call's committed ids.
++- `testMultiTurnExactnessK1AndK4` — 4 fixture seeds (Q/S, eos on/off) × K∈{1,4} × clean-commit skip on/off × 3 turns.
++- `testMultiBDCompatibleAndExact` — nBuf=2 turn then nBuf=1 turn reusing it.
++- `testDivergedAndPartialPrefixes` — divergence inside block 1, re-convergence, divergence at token 0, prompt a
++  strict prefix of held ids, block-aligned prompt, sub-block prompt.
++- `testIncompatibleParamsStartFresh` — B 16→8, pool toggle, reuse resumes, other model instance.
++- `testSubBlockCommitBypassesSession` — bypass, session untouched, later compatible reuse.
++- `testResetAndCap` — reset, `maxCachedTokens`.
++- `testQuantizedKVAndPoolMultiTurnExactness` — seeded random toy (head_dim 64, B=32) for k8v4, kivi4 (per-channel
++  Keys), pool (capacity 32, forced growth) × K∈{1,4}: 3-turn chats + divergence truncation; quant-mode change ⇒ fresh.
++- `testTruncateAndAdoptEveryStorageForm` — raw / pool / k8v4 / kivi4 / fp4g32: commit 4 blocks, truncate to
++  {0,1,2,4} blocks, move, append; storage (incl. packed + scales) bit-equal to a cache built from the kept blocks.
++
++**Mutation check**: with the token comparison disabled (reuse every block regardless of ids),
++`testDivergedAndPartialPrefixes` failed with 18 failures, including `finalSequence differs` — the identity
++assertions detect wrong K/V, not just a wrong echo. Reverted.
++
++Commands (all through `Tools/compute-gate.sh impl-?-*`, `NEODIFFUSION_LOOP_FIXTURE_DIR=…/scratch/loop_fixtures`):
++- `swift build --build-tests` → `Build complete!`; `Tools/seed-metallib.sh` once.
++- `swift test --filter SessionPrefixCacheTests` → first run `Executed 8 tests, with 1 failure` (my helper did
++  not apply the `maxCachedTokens` cap to its expectation — test bug, fixed); after the fix
++  `swift test --filter SessionPrefixCacheTests/testResetAndCap` → `Executed 1 test, with 0 failures`.
++- Full suite: see §6a.
++
++### 6a. Full suite
++
++`Tools/compute-gate.sh impl-?-fulltest swift test > full1.log 2>&1` (exit 1), the three per-bundle
++`Test Suite 'All tests'` lines:
++- DiffusionKernelsTests: `Executed 1 test, with 0 failures (0 unexpected)`
++- DiffusionGenerationTests: `Executed 105 tests, with 26 tests skipped and 1 failure (0 unexpected)`
++- DiffusionCoreTests: `Executed 58 tests, with 32 tests skipped and 0 failures (0 unexpected)`
++
++Total 164 executed (baseline 156 + my 8), 58 skipped, **1 failure**: `LLaDA2MoeTokenizerTests.testTokenizerParity`
++— `Fixture file not found at ./scratch/tokenizer_test_fixtures.json`. That test hard-codes a relative path to a
++git-ignored fixture that does not exist in a worktree (rule 3: no `scratch/` here); it touches no code I changed.
++It is environmental, but I could not prove it green in this worktree. The higher skip count vs the baseline
++(24) has the same cause (fixture-gated tests using `./scratch/...` paths). All 8 SessionPrefixCacheTests
++passed in this run. Not re-run (budget: at most two full runs).
++
++## 7. Limitations / risks
++
++- **4-bit weights not exercised** (rule 2). Bit-exactness there rests on §2's argument; the clean-commit-skip
++  path is the part I would watch in the hidden B1 test.
++- `prefillSeconds` is lazy-blurred unless `instrument: true` (unchanged behaviour); use forwards/total wall-clock.
++- Session holds only the *last* conversation (one branch). A client alternating between two conversations gets
++  no reuse; a multi-entry (radix/LRU) store is out of scope.
++- The server session is process-wide and unauthenticated: requests from different clients share it. Exactness
++  makes that safe for outputs, but timing reveals whether a prefix was cached (a side channel) — fine for the
++  local single-user server, not for a multi-tenant deployment.
++- Pool truncation does not shrink capacity.
++
++## 8. Where I think the brief is off
++
++- "nBuf≠1/MultiBD commits" is listed as an incompatibility to think about; by code reading MultiBD commits are
++  canonical B-wide capture forwards, so I kept them compatible (tested).
++- The brief's worktree was not at the pre-registered base (§0).
+diff --git a/Tests/DiffusionGenerationTests/SessionPrefixCacheTests.swift b/Tests/DiffusionGenerationTests/SessionPrefixCacheTests.swift
+new file mode 100644
+index 0000000..e4d5904
+--- /dev/null
++++ b/Tests/DiffusionGenerationTests/SessionPrefixCacheTests.swift
+@@ -0,0 +1,400 @@
++import XCTest
++import MLX
++import MLXNN
++import DiffusionCore
++@testable import DiffusionModel
++@testable import DiffusionGeneration
++
++/// exp-5B (impl-?): cross-turn ``SessionPrefixCache``. The contract under test is **exactness**:
++/// a call with a session must produce exactly the output of the same call without one, while
++/// skipping `sessionReusedTokens / B` prefill forwards. FP32 toy fixtures (loop-parity weights,
++/// B=16) for the uncompressed / pool paths; a seeded random toy with head_dim 64 and B=32 for the
++/// quantized-KV paths (the fixture's head_dim 32 is below the group-64 quantizer's minimum, and
++/// kivi4's per-channel Key layout needs B to be a multiple of its 32-token group).
++final class SessionPrefixCacheTests: XCTestCase {
++
++    var traces: DenoisingLoopParityTests.Traces!
++    var model: LLaDA2MoeModel!
++    var weightsURL: URL!
++    var configJSON: [String: Any]!
++
++    override func setUpWithError() throws {
++        let dir = DenoisingLoopParityTests.fixtureDir
++        weightsURL = dir.appendingPathComponent("weights.safetensors")
++        let tracesURL = dir.appendingPathComponent("traces.json")
++        let manifestURL = dir.appendingPathComponent("manifest.json")
++        try XCTSkipUnless(
++            FileManager.default.fileExists(atPath: tracesURL.path),
++            "Loop fixtures missing at \(dir.path) — run: python3 Tools/generate_loop_fixtures.py")
++        let manifest = try JSONDecoder().decode(
++            DenoisingLoopParityTests.Manifest.self, from: Data(contentsOf: manifestURL))
++        traces = try JSONDecoder().decode(
++            DenoisingLoopParityTests.Traces.self, from: Data(contentsOf: tracesURL))
++        let raw = try JSONSerialization.jsonObject(with: Data(contentsOf: manifestURL)) as! [String: Any]
++        configJSON = raw["config"] as? [String: Any]
++        let dm = DiffusionModel(config: manifest.config)
++        try dm.loadWeights(from: weightsURL)
++        model = dm.model
++    }
++
++    // MARK: - Helpers
++
++    /// Independent re-statement of the reuse rule: longest leading run of whole blocks equal to
++    /// the held ids, capped at the prompt's full blocks.
++    func expectedReuse(prompt: [Int], held: [Int], B: Int) -> Int {
++        let maxBlocks = min(prompt.count / B, held.count / B)
++        var n = 0
++        while n < maxBlocks, prompt[(n * B) ..< ((n + 1) * B)] == held[(n * B) ..< ((n + 1) * B)] {
++            n += 1
++        }
++        return n * B
++    }
++
++    func assertIdentical(_ a: DiffusionEngine.Output, _ b: DiffusionEngine.Output, _ what: String,
++                         file: StaticString = #filePath, line: UInt = #line) {
++        XCTAssertEqual(a.finalSequence, b.finalSequence, "\(what): finalSequence differs", file: file, line: line)
++        XCTAssertEqual(a.tokens, b.tokens, "\(what): tokens differ", file: file, line: line)
++        XCTAssertEqual(a.blockCommits, b.blockCommits, "\(what): blockCommits differ", file: file, line: line)
++        XCTAssertEqual(a.stepsPerBlock, b.stepsPerBlock, "\(what): stepsPerBlock differ", file: file, line: line)
++    }
++
++    /// Runs one session call and the same call without a session; asserts identity, the reuse
++    /// echo, the forward saving, and what the session holds afterwards. Returns the output.
++    @discardableResult
++    func checkTurn(engine: DiffusionEngine, session: SessionPrefixCache, prompt: [Int],
++                   params: GenerationParams, expectReuse: Int? = nil, _ what: String,
++                   file: StaticString = #filePath, line: UInt = #line) -> DiffusionEngine.Output {
++        let B = params.blockLength
++        let held = session.cachedTokens
++        let predicted = expectReuse ?? expectedReuse(prompt: prompt, held: held, B: B)
++        let withS = engine.generateCached(prompt: prompt, params: params, session: session)
++        let without = engine.generateCached(prompt: prompt, params: params)
++        assertIdentical(withS, without, what, file: file, line: line)
++        XCTAssertEqual(withS.metrics.sessionReusedTokens, predicted, "\(what): reuse echo", file: file, line: line)
++        XCTAssertEqual(without.metrics.sessionReusedTokens, 0, "\(what): no-session echo must be 0", file: file, line: line)
++        XCTAssertEqual(withS.metrics.forwardsEvaluated,
++                       without.metrics.forwardsEvaluated - predicted / B,
++                       "\(what): exactly reused/B prefill forwards must be skipped", file: file, line: line)
++        XCTAssertEqual(withS.metrics.committedTokensCount, without.metrics.committedTokensCount,
++                       "\(what): committed length", file: file, line: line)
++        let keep = session.maxCachedTokens.map { ($0 / B) * B } ?? Int.max
++        XCTAssertEqual(session.cachedTokens, Array(withS.finalSequence.prefix(keep)),
++                       "\(what): session must hold this call's committed ids", file: file, line: line)
++        return withS
++    }
++
++    /// A 3-turn chat: turn k+1 = turn k prompt + answer + new user tokens.
++    func runConversation(engine: DiffusionEngine, params: GenerationParams, firstPrompt: [Int],
++                         userTurns: [[Int]], _ tag: String) {
++        let session = SessionPrefixCache()
++        var prompt = firstPrompt
++        var totalReused = 0
++        for (t, user) in ([[]] + userTurns).enumerated() {
++            prompt += user
++            let out = checkTurn(engine: engine, session: session, prompt: prompt, params: params,
++                                "\(tag) turn \(t)")
++            totalReused += out.metrics.sessionReusedTokens
++            prompt += out.tokens
++        }
++        XCTAssertGreaterThan(totalReused, 0, "\(tag): the conversation never reused a block (test is vacuous)")
++    }
++
++    let userTurns: [[Int]] = [Array(100 ..< 113), Array(200 ..< 221)]
++
++    // MARK: - Multi-turn exactness (FP32 fixtures)
++
++    func testMultiTurnExactnessK1AndK4() throws {
++        let seeds = traces.cases.filter { ["p20_q_noeos", "p33_s_eos", "p33_q_eos", "p16_s_noeos"].contains($0.name) }
++        XCTAssertEqual(seeds.count, 4)
++        for k in [1, 4] {
++            let engine = DiffusionEngine(model: model, speculationK: k)
++            for c in seeds {
++                // Clean-commit skip on (default) and off (legacy capture on every commit).
++                for skip in [true, false] {
++                    var p = c.params.toGenerationParams()
++                    p.skipRedundantCommitForward = skip
++                    runConversation(engine: engine, params: p, firstPrompt: c.prompt,
++                                    userTurns: userTurns, "\(c.name) K=\(k) skip=\(skip)")
++                }
++            }
++        }
++    }
++
++    /// MultiBD (nBuf=2) commits through the same B-wide capture forward, so it is *compatible*;
++    /// mixing nBuf between turns must still be exact.
++    func testMultiBDCompatibleAndExact() throws {
++        let c = try XCTUnwrap(traces.cases.first { $0.name == "p20_q_noeos" })
++        let engine = DiffusionEngine(model: model, speculationK: 4)
++        let session = SessionPrefixCache()
++        var p1 = c.params.toGenerationParams()
++        p1.nBuf = 2
++        p1.tauAdd = 0.1
++        let o1 = checkTurn(engine: engine, session: session, prompt: c.prompt, params: p1, "nBuf=2 turn 0")
++        let prompt2 = c.prompt + o1.tokens + userTurns[0]
++        let o2 = checkTurn(engine: engine, session: session, prompt: prompt2,
++                           params: c.params.toGenerationParams(), "nBuf=1 after nBuf=2")
++        XCTAssertGreaterThan(o2.metrics.sessionReusedTokens, 0)
++    }
++
++    // MARK: - Partial / diverged prefixes
++
++    func testDivergedAndPartialPrefixes() throws {
++        let c = try XCTUnwrap(traces.cases.first { $0.name == "p33_q_noeos" })
++        let p = c.params.toGenerationParams()
++        let B = p.blockLength
++        let engine = DiffusionEngine(model: model, speculationK: 4)
++        let session = SessionPrefixCache()
++        let o1 = checkTurn(engine: engine, session: session, prompt: c.prompt, params: p,
++                           expectReuse: 0, "turn 0 (empty session)")
++        let base = c.prompt + o1.tokens + userTurns[0]
++
++        // Diverge inside block 1 → only block 0 reusable (truncation of a longer held store).
++        var div = base
++        div[B + 3] = (div[B + 3] + 1) % 900
++        checkTurn(engine: engine, session: session, prompt: div, params: p, expectReuse: B,
++                  "diverged in block 1")
++
++        // Re-send the original continuation: session now holds `div`'s run, so blocks equal up to
++        // block 1 only → reuse B again, and the held tail is truncated + regrown.
++        checkTurn(engine: engine, session: session, prompt: base, params: p, expectReuse: B,
++                  "back to base after divergence")
++
++        // Diverge at token 0 → nothing reusable.
++        var div0 = base
++        div0[0] = (div0[0] + 1) % 900
++        checkTurn(engine: engine, session: session, prompt: div0, params: p, expectReuse: 0,
++                  "diverged at token 0")
++
++        // Prompt is a strict prefix of the held ids (regenerate): reuse capped at the prompt's
++        // full blocks, never into the block the prompt tail shares with generation.
++        let regen = Array(div0.prefix(2 * B + 5))
++        checkTurn(engine: engine, session: session, prompt: regen, params: p,
++                  expectReuse: 2 * B, "strict prefix of held ids")
++
++        // Exactly block-aligned prompt equal to held ids: all its blocks reused.
++        let aligned = Array(regen.prefix(2 * B))
++        checkTurn(engine: engine, session: session, prompt: aligned, params: p,
++                  expectReuse: 2 * B, "block-aligned prompt")
++
++        // Prompt shorter than one block → no full prompt block → reuse 0.
++        checkTurn(engine: engine, session: session, prompt: Array(aligned.prefix(B - 1)), params: p,
++                  expectReuse: 0, "sub-block prompt")
++    }
++
++    // MARK: - Incompatible configurations
++
++    func testIncompatibleParamsStartFresh() throws {
++        let c = try XCTUnwrap(traces.cases.first { $0.name == "p33_s_noeos" })
++        let engine = DiffusionEngine(model: model, speculationK: 4)
++        let session = SessionPrefixCache()
++        let p16 = c.params.toGenerationParams()
++        let o1 = checkTurn(engine: engine, session: session, prompt: c.prompt, params: p16, "B=16")
++        let prompt2 = c.prompt + o1.tokens + userTurns[0]
++
++        // Block length change → fresh start (would otherwise match plenty of 8-token blocks).
++        var p8 = p16
++        p8.blockLength = 8
++        checkTurn(engine: engine, session: session, prompt: prompt2, params: p8, expectReuse: 0, "B=8 after B=16")
++        XCTAssertEqual(session.incompatibleResetCount, 1)
++
++        // Pool storage toggle → fresh start.
++        var pPool = p8
++        pPool.kvPoolEnabled = true
++        checkTurn(engine: engine, session: session, prompt: prompt2, params: pPool, expectReuse: 0, "pool after raw")
++        XCTAssertEqual(session.incompatibleResetCount, 2)
++
++        // Same config again → reuse resumes under the new key.
++        let o4 = checkTurn(engine: engine, session: session, prompt: prompt2, params: pPool, "pool again")
++        XCTAssertGreaterThan(o4.metrics.sessionReusedTokens, 0)
++
++        // Different model instance (same weights) → fresh start.
++        let dm2 = DiffusionModel(config: model.config)
++        try dm2.loadWeights(from: weightsURL)
++        let engine2 = DiffusionEngine(model: dm2.model, speculationK: 4)
++        checkTurn(engine: engine2, session: session, prompt: prompt2, params: pPool, expectReuse: 0,
++                  "other model instance")
++        XCTAssertEqual(session.incompatibleResetCount, 3)
++    }
++
++    /// Sub-block commit (Option C) commits n<B-token segments → bypass: no reuse, session untouched.
++    func testSubBlockCommitBypassesSession() throws {
++        let c = try XCTUnwrap(traces.cases.first { $0.name == "p33_q_noeos" })
++        let engine = DiffusionEngine(model: model, speculationK: 1)
++        let session = SessionPrefixCache()
++        let base = c.params.toGenerationParams()
++        let o1 = checkTurn(engine: engine, session: session, prompt: c.prompt, params: base, "plain turn")
++        let heldBefore = session.cachedTokens
++
++        var p = base
++        p.jotEnabled = true
++        p.jotFaithful = true
++        p.subBlockCommit = true
++        p.subBlockMinPrefix = 4
++        p.jotK = 1
++        p.jotThreshold = 0.5
++        XCTAssertNotNil(SessionPrefixCache.bypassReason(p))
++        let prompt2 = c.prompt + o1.tokens + userTurns[0]
++        let withS = engine.generateCached(prompt: prompt2, params: p, session: session)
++        let without = engine.generateCached(prompt: prompt2, params: p)
++        assertIdentical(withS, without, "subBlockCommit bypass")
++        XCTAssertEqual(withS.metrics.sessionReusedTokens, 0)
++        XCTAssertEqual(session.bypassCount, 1)
++        XCTAssertEqual(session.cachedTokens, heldBefore, "bypass must leave the session untouched")
++
++        // The untouched session still serves a later compatible call.
++        let o3 = checkTurn(engine: engine, session: session, prompt: prompt2, params: base, "after bypass")
++        XCTAssertGreaterThan(o3.metrics.sessionReusedTokens, 0)
++    }
++
++    // MARK: - Reset / cap / no-session
++
++    func testResetAndCap() throws {
++        let c = try XCTUnwrap(traces.cases.first { $0.name == "p20_s_noeos" })
++        let p = c.params.toGenerationParams()
++        let engine = DiffusionEngine(model: model, speculationK: 4)
++        let session = SessionPrefixCache()
++        XCTAssertEqual(session.cachedTokenCount, 0)
++        let o1 = checkTurn(engine: engine, session: session, prompt: c.prompt, params: p, expectReuse: 0, "turn 0")
++        XCTAssertEqual(session.cachedTokenCount, o1.finalSequence.count)
++        session.reset()
++        XCTAssertEqual(session.cachedTokenCount, 0)
++        XCTAssertTrue(session.cachedTokens.isEmpty)
++        let prompt2 = c.prompt + o1.tokens + userTurns[0]
++        checkTurn(engine: engine, session: session, prompt: prompt2, params: p, expectReuse: 0, "after reset")
++        XCTAssertGreaterThan(session.cachedTokenCount, 0)
++
++        // Hard cap: 40 tokens → 2 whole blocks of 16 kept.
++        let capped = SessionPrefixCache(maxCachedTokens: 40)
++        let oc = engine.generateCached(prompt: prompt2, params: p, session: capped)
++        XCTAssertEqual(capped.cachedTokenCount, 32)
++        XCTAssertEqual(capped.cachedTokens, Array(oc.finalSequence.prefix(32)))
++        checkTurn(engine: engine, session: capped, prompt: prompt2 + oc.tokens, params: p,
++                  expectReuse: 32, "capped session")
++    }
++
++    // MARK: - Quantized KV + pool (seeded random toy, head_dim 64, B = 32)
++
++    /// Seeded random toy with head_dim 64 (fixture topology otherwise). Weights are N(0, σ²) with
++    /// norms around 1 — the point is a deterministic model whose argmax is sensitive to tiny K/V
++    /// differences, not plausible text.
++    func randomHeadDim64Model() throws -> LLaDA2MoeModel {
++        var cfg = configJSON!
++        cfg["head_dim"] = 64
++        let data = try JSONSerialization.data(withJSONObject: cfg)
++        let config = try JSONDecoder().decode(LLaDA2MoeConfig.self, from: data)
++        let dm = DiffusionModel(config: config)
++        var flat: [(String, MLXArray)] = []
++        for (i, (name, a)) in dm.model.parameters().flattened().enumerated() {
++            let key = MLXRandom.key(UInt64(1000 + i))
++            let noise = MLXRandom.normal(a.shape, key: key).asType(a.dtype)
++            if name.contains("norm") {
++                flat.append((name, MLXArray.ones(a.shape, dtype: a.dtype) + 0.1 * noise))
++            } else {
++                flat.append((name, 0.08 * noise))
++            }
++        }
++        dm.model.update(parameters: ModuleParameters.unflattened(flat))
++        eval(dm.model.parameters())
++        return dm.model
++    }
++
++    func testQuantizedKVAndPoolMultiTurnExactness() throws {
++        let m = try randomHeadDim64Model()
++        let prompt1 = (0 ..< 70).map { ($0 * 37 + 11) % 900 }
++        for (mode, pool) in [(KVCacheQuantization.k8v4, false), (.kivi4, false), (.none, true)] {
++            for k in [1, 4] {
++                var p = GenerationParams.mode(.q, blockLength: 32, genLength: 64,
++                                              maskId: traces.maskId, eosId: traces.eosId)
++                p.kvQuantization = mode
++                p.kvPoolEnabled = pool
++                p.kvPoolCapacity = 32   // force geometric growth across turns
++                let engine = DiffusionEngine(model: m, speculationK: k)
++                let tag = "\(mode.rawValue) pool=\(pool) K=\(k)"
++                runConversation(engine: engine, params: p, firstPrompt: prompt1,
++                                userTurns: [Array(300 ..< 337), Array(400 ..< 410)], tag)
++
++                // Divergence truncation on this storage form: hold a long run, then diverge in
++                // block 1 → keep exactly block 0.
++                let session = SessionPrefixCache()
++                let o = checkTurn(engine: engine, session: session, prompt: prompt1, params: p,
++                                  expectReuse: 0, "\(tag) div setup")
++                var div = prompt1 + o.tokens + Array(300 ..< 310)
++                div[40] = (div[40] + 1) % 900
++                checkTurn(engine: engine, session: session, prompt: div, params: p, expectReuse: 32,
++                          "\(tag) diverged in block 1")
++            }
++        }
++        // Quantization mode change → fresh start.
++        let session = SessionPrefixCache()
++        var p = GenerationParams.mode(.s, blockLength: 32, genLength: 32,
++                                      maskId: traces.maskId, eosId: traces.eosId)
++        let engine = DiffusionEngine(model: m, speculationK: 4)
++        let o = checkTurn(engine: engine, session: session, prompt: prompt1, params: p, "fp16")
++        p.kvQuantization = .k8v4
++        checkTurn(engine: engine, session: session, prompt: prompt1 + o.tokens, params: p,
++                  expectReuse: 0, "k8v4 after fp16")
++        XCTAssertEqual(session.incompatibleResetCount, 1)
++    }
++
++    // MARK: - Storage-level truncation (every LayerKVCache form)
++
++    func testTruncateAndAdoptEveryStorageForm() throws {
++        let nKV = 2, D = 64, Bk = 32
++        func block(_ seed: UInt64) -> MLXArray {
++            MLXRandom.normal([1, nKV, Bk, D], key: MLXRandom.key(seed)).asType(.float16)
++        }
++        var blocks: [(MLXArray, MLXArray)] = []
++        for i in 0 ..< 4 {
++            let seed = UInt64(10 + 2 * i)
++            blocks.append((block(seed), block(seed + 1)))
++        }
++        let extra = (block(90), block(91))
++        func same(_ a: MLXArray?, _ b: MLXArray?) -> Bool {
++            switch (a, b) {
++            case (nil, nil): return true
++            case let (x?, y?):
++                guard x.shape == y.shape else { return false }
++                return arrayEqual(x, y).item(Bool.self)
++            default: return false
++            }
++        }
++        func commit(_ c: LayerKVCache, _ kv: (MLXArray, MLXArray), pool: Bool, q: KVCacheQuantization) {
++            c.pendingKeys = kv.0
++            c.pendingValues = kv.1
++            c.commitPending(usePool: pool, quantization: q)
++        }
++        let forms: [(String, Bool, KVCacheQuantization)] = [
++            ("raw", false, .none), ("pool", true, .none), ("k8v4", false, .k8v4),
++            ("kivi4", false, .kivi4), ("fp4g32", false, .fp4g32),
++        ]
++        for (name, pool, q) in forms {
++            for keep in [0, 1, 2, 4] {
++                let a = LayerKVCache(usePool: pool, initialPoolCapacity: 32, quantization: q)
++                for kv in blocks { commit(a, kv, pool: pool, q: q) }
++                if q == .kivi4 { XCTAssertTrue(a.compressedKeys!.perChannel, "kivi4 must use per-channel Keys") }
++                a.truncateCommitted(to: keep * Bk)
++                XCTAssertEqual(a.committedLength, keep * Bk, "\(name) keep=\(keep)")
++
++                // Move into a fresh layer (the session hand-over), then grow both.
++                let moved = LayerKVCache(usePool: pool, initialPoolCapacity: 32, quantization: q)
++                moved.adoptCommittedStorage(from: a)
++                XCTAssertEqual(a.committedLength, 0, "\(name): source must be empty after move")
++                XCTAssertEqual(moved.committedLength, keep * Bk)
++                commit(moved, extra, pool: pool, q: q)
++
++                let ref = LayerKVCache(usePool: pool, initialPoolCapacity: 32, quantization: q)
++                for kv in blocks.prefix(keep) { commit(ref, kv, pool: pool, q: q) }
++                commit(ref, extra, pool: pool, q: q)
++
++                XCTAssertEqual(moved.committedLength, ref.committedLength, "\(name) keep=\(keep)")
++                XCTAssertTrue(same(moved.keys, ref.keys), "\(name) keep=\(keep): keys differ after truncate+append")
++                XCTAssertTrue(same(moved.values, ref.values), "\(name) keep=\(keep): values differ after truncate+append")
++                if q != .none {
++                    XCTAssertTrue(same(moved.compressedKeys?.packed, ref.compressedKeys?.packed), "\(name): packed K")
++                    XCTAssertTrue(same(moved.compressedKeys?.scales, ref.compressedKeys?.scales), "\(name): K scales")
++                    XCTAssertTrue(same(moved.compressedValues?.packed, ref.compressedValues?.packed), "\(name): packed V")
++                }
++            }
++        }
++    }
++}
+diff --git a/Tools/diffusion-server/Sources/main.swift b/Tools/diffusion-server/Sources/main.swift
+index f362496..f717b89 100644
+--- a/Tools/diffusion-server/Sources/main.swift
++++ b/Tools/diffusion-server/Sources/main.swift
+@@ -249,6 +249,13 @@ struct NeoDiffusionServer {
+             && (defaultCachePreset.qualityGateOpen || (defaultKvQuant.map { $0 != .none } ?? false)) {
+             fatalError("Cache preset '\(defaultCachePresetStr)' / kv-quant '\(defaultKvQuantStr ?? "-")' changes outputs and has no quality sheet; pass --allow-experimental-cache to use it anyway.")
+         }
++        // Cross-turn session prefix cache (exp-5B): opt-in, default OFF. One session for this
++        // single-request server; requests are serialised by `RequestQueue`, so they never share it
++        // concurrently. Reuse is exact (identical output); it only skips prefill forwards.
++        let sessionCacheEnabled = hasFlag("--session-cache")
++            || ProcessInfo.processInfo.environment["NEODIFFUSION_SESSION_CACHE"] == "1"
++        let sessionCache: SessionPrefixCache? = sessionCacheEnabled ? SessionPrefixCache() : nil
++        print("Session prefix cache: \(sessionCacheEnabled ? "ON" : "off")")
+         print("Cache config: defaultPreset=\(defaultCachePreset.rawValue), kvQuant=\(defaultKvQuant?.rawValue ?? "preset"), cleanCommit=\(!noCleanCommit), allowExperimentalCache=\(allowExperimentalCache)")
+         
+         let modelDir = URL(fileURLWithPath: modelPath)
+@@ -354,7 +361,8 @@ struct NeoDiffusionServer {
+                     promptIds: safePromptIds,
+                     params: params,
+                     modelName: chatRequest.model,
+-                    requestQueue: requestQueue
++                    requestQueue: requestQueue,
++                    session: sessionCache
+                 )
+             } else {
+                 return try await handleBlockingRequest(
+@@ -363,7 +371,8 @@ struct NeoDiffusionServer {
+                     promptIds: safePromptIds,
+                     params: params,
+                     modelName: chatRequest.model,
+-                    requestQueue: requestQueue
++                    requestQueue: requestQueue,
++                    session: sessionCache
+                 )
+             }
+         }
+@@ -383,13 +392,24 @@ struct NeoDiffusionServer {
+ 
+ // MARK: - Route Handlers
+ 
++/// Per-request session-cache log line (exp-5B). Reports the engine's *effective* echo
++/// (`Metrics.sessionReusedTokens`), not a prediction.
++func logSessionReuse(requestId: String, promptCount: Int, output: DiffusionEngine.Output,
++                     session: SessionPrefixCache) {
++    print("[Session] \(requestId): reused \(output.metrics.sessionReusedTokens)/\(promptCount) prompt tokens "
++        + "(forwardsEvaluated=\(output.metrics.forwardsEvaluated)), "
++        + "session now holds \(session.cachedTokenCount) tokens "
++        + "(reuses=\(session.reuseCount), incompatibleResets=\(session.incompatibleResetCount), bypasses=\(session.bypassCount))")
++}
++
+ func handleBlockingRequest(
+     engine: DiffusionEngine,
+     tokenizer: DiffusionTokenizer,
+     promptIds: [Int],
+     params: GenerationParams,
+     modelName: String,
+-    requestQueue: RequestQueue
++    requestQueue: RequestQueue,
++    session: SessionPrefixCache? = nil
+ ) async throws -> Response {
+     let requestId = "chatcmpl-\(UUID().uuidString.replacingOccurrences(of: "-", with: "").prefix(24))"
+     let createdTime = Int(Date().timeIntervalSince1970)
+@@ -410,8 +430,13 @@ func handleBlockingRequest(
+     }
+     
+     print("[Blocking] Starting generation for \(requestId)")
+-    let output = engine.generateCached(prompt: promptIds, params: params, streamBlock: nil)
++    let output = session.map {
++        engine.generateCached(prompt: promptIds, params: params, streamBlock: nil, session: $0)
++    } ?? engine.generateCached(prompt: promptIds, params: params, streamBlock: nil)
+     print("[Blocking] Generation complete for \(requestId), tokens: \(output.tokens.count)")
++    if let session {
++        logSessionReuse(requestId: requestId, promptCount: promptIds.count, output: output, session: session)
++    }
+     let generatedText = tokenizer.decode(tokens: output.tokens)
+     
+     let responseObj = ChatCompletionResponse(
+@@ -446,7 +471,8 @@ func handleStreamingRequest(
+     promptIds: [Int],
+     params: GenerationParams,
+     modelName: String,
+-    requestQueue: RequestQueue
++    requestQueue: RequestQueue,
++    session: SessionPrefixCache? = nil
+ ) async throws -> Response {
+     let requestId = "chatcmpl-\(UUID().uuidString.replacingOccurrences(of: "-", with: "").prefix(24))"
+     let createdTime = Int(Date().timeIntervalSince1970)
+@@ -478,10 +504,17 @@ func handleStreamingRequest(
+             }
+             
+             print("[Streaming Task] Starting generation cached for \(requestId)")
+-            _ = engine.generateCached(prompt: promptIds, params: params) { blockIds in
++            let onBlock: ([Int]) -> Void = { blockIds in
+                 print("[Streaming Task] Yielding block with \(blockIds.count) tokens")
+                 continuation.yield(blockIds)
+             }
++            if let session {
++                let output = engine.generateCached(
++                    prompt: promptIds, params: params, streamBlock: onBlock, session: session)
++                logSessionReuse(requestId: requestId, promptCount: promptIds.count, output: output, session: session)
++            } else {
++                _ = engine.generateCached(prompt: promptIds, params: params, streamBlock: onBlock)
++            }
+             print("[Streaming Task] Generation finished for \(requestId)")
+             continuation.finish()
+         }

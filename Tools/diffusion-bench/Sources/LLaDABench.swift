@@ -356,6 +356,12 @@ struct LLaDARunResult: Codable {
     let envValid: Bool
     let textPrefix: String
     let date: String
+    /// Execution schedule (P-3, 2026-10-18): "blocked" = every prompt of an arm before the next
+    /// arm (the historical default — exposes arm comparisons to thermal/memory drift);
+    /// "interleaved" = prompt-major, arm order rotated per prompt. `scheduleIndex` is the row's
+    /// position in the process's execution order, so drift can be regressed out afterwards.
+    var schedule: String = "blocked"
+    var scheduleIndex: Int = -1
 }
 
 /// What produced this row. See `LLaDARunResult.toolchain`.
@@ -635,6 +641,14 @@ func runLLaDABench() async throws {
             }.withK(1),
             LLaDAArm(name: "spk-4", mode: .q, cached: true, mask: .strict) {
                 $0.skipRedundantCommitForward = false
+            }.withK(4),
+            // B-1 (2026-10-18): the same K comparison on the current default engine (clean-commit
+            // on). Run with --interleave so drift lands evenly on both arms.
+            LLaDAArm(name: "spk-1-clean", mode: .q, cached: true, mask: .strict) {
+                $0.skipRedundantCommitForward = true
+            }.withK(1),
+            LLaDAArm(name: "spk-4-clean", mode: .q, cached: true, mask: .strict) {
+                $0.skipRedundantCommitForward = true
             }.withK(4),
             LLaDAArm(name: "wp3b-vanilla", mode: .q, cached: true, mask: .strict) {
                 $0.flashBlockEnabled = false
@@ -1003,6 +1017,9 @@ func runLLaDABench() async throws {
     // WP-2a calibration / JOT pre-experiment: per-step per-position trace dump (offline runs
     // only — adds a per-step readback; use with --runs 1). One JSONL line per logical step.
     var tracePromptId = ""
+    // P-3 schedule bookkeeping (stamped on every row by appendResult).
+    var currentSchedule = "blocked"
+    var scheduleCounter = 0
     if let dumpTracesPath = argValue("--dump-traces") {
         FileManager.default.createFile(atPath: dumpTracesPath, contents: nil)
         guard let traceHandle = FileHandle(forWritingAtPath: dumpTracesPath) else {
@@ -1314,7 +1331,7 @@ func runLLaDABench() async throws {
         // Effective thresholds (overrides included), not the mode label's — rule F7.
         let effectiveParams = params(for: arm.mode, arm: arm)
         let thresholds = (mask: effectiveParams.threshold, edit: effectiveParams.editingThreshold)
-        let result = LLaDARunResult(
+        var result = LLaDARunResult(
             arm: arm.name, run: run, suite: suite, promptId: prompt.id,
             mode: arm.mode.rawValue,
             thresholdMask: thresholds.mask, thresholdEdit: thresholds.edit,
@@ -1436,6 +1453,9 @@ func runLLaDABench() async throws {
             envValid: env.isValid,
             textPrefix: String(text.prefix(160)),
             date: isoFormatter.string(from: Date()))
+        result.schedule = currentSchedule
+        result.scheduleIndex = scheduleCounter
+        scheduleCounter += 1
         if let data = try? JSONEncoder().encode(result),
            let line = String(data: data, encoding: .utf8) {
             jsonLines.append(line)
@@ -1857,10 +1877,116 @@ func runLLaDABench() async throws {
                      firstArm.name, firstPrompt.id, seconds))
     }
 
+    // One generation + row + console line. Shared by the blocked and interleaved schedules.
+    func runPrompt(_ arm: LLaDAArm, run: Int, suite: LLaDAPromptSuite, prompt: LLaDAPromptCase) throws -> Double {
+        let promptIds = try encodePrompt(prompt.user)
+        tracePromptId = prompt.id
+        let (output, seconds, peakGB, env, warmup) = generate(arm, promptIds: promptIds)
+        let text = tokenizer.decode(tokens: output.tokens)
+        appendResult(arm, run: run, suite: suite.name, prompt: prompt,
+                     promptIds: promptIds, output: output, seconds: seconds,
+                     peakGB: peakGB, env: env, warmup: warmup, text: text)
+        if let dumpTextPath {
+            let record: [String: String] = [
+                "arm": arm.name, "suite": suite.name, "promptId": prompt.id,
+                "run": String(run), "user": prompt.user, "text": text,
+                "tokens": String(output.tokens.count),
+                "tokenIds": output.tokens.map(String.init).joined(separator: ","),
+                "eosBlock": output.metrics.eosBlockIndex.map(String.init) ?? "none",
+            ]
+            if let data = try? JSONEncoder().encode(record),
+               let line = String(data: data, encoding: .utf8) {
+                if let handle = FileHandle(forWritingAtPath: dumpTextPath) {
+                    handle.seekToEndOfFile()
+                    handle.write(Data((line + "\n").utf8))
+                    try? handle.close()
+                } else {
+                    try? (line + "\n").write(
+                        toFile: dumpTextPath, atomically: true, encoding: .utf8)
+                }
+            }
+        }
+
+        // Console TPF-logical uses the engine's global step counter — at nBuf=2
+        // sum(stepsPerBlock) double-counts dual-phase steps (JSONL was already right).
+        let steps = output.metrics.logicalStepsTotal
+        let stepsBlockSum = output.stepsPerBlock.reduce(0, +)
+        var flags = ""
+        if warmup { flags += " [warmup]" }
+        if !env.isValid { flags += " [ENV-INVALID: \(env.note)]" }
+        let kvLogicalMB = Double(output.metrics.kvCacheLogicalBytes) / 1_048_576
+        let kvAllocMB = Double(output.metrics.kvCacheAllocatedBytes) / 1_048_576
+        print(String(
+            format: "[%@ run %d | %@] %d tok in %.1fs | %.2f tok/s | "
+                + "TPF %.2f (honest %.2f) | steps/blk %.1f | post/blk %.1f | "
+                + "kv %.2f/%.2f MB | sync %d | peak %.2f GB%@",
+            arm.name, run, prompt.id, output.tokens.count, seconds,
+            Double(output.tokens.count) / seconds,
+            steps > 0 ? Double(output.tokens.count) / Double(steps) : 0,
+            output.metrics.forwardsEvaluated > 0
+                ? Double(output.tokens.count)
+                    / Double(output.metrics.forwardsEvaluated) : 0,
+            output.stepsPerBlock.isEmpty ? 0
+                : Double(stepsBlockSum) / Double(output.stepsPerBlock.count),
+            output.metrics.postStepsPerBlock.isEmpty ? 0
+                : Double(output.metrics.postStepsPerBlock.reduce(0, +))
+                    / Double(output.metrics.postStepsPerBlock.count),
+            kvLogicalMB, kvAllocMB,
+            output.syncPoints, peakGB, flags))
+        // Step 3 (final-plan §2): forward-remainder decomposition. Shares of
+        // denoiseSeconds, NOT production ms — the per-sub-phase evals are inflated
+        // (a sync per phase production never pays). Only when instrument produced them.
+        let m = output.metrics
+        let subSum = m.forwardSeconds + m.samplerSeconds
+            + m.selectionSeconds + m.loopControlSeconds
+        if subSum > 0, m.denoiseSeconds > 0 {
+            let d = m.denoiseSeconds
+            let residual = max(0, d - subSum)
+            print(String(
+                format: "    └─ phase shares (eval-inflated; %% of denoise %.2fs): "
+                    + "forward %.1f%% | sampler %.1f%% | selection %.1f%% | "
+                    + "loopCtrl %.1f%% | residual %.1f%%",
+                d, m.forwardSeconds / d * 100, m.samplerSeconds / d * 100,
+                m.selectionSeconds / d * 100, m.loopControlSeconds / d * 100,
+                residual / d * 100))
+        }
+        return seconds
+    }
+
+    // P-3 (2026-10-18): prompt-major interleaving. For each run, each prompt is generated by every
+    // arm before moving on, and the arm order rotates by one per prompt, so slow drift (thermals,
+    // memory) is spread evenly instead of landing on whichever arm ran last. Cooldown applies
+    // between runs only. Totals per arm are still accumulated for the variance report.
+    let interleave = hasFlag("--interleave")
+    precondition(!(interleave && hasFlag("--arm-major")), "--interleave and --arm-major are mutually exclusive")
     let armMajor = hasFlag("--arm-major")
     var armTotals: [String: [Double]] = [:]
     var firstUnit = true
-    for outer in 0 ..< (armMajor ? arms.count : runs) {
+    if interleave {
+        currentSchedule = "interleaved"
+        var promptIndex = 0
+        for run in 0 ..< runs {
+            if run > 0 && cooldown > 0 {
+                try await Task.sleep(nanoseconds: UInt64(cooldown) * 1_000_000_000)
+            }
+            var runTotals: [String: Double] = [:]
+            for suite in suites {
+                for prompt in suite.prompts {
+                    for k in 0 ..< arms.count {
+                        let arm = arms[(k + promptIndex) % arms.count]
+                        runTotals[arm.name, default: 0] += try runPrompt(arm, run: run, suite: suite, prompt: prompt)
+                    }
+                    promptIndex += 1
+                }
+            }
+            for arm in arms {
+                let t = runTotals[arm.name] ?? 0
+                armTotals[arm.name, default: []].append(t)
+                print(String(format: "[%@ run %d] suite total %.1fs (interleaved)", arm.name, run, t))
+            }
+        }
+    }
+    for outer in 0 ..< (interleave ? 0 : (armMajor ? arms.count : runs)) {
         for inner in 0 ..< (armMajor ? runs : arms.count) {
             let arm = armMajor ? arms[outer] : arms[inner]
             let run = armMajor ? inner : outer
@@ -1872,78 +1998,7 @@ func runLLaDABench() async throws {
 
             for suite in suites {
                 for prompt in suite.prompts {
-                    let promptIds = try encodePrompt(prompt.user)
-                    tracePromptId = prompt.id
-                    let (output, seconds, peakGB, env, warmup) = generate(arm, promptIds: promptIds)
-                    runTotal += seconds
-                    let text = tokenizer.decode(tokens: output.tokens)
-                    appendResult(arm, run: run, suite: suite.name, prompt: prompt,
-                                 promptIds: promptIds, output: output, seconds: seconds,
-                                 peakGB: peakGB, env: env, warmup: warmup, text: text)
-                    if let dumpTextPath {
-                        let record: [String: String] = [
-                            "arm": arm.name, "suite": suite.name, "promptId": prompt.id,
-                            "run": String(run), "user": prompt.user, "text": text,
-                            "tokens": String(output.tokens.count),
-                            "tokenIds": output.tokens.map(String.init).joined(separator: ","),
-                            "eosBlock": output.metrics.eosBlockIndex.map(String.init) ?? "none",
-                        ]
-                        if let data = try? JSONEncoder().encode(record),
-                           let line = String(data: data, encoding: .utf8) {
-                            if let handle = FileHandle(forWritingAtPath: dumpTextPath) {
-                                handle.seekToEndOfFile()
-                                handle.write(Data((line + "\n").utf8))
-                                try? handle.close()
-                            } else {
-                                try? (line + "\n").write(
-                                    toFile: dumpTextPath, atomically: true, encoding: .utf8)
-                            }
-                        }
-                    }
-
-                    // Console TPF-logical uses the engine's global step counter — at nBuf=2
-                    // sum(stepsPerBlock) double-counts dual-phase steps (JSONL was already right).
-                    let steps = output.metrics.logicalStepsTotal
-                    let stepsBlockSum = output.stepsPerBlock.reduce(0, +)
-                    var flags = ""
-                    if warmup { flags += " [warmup]" }
-                    if !env.isValid { flags += " [ENV-INVALID: \(env.note)]" }
-                    let kvLogicalMB = Double(output.metrics.kvCacheLogicalBytes) / 1_048_576
-                    let kvAllocMB = Double(output.metrics.kvCacheAllocatedBytes) / 1_048_576
-                    print(String(
-                        format: "[%@ run %d | %@] %d tok in %.1fs | %.2f tok/s | "
-                            + "TPF %.2f (honest %.2f) | steps/blk %.1f | post/blk %.1f | "
-                            + "kv %.2f/%.2f MB | sync %d | peak %.2f GB%@",
-                        arm.name, run, prompt.id, output.tokens.count, seconds,
-                        Double(output.tokens.count) / seconds,
-                        steps > 0 ? Double(output.tokens.count) / Double(steps) : 0,
-                        output.metrics.forwardsEvaluated > 0
-                            ? Double(output.tokens.count)
-                                / Double(output.metrics.forwardsEvaluated) : 0,
-                        output.stepsPerBlock.isEmpty ? 0
-                            : Double(stepsBlockSum) / Double(output.stepsPerBlock.count),
-                        output.metrics.postStepsPerBlock.isEmpty ? 0
-                            : Double(output.metrics.postStepsPerBlock.reduce(0, +))
-                                / Double(output.metrics.postStepsPerBlock.count),
-                        kvLogicalMB, kvAllocMB,
-                        output.syncPoints, peakGB, flags))
-                    // Step 3 (final-plan §2): forward-remainder decomposition. Shares of
-                    // denoiseSeconds, NOT production ms — the per-sub-phase evals are inflated
-                    // (a sync per phase production never pays). Only when instrument produced them.
-                    let m = output.metrics
-                    let subSum = m.forwardSeconds + m.samplerSeconds
-                        + m.selectionSeconds + m.loopControlSeconds
-                    if subSum > 0, m.denoiseSeconds > 0 {
-                        let d = m.denoiseSeconds
-                        let residual = max(0, d - subSum)
-                        print(String(
-                            format: "    └─ phase shares (eval-inflated; %% of denoise %.2fs): "
-                                + "forward %.1f%% | sampler %.1f%% | selection %.1f%% | "
-                                + "loopCtrl %.1f%% | residual %.1f%%",
-                            d, m.forwardSeconds / d * 100, m.samplerSeconds / d * 100,
-                            m.selectionSeconds / d * 100, m.loopControlSeconds / d * 100,
-                            residual / d * 100))
-                    }
+                    runTotal += try runPrompt(arm, run: run, suite: suite, prompt: prompt)
                 }
             }
             armTotals[arm.name, default: []].append(runTotal)
