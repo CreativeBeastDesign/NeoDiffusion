@@ -27,5 +27,30 @@ Primary: aggregate TPS = Σtokens / Σseconds over valid rows, per arm, plus per
 (median and min/max). Secondary: forwards, ms/forward, sync points. Decision: change the M1 default to
 K=1 only if H holds on both runs; record either way in `Plans/final_optimisations_plans.md` style.
 
-## 5. Results
-(appended after the run)
+## 5. Results (appended 2026-10-18; §1–§4 unchanged)
+
+`[Sourced: scratch/2026-10-18/real/b1_spk_k1_vs_k4.jsonl, ingested as paper/facts/data/2026-10-18-real/b1_spk_k1_vs_k4.jsonl
+sha256 cfd2b2e2…; run by André with the Claude app quit, 18:55–19:02 CEST]`
+Host `MacBookPro17,1`; mlxCoreVersion 0.31.1 / mlx-swift 0.31.6; **committed tree** `ea40e92`, dirty = 0 (§3 met);
+`schedule = interleaved`; 48 non-warmup rows (12 prompts × 2 arms × 2 runs), warmup row excluded.
+
+| Arm | Agg. TPS | Tokens | Seconds | Forwards | Logical steps | ms/forward |
+|---|---|---|---|---|---|---|
+| spk-1-clean (K=1) | **16.52** | 2,666 | 161.3 | 876 | 852 | 184.2 |
+| spk-4-clean (K=4) | 14.45 | 2,666 | 184.5 | 1,000 | 852 | 184.5 |
+
+Paired per prompt (24 pairs): K1/K4 TPS ratio median **1.122**, min 1.044, max 1.368; **K=1 faster on 24/24**;
+text identical on 24/24 (output invariance holds). Aggregate **+14.3 %** for K=1. Mechanism: same steps (852) and
+same ms/forward; K=4 evaluates 124 extra (overshoot) forwards (+14.2 %).
+
+**Validity problem — reported before the verdict**: **0 of 48 rows are `envValid`** under the frozen rule. Every
+row fails only the free-page floor (free 79–653 MB < 1,024 MB); swap growth ≤ 256 MB on all rows (1,077 → 1,390 MB
+over the whole run) and thermal `nominal` throughout. ms/forward (184 ms) matches the unloaded M6 figure
+(~0.19 s), i.e. no paging pathology (which shows as ~50 s/forward). With the 9.6 GB model resident, free pages on
+this 16 GB host sit below 1 GB by construction, so the free-floor rule cannot be met here at all.
+
+**Verdict under the registered rule: NO DECISION** (no valid rows). The evidence (24/24 paired wins, interleaved,
+identical output, unchanged ms/forward, flat swap) is strong, but changing the M1 default is André's call — see
+the decision list in the session report: either (a) amend the validity rule for the M1 (e.g. swap growth + an
+"available incl. reclaimable cache" floor instead of free pages) and re-judge, or (b) accept this run as an
+explicit exception.

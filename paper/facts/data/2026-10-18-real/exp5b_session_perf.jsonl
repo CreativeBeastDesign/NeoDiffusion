@@ -1,0 +1,6 @@
+{"label":"impl-x","rep":0,"promptTokens":411,"reused":384,"prefillWith":0.0000,"prefillWithout":0.3300,"totalWith":7.4572,"totalWithout":9.8973,"forwardsWith":33,"forwardsWithout":45,"identical":true,"peakGB":17.505}
+{"label":"impl-x","rep":1,"promptTokens":411,"reused":384,"prefillWith":0.0000,"prefillWithout":0.3555,"totalWith":7.7000,"totalWithout":9.7975,"forwardsWith":33,"forwardsWithout":45,"identical":true,"peakGB":17.505}
+{"label":"impl-x","rep":2,"promptTokens":411,"reused":384,"prefillWith":0.0000,"prefillWithout":0.3569,"totalWith":7.6978,"totalWithout":9.8106,"forwardsWith":33,"forwardsWithout":45,"identical":true,"peakGB":17.505}
+{"label":"impl-y","rep":0,"promptTokens":411,"reused":384,"prefillWith":0.0000,"prefillWithout":0.3335,"totalWith":7.5575,"totalWithout":9.8503,"forwardsWith":33,"forwardsWithout":45,"identical":true,"peakGB":17.505}
+{"label":"impl-y","rep":1,"promptTokens":411,"reused":384,"prefillWith":0.0000,"prefillWithout":0.3602,"totalWith":7.7701,"totalWithout":9.8954,"forwardsWith":33,"forwardsWithout":45,"identical":true,"peakGB":17.505}
+{"label":"impl-y","rep":2,"promptTokens":411,"reused":384,"prefillWith":0.0000,"prefillWithout":0.3589,"totalWith":7.7535,"totalWithout":9.8839,"forwardsWith":33,"forwardsWithout":45,"identical":true,"peakGB":17.505}

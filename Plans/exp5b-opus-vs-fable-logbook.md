@@ -280,3 +280,35 @@ Not run: a 9.6 GB model load next to the Claude desktop app (~2.5 GB resident) p
 - **Process note worth more than the verdict**: the hidden test found a *pre-existing* engine
   non-termination bug (§9.4) that neither implementation's own tests could have revealed, and both agents
   independently caught the toy head_dim limitation (impl-y reported it explicitly).
+
+### 9.8 Real-model results (M6, M7) — run by André, 2026-10-18 18:46–18:54 CEST, Claude app quit
+`[Sourced: scratch/2026-10-18/real/SUMMARY.txt, impl-{x,y}-real.log; rows ingested as paper/facts/data/2026-10-18-real/exp5b_session_perf.jsonl]`
+Host `MacBookPro17,1`, 4-bit artefact, K=1, Q mode, clean-commit on, gen 64; turn-1 prompt 411 tokens
+(repeated paragraph), turn 2 = turn 1 + answer + follow-up; 3 reps per implementation, arm order alternated.
+
+| | impl-x (Opus) | impl-y (Fable) |
+|---|---|---|
+| `testB1` (XCTest) | passed (192.3 s) | passed (186.7 s) |
+| Turn-2 output identical with vs without session (FP16 KV), 3/3 reps | **yes** | **yes** |
+| B2: k8v4 two-turn identical with vs without session | **yes** (reused 384) | **yes** (reused 384) |
+| Tokens reused of turn-2 prompt | 384 / 411 (12 of 12 full blocks) | 384 / 411 |
+| Forwards turn 2, with / without | 33 / 45 | 33 / 45 |
+| Turn-2 total seconds with / without (mean of 3) | 7.62 / 9.84 | 7.69 / 9.88 |
+| Swap across the step | 702 → 1245 MB (**+543, env INVALID** — timings descriptive only) | 1221 → 1207 MB (valid) |
+
+Reading `[Inferred]`: both implementations are **bit-exact on the served 4-bit artefact** (M6 met — confirms the
+§2 correction that prefill reuse is exact, not just mathematically equivalent). Saving 12 prefill forwards
+at ~0.185 s each predicts ≈ 2.2 s; measured ≈ 2.2 s (−22.5 % turn-2 wall-clock at this prompt length) — the
+two implementations are indistinguishable on M7. `prefillSeconds` (≈ 0.33 s "without") understates prefill
+because, uninstrumented, lazy evaluation pushes the work into the first denoise step — as pre-registered,
+total time and forwards are the primary numbers. Unexplained: `peakGB 17.505` (MLX peak allocator) exceeds
+the 16 GB of physical RAM; it is cumulative over 4 model generations plus weights and needs a look before
+anyone quotes it.
+
+### 9.9 Final verdict
+
+All pre-registered correctness gates (M4 hidden 5/5, M5 0 regressions, M6 real-model bit-exactness) pass for
+**both**. M7 (speed) is a tie by construction — both skip exactly the same forwards. M8 blind review: tie leaning
+impl-x (confidence 2/5). M1 cost: impl-x ~8 % fewer tokens, ~35 % fewer tool calls, ~40 % less wall-clock
+(part of impl-y's wall-clock was gate queueing). **No winner on output quality; impl-x (Opus) was somewhat
+cheaper and faster to the same result on this one task.** n = 1 task — a case study, not a model ranking.
