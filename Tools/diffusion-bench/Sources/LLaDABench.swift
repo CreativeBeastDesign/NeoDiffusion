@@ -408,6 +408,10 @@ struct LLaDARunResult: Codable {
     /// position in the process's execution order, so drift can be regressed out afterwards.
     var schedule: String = "blocked"
     var scheduleIndex: Int = -1
+    /// B-NT (2026-10-18): blocks force-committed by the step cap (should be 0) and the cap in force.
+    var stepCapHits: Int = 0
+    var effectiveMaxStepsPerBlock: Int = 0
+    var sessionReusedTokens: Int = 0
 }
 
 /// What produced this row. See `LLaDARunResult.toolchain`.
@@ -1505,6 +1509,9 @@ func runLLaDABench() async throws {
             textPrefix: String(text.prefix(160)),
             date: isoFormatter.string(from: Date()))
         result.envValidV1 = env.isValidV1
+        result.stepCapHits = output.metrics.stepCapHits
+        result.effectiveMaxStepsPerBlock = output.metrics.effectiveMaxStepsPerBlock
+        result.sessionReusedTokens = output.metrics.sessionReusedTokens
         result.schedule = currentSchedule
         result.scheduleIndex = scheduleCounter
         scheduleCounter += 1

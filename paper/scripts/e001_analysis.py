@@ -68,6 +68,9 @@ def main() -> int:
         e = r.get("env", {})
         print(f"  EXCLUDED {r['arm']} {r['suite']}/{r['promptId']} run {r['run']}: free {e.get('freeMemoryMBBefore', -1):.0f} "
               f"avail {e.get('availableMemoryMBBefore') or -1:.0f} swap +{e.get('swapUsedMBAfter', 0) - e.get('swapUsedMBBefore', 0):.0f} thermal {e.get('thermalBefore')}")
+    caps = [(r["arm"], r["promptId"], r.get("stepCapHits")) for r in rows if r.get("stepCapHits")]
+    print(f"step-cap hits (B-NT safety net; should be none): {caps if caps else 'none'}"
+          + ("" if all("stepCapHits" in r for r in rows) else " [field absent on some rows]"))
     rows = [r for r in rows if r.get("envValid")]
     missing = set(ARMS.values()) - {r["arm"] for r in rows}
     if missing:
