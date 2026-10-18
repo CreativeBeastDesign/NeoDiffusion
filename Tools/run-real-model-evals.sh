@@ -4,7 +4,8 @@
 #
 #     cd ~/Documents/Swift/NeoDiffusion && caffeinate -i Tools/run-real-model-evals.sh
 #
-# Steps (each through Tools/compute-gate.sh with a 10.5 GB available-memory floor; one at a time):
+# Steps (each through Tools/compute-gate.sh, one at a time; model steps need MODEL_MIN_AVAIL_MB and are
+# labelled invalid if swap grows > 256 MB):
 #   1. Exp-5B hidden real-model test (B1 bit-exactness + turn-2 speed, B2 k8v4 exactness) for impl-x, then impl-y.
 #   2. B-1 pre-registered bench: K=1 vs K=4 on the current default engine (Plans/b1-speculation-k-m1-prereg.md).
 # Expected wall-clock: ~25–35 min. Everything is logged under scratch/2026-10-18/real/; a summary is
@@ -17,19 +18,25 @@ OUT=$REPO/scratch/2026-10-18/real
 mkdir -p $OUT
 SUM=$OUT/SUMMARY.txt
 GATE=$REPO/Tools/compute-gate.sh
-export MIN_AVAIL_MB=${MIN_AVAIL_MB:-10500}
+# Memory floors (2026-10-18 fix): the first version applied 10.5 GB to every step, which this host never
+# reports even with the Claude app quit (vm_stat free+inactive+speculative excludes reclaimable file cache),
+# so the gate waited forever. Builds need no floor beyond the default; model steps use MODEL_MIN_AVAIL_MB,
+# and every model step is additionally judged by swap growth (envValid rule: <= 256 MB).
+MODEL_MIN_AVAIL_MB=${MODEL_MIN_AVAIL_MB:-6500}
+export MIN_AVAIL_MB=2000
 export RETRY_SECONDS=${RETRY_SECONDS:-30}
 export NEODIFFUSION_LOOP_FIXTURE_DIR=$REPO/scratch/loop_fixtures
 HIDDEN=$REPO/Plans/exp5b-artifacts/HiddenSessionCacheEvalTests.v3.swift.txt
 
 say() { print -r -- "$(date '+%H:%M:%S') $*" | tee -a $SUM; }
 
+swap_mb() { sysctl -n vm.swapusage | awk '{gsub(/M/,"",$6); print int($6)}'; }
 avail_mb() { vm_stat | awk '/page size of/{ps=$8} /Pages free/{f=$3} /Pages inactive/{i=$3} /Pages speculative/{s=$3}
   END{gsub(/\./,"",f);gsub(/\./,"",i);gsub(/\./,"",s);printf "%d",(f+i+s)*ps/1048576}'; }
 
 say "=== run-real-model-evals start | host $(sysctl -n hw.model) | git $(git -C $REPO rev-parse --short HEAD) | avail $(avail_mb) MB | $(sysctl -n vm.swapusage)"
 if pgrep -xq Claude; then
-  say "WARNING: the Claude desktop app is running — quit it first, or the gate may wait forever (needs ${MIN_AVAIL_MB} MB available)."
+  say "WARNING: the Claude desktop app is running — quit it first (model steps need ${MODEL_MIN_AVAIL_MB} MB available and no swap growth)."
 fi
 [[ -f $HIDDEN ]] || { say "missing $HIDDEN"; exit 1; }
 [[ "$(shasum -a 256 $HIDDEN | cut -c1-16)" == "5978cdf3cc77d360" ]] || { say "hidden test hash mismatch — refusing"; exit 1; }
@@ -45,10 +52,12 @@ for pair in "impl-x:agent-ae8403ea4fa3150dc" "impl-y:agent-ac87f8dedec5e3cb7"; d
   $GATE real-$L-build swift build --build-tests > $OUT/$L-build.log 2>&1 || say "$L build FAILED (see $OUT/$L-build.log)"
   $GATE real-$L-seed Tools/seed-metallib.sh >> $OUT/$L-build.log 2>&1
   say "$L: real-model hidden test (avail $(avail_mb) MB)"
-  NEODIFFUSION_SESSION_EVAL_REAL=1 NEODIFFUSION_SESSION_EVAL_LABEL=$L NEODIFFUSION_SESSION_EVAL_OUT=$OUT/exp5b_session_perf.jsonl \
+  SW0=$(swap_mb)
+  MIN_AVAIL_MB=$MODEL_MIN_AVAIL_MB NEODIFFUSION_SESSION_EVAL_REAL=1 NEODIFFUSION_SESSION_EVAL_LABEL=$L NEODIFFUSION_SESSION_EVAL_OUT=$OUT/exp5b_session_perf.jsonl \
     $GATE real-$L-eval swift test --skip-build --filter HiddenSessionCacheRealEvalTests > $OUT/$L-real.log 2>&1
   RC=$?
-  say "$L: real-model rc=$RC | $(grep -E "Executed [0-9]+ test" $OUT/$L-real.log | tail -1 | xargs) | swap $(sysctl -n vm.swapusage | awk '{print $6}')"
+  SW1=$(swap_mb); VALID=$([ $((SW1 - SW0)) -le 256 ] && echo valid || echo "INVALID(swap +$((SW1 - SW0)) MB — paging, timings unusable)")
+  say "$L: real-model rc=$RC | $(grep -E "Executed [0-9]+ test" $OUT/$L-real.log | tail -1 | xargs) | swap ${SW0}->${SW1} MB | env $VALID"
   grep -E "\[exp5b\]" $OUT/$L-real.log | tee -a $SUM
   rm -f Tests/DiffusionGenerationTests/HiddenSessionCacheEvalTests.swift
 done
@@ -59,7 +68,7 @@ say "B-1: release build of diffusion-bench (commit $(git rev-parse --short HEAD)
 $GATE real-b1-build swift build -c release --product diffusion-bench > $OUT/b1-build.log 2>&1 || say "B-1 build FAILED"
 $GATE real-b1-seed Tools/seed-metallib.sh >> $OUT/b1-build.log 2>&1
 say "B-1: bench (avail $(avail_mb) MB)"
-$GATE real-b1-bench ./.build/release/diffusion-bench llada --arms spk-1-clean,spk-4-clean --interleave \
+MIN_AVAIL_MB=$MODEL_MIN_AVAIL_MB $GATE real-b1-bench ./.build/release/diffusion-bench llada --arms spk-1-clean,spk-4-clean --interleave \
   --suites chat,reasoning,code --runs 2 --gen-length 128 --warmup-once \
   --json $OUT/b1_spk_k1_vs_k4.jsonl --text-out $OUT/b1_spk_k1_vs_k4_text.jsonl > $OUT/b1-bench.log 2>&1
 say "B-1: bench rc=$?"

@@ -27,6 +27,8 @@ MIN_AVAIL_MB="${MIN_AVAIL_MB:-5000}"
 RETRY_SECONDS="${RETRY_SECONDS:-60}"
 
 log() { print -r -- "$(date -u +%Y-%m-%dT%H:%M:%SZ) pid=$$ label=$LABEL $*" >> "$GATE_LOG"; }
+# Waiting is user-visible (stderr), not just logged — a silent wait looks like a hang (2026-10-18).
+note() { log "$*"; print -u2 -r -- "[compute-gate $LABEL] $*"; }
 
 avail_mb() {
   vm_stat | awk '
@@ -48,7 +50,7 @@ acquire() {
       rm -rf "$LOCK_DIR"
       continue
     fi
-    log "wait-lock holder=$(cat "$LOCK_DIR/owner" 2>/dev/null)"
+    note "wait-lock holder=$(cat "$LOCK_DIR/owner" 2>/dev/null) — retry in ${RETRY_SECONDS}s"
     sleep "$RETRY_SECONDS"
   done
 }
@@ -62,7 +64,7 @@ while true; do
   acquire
   AV=$(avail_mb)
   if (( AV >= MIN_AVAIL_MB )); then break; fi
-  log "low-memory avail=${AV}MB < ${MIN_AVAIL_MB}MB; retry in ${RETRY_SECONDS}s"
+  note "low-memory avail=${AV}MB < ${MIN_AVAIL_MB}MB; retry in ${RETRY_SECONDS}s (set MIN_AVAIL_MB to override)"
   release
   sleep "$RETRY_SECONDS"
 done
