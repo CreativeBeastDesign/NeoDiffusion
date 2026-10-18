@@ -166,6 +166,53 @@ public struct CompressedKVTensor {
         )
     }
     
+    /// Keeps only the first `length` sequence positions (session prefix-cache truncation, exp-5B).
+    ///
+    /// Every group is quantized independently (`MLX.quantized` per group of `groupSize` along the
+    /// quantized axis), and appends quantize each committed block on its own, so slicing whole
+    /// groups yields exactly the tensor an `append` chain over the kept blocks would have built:
+    /// - token-major layout (`perChannel == false`, packed `[.., L, D·bits/32]`, scales
+    ///   `[.., L, D/g]`): slice axis 2 to `length` — any `length` is valid.
+    /// - per-channel layout (kivi4 Keys, packed `[.., D, L·bits/32]`, scales `[.., D, L/g]`): slice
+    ///   axis 3 to `length·bits/32` / `length/g`; `length` must be a multiple of `groupSize` (a
+    ///   quantization group spans `groupSize` tokens) and of `32/bits` (packing). Block-aligned
+    ///   truncation always satisfies this because kivi4 appends are themselves group-aligned.
+    public func truncated(toLength length: Int) -> CompressedKVTensor {
+        let current = originalShape[2]
+        precondition(length > 0 && length <= current,
+            "CompressedKVTensor.truncated: length \(length) outside (0, \(current)]")
+        if length == current { return self }
+        let packedLen: Int
+        let groupsLen: Int
+        let axis: Int
+        if perChannel {
+            precondition(length % groupSize == 0 && (length * bits) % 32 == 0,
+                "CompressedKVTensor.truncated: per-channel tensor can only be cut at multiples of "
+                + "groupSize=\(groupSize) tokens (got \(length))")
+            axis = 3
+            packedLen = length * bits / 32
+            groupsLen = length / groupSize
+        } else {
+            axis = 2
+            packedLen = length
+            groupsLen = length
+        }
+        func cut(_ a: MLXArray, _ n: Int) -> MLXArray {
+            axis == 3 ? a[0..., 0..., 0..., 0 ..< n] : a[0..., 0..., 0 ..< n, 0...]
+        }
+        var newShape = originalShape
+        newShape[2] = length
+        return CompressedKVTensor(
+            packed: cut(packed, packedLen),
+            scales: cut(scales, groupsLen),
+            biases: biases.map { cut($0, groupsLen) },
+            groupSize: groupSize,
+            bits: bits,
+            originalShape: newShape,
+            perChannel: perChannel
+        )
+    }
+
     /// Dequantizes the compressed tensor back to full-precision FP16.
     public func dequantize(dtype: DType = .float16) -> MLXArray {
         let deq = dequantized(

@@ -106,6 +106,18 @@ public final class KVCachePool {
         committedLength = newLength
     }
     
+    /// Drops committed positions `[length, committedLength)` (session prefix-cache truncation,
+    /// exp-5B). Only the logical length moves: the buffers keep their capacity, and the stale
+    /// tail is overwritten in place by the next `commit` (`mlx_slice_update` at the new
+    /// `committedLength`). `keys`/`values` already return only `[0, committedLength)`, so the
+    /// dropped tail is unobservable. `length == 0` releases the buffers like `clear()`.
+    public func truncate(to length: Int) {
+        precondition(length >= 0 && length <= committedLength,
+            "KVCachePool.truncate: length \(length) outside [0, \(committedLength)]")
+        if length == 0 { clear(); return }
+        committedLength = length
+    }
+
     public func clear() {
         committedLength = 0
         keysBuffer = nil

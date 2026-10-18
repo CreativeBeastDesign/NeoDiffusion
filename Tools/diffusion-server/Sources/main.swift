@@ -27,8 +27,8 @@ func sysctlStringValue(_ name: String) -> String {
 /// on the M2 Ultra (Mac14,14, 192 GB) K=1 beats the K=4 default by +6–17% because the host is
 /// compute-bound and CPU-GPU syncs are cheap, so speculative run-ahead is pure overhead. K is
 /// output-invariant, so this is a free speedup. On sync-bound hosts (M1 MacBook, 16 GB) K>1 can
-/// still pay, so the default stays 4 there. The finding was only measured on the Ultra, so the
-/// heuristic is deliberately conservative: physical memory ≥ 64 GB (Ultra/Max-class) ⇒ K=1.
+/// still pay, so the default stayed 4 there — **superseded 2026-10-18**: measured on the M1 (B-1),
+/// K=1 wins there too, so the default is K=1 on every host.
 /// Always overridable by `--speculation-k` / `NEODIFFUSION_SPECULATION_K`.
 func hostAwareDefaultSpeculationK() -> (k: Int, model: String, memGB: Double, studioClass: Bool) {
     var mem: UInt64 = 0; var size = MemoryLayout<UInt64>.size
@@ -36,7 +36,11 @@ func hostAwareDefaultSpeculationK() -> (k: Int, model: String, memGB: Double, st
     let memGB = Double(mem) / 1_073_741_824.0
     let model = sysctlStringValue("hw.model")
     let studioClass = memGB >= 64.0
-    return (studioClass ? 1 : 4, model, memGB, studioClass)
+    // 2026-10-18 (André's decision on B-1, Plans/b1-speculation-k-m1-prereg.md §5): K=1 on every
+    // host. On the dev M1, K=1 was +14.3 % aggregate TPS, faster on 24/24 paired prompts, identical
+    // text (K is output-invariant); K=4 only added 124 overshoot forwards. The host analytics stay
+    // logged; the M1 = K4 branch is gone.
+    return (1, model, memGB, studioClass)
 }
 
 // MARK: - OpenAI Chat Completion API Models
@@ -249,6 +253,17 @@ struct NeoDiffusionServer {
             && (defaultCachePreset.qualityGateOpen || (defaultKvQuant.map { $0 != .none } ?? false)) {
             fatalError("Cache preset '\(defaultCachePresetStr)' / kv-quant '\(defaultKvQuantStr ?? "-")' changes outputs and has no quality sheet; pass --allow-experimental-cache to use it anyway.")
         }
+        // Cross-turn session prefix cache (exp-5B): opt-in, default OFF. One session for this
+        // single-request server; requests are serialised by `RequestQueue`, so they never share it
+        // concurrently. Reuse is exact (identical output); it only skips prefill forwards.
+        let sessionCacheEnabled = hasFlag("--session-cache")
+            || ProcessInfo.processInfo.environment["NEODIFFUSION_SESSION_CACHE"] == "1"
+        // Cap in tokens (default 8192 ≈ 320 MiB FP16 K/V); 0 = uncapped. Opt-in until B-NT soaks.
+        let sessionMaxTokens = Int(argValue("--session-max-tokens")
+            ?? ProcessInfo.processInfo.environment["NEODIFFUSION_SESSION_MAX_TOKENS"] ?? "8192") ?? 8192
+        let sessionCache: SessionPrefixCache? = sessionCacheEnabled
+            ? SessionPrefixCache(maxCachedTokens: sessionMaxTokens > 0 ? sessionMaxTokens : nil) : nil
+        print("Session prefix cache: \(sessionCacheEnabled ? "ON (max \(sessionMaxTokens > 0 ? String(sessionMaxTokens) : "unbounded") tokens)" : "off")")
         print("Cache config: defaultPreset=\(defaultCachePreset.rawValue), kvQuant=\(defaultKvQuant?.rawValue ?? "preset"), cleanCommit=\(!noCleanCommit), allowExperimentalCache=\(allowExperimentalCache)")
         
         let modelDir = URL(fileURLWithPath: modelPath)
@@ -354,7 +369,8 @@ struct NeoDiffusionServer {
                     promptIds: safePromptIds,
                     params: params,
                     modelName: chatRequest.model,
-                    requestQueue: requestQueue
+                    requestQueue: requestQueue,
+                    session: sessionCache
                 )
             } else {
                 return try await handleBlockingRequest(
@@ -363,7 +379,8 @@ struct NeoDiffusionServer {
                     promptIds: safePromptIds,
                     params: params,
                     modelName: chatRequest.model,
-                    requestQueue: requestQueue
+                    requestQueue: requestQueue,
+                    session: sessionCache
                 )
             }
         }
@@ -383,13 +400,24 @@ struct NeoDiffusionServer {
 
 // MARK: - Route Handlers
 
+/// Per-request session-cache log line (exp-5B). Reports the engine's *effective* echo
+/// (`Metrics.sessionReusedTokens`), not a prediction.
+func logSessionReuse(requestId: String, promptCount: Int, output: DiffusionEngine.Output,
+                     session: SessionPrefixCache) {
+    print("[Session] \(requestId): reused \(output.metrics.sessionReusedTokens)/\(promptCount) prompt tokens "
+        + "(forwardsEvaluated=\(output.metrics.forwardsEvaluated)), "
+        + "session now holds \(session.cachedTokenCount) tokens "
+        + "(reuses=\(session.reuseCount), incompatibleResets=\(session.incompatibleResetCount), bypasses=\(session.bypassCount))")
+}
+
 func handleBlockingRequest(
     engine: DiffusionEngine,
     tokenizer: DiffusionTokenizer,
     promptIds: [Int],
     params: GenerationParams,
     modelName: String,
-    requestQueue: RequestQueue
+    requestQueue: RequestQueue,
+    session: SessionPrefixCache? = nil
 ) async throws -> Response {
     let requestId = "chatcmpl-\(UUID().uuidString.replacingOccurrences(of: "-", with: "").prefix(24))"
     let createdTime = Int(Date().timeIntervalSince1970)
@@ -410,8 +438,13 @@ func handleBlockingRequest(
     }
     
     print("[Blocking] Starting generation for \(requestId)")
-    let output = engine.generateCached(prompt: promptIds, params: params, streamBlock: nil)
+    let output = session.map {
+        engine.generateCached(prompt: promptIds, params: params, streamBlock: nil, session: $0)
+    } ?? engine.generateCached(prompt: promptIds, params: params, streamBlock: nil)
     print("[Blocking] Generation complete for \(requestId), tokens: \(output.tokens.count)")
+    if let session {
+        logSessionReuse(requestId: requestId, promptCount: promptIds.count, output: output, session: session)
+    }
     let generatedText = tokenizer.decode(tokens: output.tokens)
     
     let responseObj = ChatCompletionResponse(
@@ -446,7 +479,8 @@ func handleStreamingRequest(
     promptIds: [Int],
     params: GenerationParams,
     modelName: String,
-    requestQueue: RequestQueue
+    requestQueue: RequestQueue,
+    session: SessionPrefixCache? = nil
 ) async throws -> Response {
     let requestId = "chatcmpl-\(UUID().uuidString.replacingOccurrences(of: "-", with: "").prefix(24))"
     let createdTime = Int(Date().timeIntervalSince1970)
@@ -478,9 +512,16 @@ func handleStreamingRequest(
             }
             
             print("[Streaming Task] Starting generation cached for \(requestId)")
-            _ = engine.generateCached(prompt: promptIds, params: params) { blockIds in
+            let onBlock: ([Int]) -> Void = { blockIds in
                 print("[Streaming Task] Yielding block with \(blockIds.count) tokens")
                 continuation.yield(blockIds)
+            }
+            if let session {
+                let output = engine.generateCached(
+                    prompt: promptIds, params: params, streamBlock: onBlock, session: session)
+                logSessionReuse(requestId: requestId, promptCount: promptIds.count, output: output, session: session)
+            } else {
+                _ = engine.generateCached(prompt: promptIds, params: params, streamBlock: onBlock)
             }
             print("[Streaming Task] Generation finished for \(requestId)")
             continuation.finish()

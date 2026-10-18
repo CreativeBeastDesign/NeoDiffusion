@@ -160,6 +160,58 @@ public final class LayerKVCache {
         pendingValues = nil
     }
 
+    // MARK: - Session prefix-cache support (exp-5B)
+
+    /// Drops committed positions `[length, committedLength)`, for every storage form this layer can
+    /// hold (raw, pool, compressed incl. the per-channel kivi4 Key layout). Pending K/V and the
+    /// per-call FlashBlock state are not touched — callers only truncate a store that is between
+    /// generation calls. Lazy: slices are views until the next commit concatenates/updates them.
+    public func truncateCommitted(to length: Int) {
+        let current = committedLength
+        precondition(length >= 0 && length <= current,
+            "LayerKVCache.truncateCommitted: length \(length) outside [0, \(current)]")
+        if length == current { return }
+        if let ck = compressedKeys, let cv = compressedValues {
+            if length == 0 {
+                compressedKeys = nil
+                compressedValues = nil
+            } else {
+                compressedKeys = ck.truncated(toLength: length)
+                compressedValues = cv.truncated(toLength: length)
+            }
+        } else if let pool {
+            pool.truncate(to: length)
+        } else if let rk = rawKeys, let rv = rawValues {
+            if length == 0 {
+                rawKeys = nil
+                rawValues = nil
+            } else {
+                rawKeys = rk[0..., 0..., 0 ..< length, 0...]
+                rawValues = rv[0..., 0..., 0 ..< length, 0...]
+            }
+        }
+    }
+
+    /// Moves `other`'s committed storage (raw / pool / compressed, plus its quantization mode) into
+    /// this layer and leaves `other` empty. Ownership is *moved*, not shared, so the pool's
+    /// in-place `mlx_slice_update` never sees a second reference to its buffer. This layer must be
+    /// empty (fresh) — it is how a session seeds a new call's per-call cache.
+    public func adoptCommittedStorage(from other: LayerKVCache) {
+        precondition(committedLength == 0 && pendingKeys == nil,
+            "adoptCommittedStorage: target layer must be empty")
+        rawKeys = other.rawKeys
+        rawValues = other.rawValues
+        pool = other.pool
+        compressedKeys = other.compressedKeys
+        compressedValues = other.compressedValues
+        quantizationMode = other.quantizationMode
+        other.rawKeys = nil
+        other.rawValues = nil
+        other.pool = nil
+        other.compressedKeys = nil
+        other.compressedValues = nil
+    }
+
     /// Forces evaluation of the underlying stored tensors (compressed, pooled, or raw) without
     /// triggering unnecessary dequantization.
     public func evalStorage() {

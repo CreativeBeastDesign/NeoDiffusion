@@ -428,6 +428,7 @@ extension DiffusionEngine {
                 kvCacheAllocatedBytes: stats?.kvCacheAllocatedBytes ?? 0,
                 committedTokensCount: stats?.committedTokensCount ?? committedIds.count,
                 effectiveModuleAblation: params.moduleAblation,
+                sessionReusedTokens: stats?.sessionReusedTokens ?? 0,
                 stepCapHits: stepCapHits,
                 effectiveMaxStepsPerBlock: params.effectiveMaxStepsPerBlock,
                 effectiveSuppressMaskToken: params.suppressMaskToken),

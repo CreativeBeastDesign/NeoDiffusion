@@ -222,6 +222,29 @@ public struct GenerationParams: Sendable, Equatable {
             && !iceEnabled
     }
 
+    /// Whether a `generateCached(…, session:)` call may read from / write to a ``SessionPrefixCache``.
+    /// Ineligible calls **bypass** the session (left untouched; `sessionReusedTokens` = 0).
+    /// Storage-shape parameters (block length, KV quantization, pool) are not here — they are part
+    /// of the session's compatibility key and reset it instead.
+    ///
+    /// Merged 2026-10-18 from the Exp-5B implementations (allowlist from impl-y, engine design from
+    /// impl-x; `Plans/exp5b-opus-vs-fable-logbook.md`). Excluded, with reason:
+    /// - `subBlockCommit`: commits partial blocks whose K/V differ from a B-wide prefill capture.
+    /// - `nBuf != 1` (MultiBD): commits are capture forwards and impl-x's toy test found reuse exact,
+    ///   but the composition is unmeasured on the real model — excluded until it is (relaxation
+    ///   candidate: impl-x `testMultiBDCompatibleAndExact` passed at 7f125f0).
+    /// - `flashBlockEnabled` / `dualCachingEnabled`: FlashBlock keeps per-layer attention state on
+    ///   `LayerKVCache`; not reasoned about for cross-call reuse.
+    /// - `elasticCacheEnabled`, `moduleAblation != .none`, `iceEnabled`: diagnostic / non-served paths.
+    /// (An `iceTemplate` argument also bypasses — checked at the call site, it is not a param.)
+    public var sessionReuseEligible: Bool {
+        nBuf == 1 && !subBlockCommit
+            && !flashBlockEnabled && !dualCachingEnabled
+            && !elasticCacheEnabled
+            && moduleAblation == .none
+            && !iceEnabled
+    }
+
     /// Caching presets from the 2026-10-17/18 Cache Optimisation Campaign.
     ///
     /// **Status (errata 2026-10-18)**: only `exact-fast` and `legacy` are output-invariant

@@ -251,6 +251,13 @@ public final class DiffusionEngine {
         /// that verifiable from the JSONL instead of by inspection.
         public let effectiveModuleAblation: ModuleAblation
 
+        // MARK: Session prefix cache (exp-5B) — effective echo
+        /// Prompt tokens whose prefill capture forwards were **actually skipped** this call because
+        /// their committed K/V were taken from a ``SessionPrefixCache`` (whole blocks only). `0`
+        /// without a session, on an incompatible/reset session, and when the call bypassed the
+        /// session. `forwardsEvaluated` is lower by exactly `sessionReusedTokens / blockLength`.
+        public let sessionReusedTokens: Int
+
         // MARK: B-NT (2026-10-18)
         /// Blocks force-committed by the step cap (should be 0; > 0 means the loop would not have
         /// terminated on its own — such a block may contain `[MASK]`).
@@ -272,6 +279,8 @@ public final class DiffusionEngine {
         var flashBlockReuses: Int = 0
         var stepPendingKVSnapshots: [[(k: MLXArray?, v: MLXArray?)]] = []
         var selectedBreakStepInBatch: Int? = nil
+        /// Session prefix-cache reuse actually applied this call (exp-5B echo).
+        var sessionReusedTokens: Int = 0
     }
 
     /// Signature of an injected forward: given the current window ids `[1, W]` and the count of

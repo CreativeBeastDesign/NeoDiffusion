@@ -52,6 +52,23 @@ extension DiffusionEngine {
         iceTemplate: [Int]? = nil,
         streamBlock: (([Int]) -> Void)? = nil
     ) -> Output {
+        generateCached(prompt: prompt, params: params, iceTemplate: iceTemplate,
+                       streamBlock: streamBlock, session: nil)
+    }
+
+    /// ``generateCached(prompt:params:iceTemplate:streamBlock:)`` with cross-call prefix reuse
+    /// (exp-5B). With a ``SessionPrefixCache``, the leading whole prompt blocks whose ids equal the
+    /// session's held ids skip their prefill capture forwards (their K/V are taken from the
+    /// session — exact, see the type doc); after the call the session holds this call's committed
+    /// blocks. `session: nil` is byte-for-byte the session-less path. Added host work is per call
+    /// (an `[Int]` prefix compare); no new GPU readbacks, none per step.
+    public func generateCached(
+        prompt: [Int],
+        params: GenerationParams,
+        iceTemplate: [Int]? = nil,
+        streamBlock: (([Int]) -> Void)? = nil,
+        session: SessionPrefixCache?
+    ) -> Output {
         let B = params.blockLength
         let cache = ExactPrefixCache(
             layerCount: model.layerCount,
@@ -131,12 +148,40 @@ extension DiffusionEngine {
             updateCacheTelemetry()
         }
 
+        // Session prefix cache (exp-5B): seed the per-call cache with the session's reusable
+        // leading blocks (moved, not copied) and prefill only the remainder. Runs after every
+        // precondition above, so a trapping config never empties the session.
+        let sessionKey = SessionPrefixCache.CompatibilityKey(
+            model: ObjectIdentifier(model), layerCount: model.layerCount, blockLength: B,
+            kvQuantization: params.kvQuantization, kvPoolEnabled: params.kvPoolEnabled,
+            maskSemantics: .strict)
+        var activeSession: SessionPrefixCache? = session
+        if let s = session, SessionPrefixCache.bypassReason(params, iceTemplate: iceTemplate) != nil {
+            s.noteBypass()
+            activeSession = nil
+        }
+        var reusedTokens = 0
+        if let s = activeSession {
+            let checkout = s.checkout(prompt: prompt, key: sessionKey, model: model)
+            if let held = checkout.store {
+                for (dst, src) in zip(cache.layers, held.layers) {
+                    dst.adoptCommittedStorage(from: src)
+                }
+                reusedTokens = checkout.reusedTokens
+            }
+        }
+        precondition(cache.committedLength == reusedTokens && reusedTokens % B == 0,
+            "session seeding produced \(cache.committedLength) committed tokens, expected \(reusedTokens)")
+        stats.sessionReusedTokens = reusedTokens
+        updateCacheTelemetry()
+
         // Prefill: commit the pure-prompt blocks [0, prefillBlocks) into the cache so the first
         // generated block denoises against them. (Uniform with generated blocks — a prompt block
         // is just a pre-settled block; within-block bidirectional, cross-block causal via cache.)
+        // Blocks [0, reusedTokens/B) are already committed from the session.
         let prefillStart = Date()
         let prefillBlocks = prompt.count / B
-        for b in 0 ..< prefillBlocks {
+        for b in (reusedTokens / B) ..< prefillBlocks {
             let ids = MLXArray(prompt[b * B ..< (b + 1) * B].map { Int32($0) }).reshaped(1, B)
             captureAndCommit(ids, startPos: b * B)
         }
@@ -384,10 +429,17 @@ extension DiffusionEngine {
             jotCache.dropPrefix(prefixIds.dim(1))
         }
 
-        return run(prompt: prompt, params: params, iceTemplate: iceTemplate, activeCache: activeCache, boundaryHolder: boundaryHolder,
+        let output = run(prompt: prompt, params: params, iceTemplate: iceTemplate, activeCache: activeCache, boundaryHolder: boundaryHolder,
                    forward: forward, verifierForward: verifierForward,
                    streamBlock: streamBlock, onBlockSettled: onSettled,
                    onPrefixSettled: onPrefixSettled, stats: stats)
+        // Hand this call's committed blocks (prompt + generated, as committed) to the session.
+        // `finalSequence` is exactly the committed ids (`run`'s `committedIds`).
+        if let s = activeSession {
+            s.checkin(cache: cache, committedTokens: output.finalSequence, key: sessionKey,
+                      model: model)
+        }
+        return output
     }
 
     // Internal (not private): called from both the cached entry point and denoisePhase, which
