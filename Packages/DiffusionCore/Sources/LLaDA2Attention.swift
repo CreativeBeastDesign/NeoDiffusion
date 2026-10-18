@@ -130,10 +130,39 @@ public final class LLaDA2Attention: Module {
         return dense(output)
     }
 
+    /// Projects ONLY the Query heads `[B, numHeads, L, headDim]` using a zero-copy prefix slice
+    /// `[0 ..< numHeads * headDim]` of `queryKeyValue`'s weights/scales/biases.
+    /// Avoids computing the K and V projections (33.3% of QKV channels), `split`, `keyLayernorm`,
+    /// and `RoPE` on keys during within-block KV reuse steps.
+    func projectQueriesOnly(_ x: MLXArray, B: Int, L: Int) -> MLXArray {
+        let qDims = numHeads * headDim
+        let qOut: MLXArray
+        if let ql = queryKeyValue as? QuantizedLinear {
+            let qW = ql.weight[0 ..< qDims]
+            let qS = ql.scales[0 ..< qDims]
+            let qB = ql.biases?[0 ..< qDims]
+            var projected = quantizedMM(
+                x, qW, scales: qS, biases: qB, transpose: true,
+                groupSize: ql.groupSize, bits: ql.bits, mode: ql.mode)
+            if let b = ql.bias {
+                projected = projected + b[0 ..< qDims]
+            }
+            qOut = projected
+        } else {
+            let qW = queryKeyValue.weight[0 ..< qDims]
+            var projected = matmul(x, qW.T)
+            if let b = queryKeyValue.bias {
+                projected = projected + b[0 ..< qDims]
+            }
+            qOut = projected
+        }
+        return qOut.reshaped(B, L, numHeads, headDim).transposed(0, 2, 1, 3)
+    }
+
     /// Faithful-JOT cache-aware attention (WP-3a v2) + FlashBlock (WP-3b) + CSA2 (Tier 2).
     public func callAsFunction(
         _ x: MLXArray, cos: MLXArray, sin: MLXArray, cache: LayerKVCache,
-        jot: LayerJotCache, frozen: MLXArray, mask: MLXArray? = nil,
+        jot: LayerJotCache, frozen: MLXArray? = nil, mask: MLXArray? = nil,
         flashBlockEnabled: Bool = false, flashBlockTau: Int = 4,
         isFirstStepOfBlock: Bool = false, dirtyPerSeq: [Int] = [0],
         csa2Reuse: Bool = false
@@ -146,10 +175,8 @@ public final class LLaDA2Attention: Module {
         var queries: MLXArray
 
         if csa2Reuse, let prevK = jot.keys, let prevV = jot.values {
-            // CSA2 Reuse mode: compute queries only, reuse stabilized active keys and values
-            let qkv = queryKeyValue(x).reshaped(B, L, numHeads + 2 * numKVHeads, headDim)
-            let parts = split(qkv, indices: [numHeads, numHeads + numKVHeads], axis: 2)
-            queries = parts[0].transposed(0, 2, 1, 3)
+            // CSA2 Reuse mode: compute queries only via decoupled Q-slice projection, reuse active K and V
+            queries = projectQueriesOnly(x, B: B, L: L)
 
             if let queryLayernorm { queries = queryLayernorm(queries) }
             queries = PartialRotaryEmbedding.apply(queries, cos: cos, sin: sin)
@@ -169,11 +196,16 @@ public final class LLaDA2Attention: Module {
             queries = PartialRotaryEmbedding.apply(queries, cos: cos, sin: sin)
             freshKeys = PartialRotaryEmbedding.apply(freshKeys, cos: cos, sin: sin)
 
-            // Hold frozen columns at their captured value; refresh the rest. Broadcast `frozen`
-            // `[1, L]` over the head (nKV) and head-dim (D) axes → `[1, 1, L, 1]`.
-            let frozenKV = frozen.reshaped(1, 1, L, 1)
-            activeKeys = jot.keys.map { which(frozenKV, $0, freshKeys) } ?? freshKeys
-            activeValues = jot.values.map { which(frozenKV, $0, freshValues) } ?? freshValues
+            if let frozen {
+                // Hold frozen columns at their captured value; refresh the rest. Broadcast `frozen`
+                // `[1, L]` over the head (nKV) and head-dim (D) axes → `[1, 1, L, 1]`.
+                let frozenKV = frozen.reshaped(1, 1, L, 1)
+                activeKeys = jot.keys.map { which(frozenKV, $0, freshKeys) } ?? freshKeys
+                activeValues = jot.values.map { which(frozenKV, $0, freshValues) } ?? freshValues
+            } else {
+                activeKeys = freshKeys
+                activeValues = freshValues
+            }
             jot.keys = activeKeys
             jot.values = activeValues
         }
@@ -216,24 +248,28 @@ public final class LLaDA2Attention: Module {
             let kInput = (activeKeys.dtype == runnerDType) ? activeKeys : activeKeys.asType(runnerDType)
             let vInput = (activeValues.dtype == runnerDType) ? activeValues : activeValues.asType(runnerDType)
             
-            // Set up ctx lens as a [1] int32 array (cached on layer cache)
-            if cache.ctxLens == nil || cache.ctxLens?.item(Int32.self) != Int32(committedLen) {
+            // Set up ctx lens as a [1] int32 array (cached on layer cache; host-tracked to avoid .item() sync!)
+            if cache.ctxLens == nil || cache.cachedCtxLen != committedLen {
                 cache.ctxLens = MLXArray([Int32(committedLen)])
+                cache.cachedCtxLen = committedLen
             }
             let ctxLens = cache.ctxLens!
             
             // Decide step kind
             let stepKind = runner.chooseStepKind(dirtyPerSeq: dirtyPerSeq, isFirstStepOfBlock: isFirstStepOfBlock)
             
-            // Only fetch KV caches if refreshing (ZERO cache access / operations on reuse!)
+            // Only fetch KV caches if refreshing (ZERO cache access / dequantization operations on reuse!)
             var kCacheInput: MLXArray? = nil
             var vCacheInput: MLXArray? = nil
             if stepKind == .refreshCache {
+                cache.flashBlockRefreshes += 1
                 guard let cacheKeys = cache.keys, let cacheValues = cache.values else {
                     fatalError("ExactPrefixCache keys/values are empty but we are in refreshCache")
                 }
                 kCacheInput = (cacheKeys.dtype == runnerDType) ? cacheKeys : cacheKeys.asType(runnerDType)
                 vCacheInput = (cacheValues.dtype == runnerDType) ? cacheValues : cacheValues.asType(runnerDType)
+            } else {
+                cache.flashBlockReuses += 1
             }
             
             // Get past caches (A_out, L_out). If first step of block, allocate them
@@ -306,9 +342,7 @@ public final class LLaDA2Attention: Module {
             activeCache.keys = activeKeys
             activeCache.values = activeValues
         } else {
-            let qkv = queryKeyValue(x).reshaped(B, L, numHeads + 2 * numKVHeads, headDim)
-            let parts = split(qkv, indices: [numHeads, numHeads + numKVHeads], axis: 2)
-            queries = parts[0].transposed(0, 2, 1, 3)
+            queries = projectQueriesOnly(x, B: B, L: L)
 
             if let queryLayernorm { queries = queryLayernorm(queries) }
             queries = PartialRotaryEmbedding.apply(queries, cos: cos, sin: sin)

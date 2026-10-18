@@ -208,7 +208,8 @@ extension DiffusionEngine {
                 prefix: prefixArray, slots: &slots, hasNextBlock: hasNextBlock,
                 params: params, activeCache: activeCache, boundaryHolder: boundaryHolder,
                 forward: forward, verifierForward: verifierForward,
-                globalStep: &logicalStepsTotal, dualActiveSteps: &dualActiveSteps)
+                globalStep: &logicalStepsTotal, dualActiveSteps: &dualActiveSteps,
+                stats: stats)
             syncPoints += phase.syncPoints
             denoiseForwards += phase.forwards
             tokensProcessed += phase.tokensProcessed
@@ -405,11 +406,25 @@ extension DiffusionEngine {
                 effectiveCreditAlpha: params.creditAlpha,
                 effectiveCreditBeta: params.creditBeta,
                 effectiveCreditGamma: params.creditGamma,
+                effectiveFlashBlockEnabled: params.flashBlockEnabled,
+                effectiveFlashBlockTau: params.flashBlockTau,
+                effectiveFlashBlockRefreshInterval: params.flashBlockRefreshInterval,
+                flashBlockRefreshes: stats?.flashBlockRefreshes ?? 0,
+                flashBlockReuses: stats?.flashBlockReuses ?? 0,
                 effectiveDualCachingEnabled: params.dualCachingEnabled,
                 effectiveKVQuantization: params.kvQuantization.rawValue,
                 effectiveKVPoolEnabled: params.kvPoolEnabled,
                 effectiveCSA2Enabled: params.csa2Enabled,
+                effectiveCSA2Boundary: params.csa2Boundary ?? 0,
+                effectiveCSA2Stride: params.csa2Stride,
+                effectiveCSA2StepStride: params.csa2StepStride,
+                effectiveCSA2MinStep: params.csa2MinStep,
                 effectiveSureLockEnabled: params.sureLockEnabled,
+                effectiveSkipRedundantCommitForward: params.cleanCommitSkipEligible,
+                commitForwardsSaved: stats?.commitForwardsSaved ?? 0,
+                kvCacheLogicalBytes: stats?.kvCacheLogicalBytes ?? 0,
+                kvCacheAllocatedBytes: stats?.kvCacheAllocatedBytes ?? 0,
+                committedTokensCount: stats?.committedTokensCount ?? committedIds.count,
                 effectiveModuleAblation: params.moduleAblation),
             trajectorySequences: params.temporalVotingEnabled ? trajectorySequences : nil)
     }

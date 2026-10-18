@@ -3,6 +3,7 @@ import Hummingbird
 import HTTPTypes
 import NIOCore
 import MLX
+import DiffusionCore
 import DiffusionModel
 import DiffusionGeneration
 
@@ -52,6 +53,8 @@ struct ChatCompletionRequest: Codable {
     let maxTokens: Int?
     let stream: Bool?
     let neodiffusionMode: String?
+    let cachePreset: String?
+    let kvQuantization: String?
     
     enum CodingKeys: String, CodingKey {
         case model
@@ -60,6 +63,8 @@ struct ChatCompletionRequest: Codable {
         case maxTokens = "max_tokens"
         case stream
         case neodiffusionMode = "neodiffusion_mode"
+        case cachePreset = "cache_preset"
+        case kvQuantization = "kv_quantization"
     }
 }
 
@@ -219,6 +224,32 @@ struct NeoDiffusionServer {
                      autoK.studioClass ? "Studio/Ultra" : "standard"))
         let blockLength = Int(argValue("--block-length") ?? "32") ?? 32
         let noEarlyStop = hasFlag("--no-early-stop")
+        let defaultCachePresetStr = argValue("--cache-preset")
+            ?? ProcessInfo.processInfo.environment["NEODIFFUSION_CACHE_PRESET"]
+            ?? "exact-fast"
+        let defaultKvQuantStr = argValue("--kv-quant")
+            ?? ProcessInfo.processInfo.environment["NEODIFFUSION_KV_QUANT"]
+        let noCleanCommit = hasFlag("--no-clean-commit")
+            || ProcessInfo.processInfo.environment["NEODIFFUSION_NO_CLEAN_COMMIT"] == "1"
+        // Trajectory-changing cache modes (any KV quantization, every preset except exact-fast /
+        // legacy) have no scored blind quality sheet, so they are refused unless explicitly
+        // allowed (standing rule 1, errata 2026-10-18). Unknown names are errors, never ignored.
+        let allowExperimentalCache = hasFlag("--allow-experimental-cache")
+            || ProcessInfo.processInfo.environment["NEODIFFUSION_ALLOW_EXPERIMENTAL_CACHE"] == "1"
+        guard let defaultCachePreset = GenerationParams.CachePreset(rawValue: defaultCachePresetStr) else {
+            fatalError("Unknown --cache-preset '\(defaultCachePresetStr)'. Valid: \(GenerationParams.CachePreset.allCases.map(\.rawValue))")
+        }
+        let defaultKvQuant: KVCacheQuantization? = defaultKvQuantStr.map { kvStr in
+            guard let q = KVCacheQuantization.parse(kvStr) else {
+                fatalError("Unknown --kv-quant '\(kvStr)'. Valid: \(KVCacheQuantization.allCases.map(\.rawValue)) or int8/int4/int4g32")
+            }
+            return q
+        }
+        if !allowExperimentalCache
+            && (defaultCachePreset.qualityGateOpen || (defaultKvQuant.map { $0 != .none } ?? false)) {
+            fatalError("Cache preset '\(defaultCachePresetStr)' / kv-quant '\(defaultKvQuantStr ?? "-")' changes outputs and has no quality sheet; pass --allow-experimental-cache to use it anyway.")
+        }
+        print("Cache config: defaultPreset=\(defaultCachePreset.rawValue), kvQuant=\(defaultKvQuant?.rawValue ?? "preset"), cleanCommit=\(!noCleanCommit), allowExperimentalCache=\(allowExperimentalCache)")
         
         let modelDir = URL(fileURLWithPath: modelPath)
         let tokenizerDir = URL(fileURLWithPath: tokenizerPath)
@@ -284,7 +315,7 @@ struct NeoDiffusionServer {
             let safeMaskId = tokenizer.maskId >= vocabSize ? (tokenizer.maskId % vocabSize) : tokenizer.maskId
             let safeEosId = tokenizer.eosId >= vocabSize ? (tokenizer.eosId % vocabSize) : tokenizer.eosId
             
-            let params = GenerationParams.mode(
+            var params = GenerationParams.mode(
                 mode,
                 blockLength: blockLength,
                 genLength: genLength,
@@ -293,9 +324,28 @@ struct NeoDiffusionServer {
                 eosEarlyStop: !noEarlyStop,
                 temperature: chatRequest.temperature ?? 0.0
             )
+            let presetStr = chatRequest.cachePreset ?? defaultCachePresetStr
+            guard let preset = GenerationParams.CachePreset(rawValue: presetStr) else {
+                throw HTTPError(.badRequest, message: "Unknown cache_preset '\(presetStr)'. Valid: \(GenerationParams.CachePreset.allCases.map(\.rawValue))")
+            }
+            params.applyCachePreset(preset)
+            if let kvStr = chatRequest.kvQuantization {
+                guard let q = KVCacheQuantization.parse(kvStr) else {
+                    throw HTTPError(.badRequest, message: "Unknown kv_quantization '\(kvStr)'.")
+                }
+                params.kvQuantization = q
+            } else if let q = defaultKvQuant {
+                params.kvQuantization = q
+            }
+            if !allowExperimentalCache && (preset.qualityGateOpen || params.kvQuantization != .none) {
+                throw HTTPError(.badRequest, message: "cache_preset '\(presetStr)' / kv_quantization '\(params.kvQuantization.rawValue)' is experimental (no quality sheet); the server was not started with --allow-experimental-cache.")
+            }
+            if noCleanCommit {
+                params.skipRedundantCommitForward = false
+            }
             
             let isStream = chatRequest.stream ?? false
-            print("[Server] Request details: model=\(chatRequest.model), stream=\(isStream), mode=\(modeStr), maxTokens=\(genLength), vocabSize=\(vocabSize)")
+            print("[Server] Request details: model=\(chatRequest.model), stream=\(isStream), mode=\(modeStr), preset=\(presetStr), kvQuant=\(params.kvQuantization.rawValue), cleanCommitRequested=\(params.skipRedundantCommitForward), cleanCommitEffective=\(params.cleanCommitSkipEligible), maxTokens=\(genLength), vocabSize=\(vocabSize)")
             
             if isStream {
                 return try await handleStreamingRequest(

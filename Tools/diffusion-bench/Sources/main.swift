@@ -101,6 +101,11 @@ if CommandLine.arguments.contains("--help") || CommandLine.arguments.contains("-
           --arm NAME         single custom arm: --arm-mode q|s, --uncached,
                              --mask strict|referenceBias
           --arms LIST        filter the default arms (q-cached,s-cached)
+          --cache-preset P   exact-fast (default) | k8v4-clean | fp8-clean | dual-k8v4 | legacy
+          --kv-quant Q       none | fp8 | k8v4 | fp4
+          --no-clean-commit  disable skipRedundantCommitForward (enabled by default)
+          --csa2             enable periodic CSA2 layer reuse (--csa2-boundary, --csa2-stride, --csa2-step-stride, --csa2-min-step)
+          --kv-pool          enable pre-allocated KVCachePool
 
         Usage: diffusion-bench sumi [options]    (sumi-plan.md §5 S3.1)
         Options:

@@ -17,9 +17,20 @@ public final class KVCachePool {
     public private(set) var keysBuffer: MLXArray?
     public private(set) var valuesBuffer: MLXArray?
     
-    public init(initialCapacity: Int = 512) {
+    public init(initialCapacity: Int = 256) {
         self.capacity = initialCapacity
         self.committedLength = 0
+    }
+    
+    /// Logical byte footprint of the active committed slice `[1, nKV, committedLength, headDim]`.
+    public var logicalBytes: Int {
+        guard committedLength > 0, let k = keys, let v = values else { return 0 }
+        return k.nbytes + v.nbytes
+    }
+    
+    /// Total allocated byte footprint of the pre-allocated pool buffers `[1, nKV, capacity, headDim]`.
+    public var allocatedBytes: Int {
+        (keysBuffer?.nbytes ?? 0) + (valuesBuffer?.nbytes ?? 0)
     }
     
     /// Returns the active view of committed keys `[1, nKV, committedLength, headDim]`, or `nil` if empty.

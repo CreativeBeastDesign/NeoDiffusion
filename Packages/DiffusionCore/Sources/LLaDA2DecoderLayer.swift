@@ -94,7 +94,7 @@ public final class LLaDA2DecoderLayer: Module {
     ///   `attr-*` bench arms actually exercise.
     public func callAsFunction(
         _ x: MLXArray, cos: MLXArray, sin: MLXArray, cache: LayerKVCache,
-        jot: LayerJotCache, frozen: MLXArray, mask: MLXArray? = nil, capacity: Int? = nil,
+        jot: LayerJotCache, frozen: MLXArray? = nil, mask: MLXArray? = nil, capacity: Int? = nil,
         flashBlockEnabled: Bool = false, flashBlockTau: Int = 4,
         isFirstStepOfBlock: Bool = false, dirtyPerSeq: [Int] = [0],
         ablation: ModuleAblation = .none, reuseRouter: Bool = false,

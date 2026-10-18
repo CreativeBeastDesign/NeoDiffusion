@@ -76,10 +76,11 @@ final class DiffusionGenerationTests: XCTestCase {
         XCTAssertEqual(cached.tokens, uncached.tokens)
         XCTAssertEqual(cached.finalSequence, uncached.finalSequence)
 
-        // Cached path counts the prompt-prefill + per-commit capture forwards.
+        // Cached path counts the prompt-prefill + per-commit capture forwards (minus any skipped clean-commit forwards).
         let prefillBlocks = prompt.count / Self.blockLength
+        let captureForwards = cached.blockCommits.count - cached.metrics.commitForwardsSaved
         XCTAssertEqual(
-            cached.metrics.forwardsEvaluated - prefillBlocks - cached.blockCommits.count,
+            cached.metrics.forwardsEvaluated - prefillBlocks - captureForwards,
             uncached.metrics.forwardsEvaluated)
         XCTAssertGreaterThan(cached.metrics.denoiseSeconds, 0)
         XCTAssertGreaterThan(cached.metrics.commitSeconds, 0)

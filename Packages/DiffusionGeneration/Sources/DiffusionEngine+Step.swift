@@ -67,7 +67,8 @@ extension DiffusionEngine {
         forward: Forward,
         verifierForward: VerifierForward? = nil,
         globalStep: inout Int,
-        dualActiveSteps: inout Int
+        dualActiveSteps: inout Int,
+        stats: RunStats? = nil
     ) -> PhaseResult {
         precondition(params.numToTransfer == 1,
             "Phase 2 parity implements numToTransfer == 1 (the live reference value); "
@@ -127,6 +128,9 @@ extension DiffusionEngine {
         }
 
         while true {
+            stats?.stepPendingKVSnapshots.removeAll(keepingCapacity: true)
+            stats?.selectedBreakStepInBatch = nil
+
             // Build up to K speculative steps into one graph.
             var specWindow = windowActive
             var specPosts = posts
@@ -200,12 +204,15 @@ extension DiffusionEngine {
             let loopControlStart = instrument ? Date() : nil
             let flags = concatenated(breakFlags + activationFlags, axis: 0)  // [2K] Bool
             let confs = concatenated(avgConfsPerStep, axis: 0)              // [K] Float
+            let pendingSnapTensors: [MLXArray] = stats?.stepPendingKVSnapshots
+                .flatMap { $0.flatMap { [$0.k, $0.v].compactMap { $0 } } } ?? []
             eval(flags)
             eval(confs)
             eval(snapshots + nextWindows + postsPerStep.flatMap { $0 } + statsPerStep
                  + tracesPerStep + jotStableCountsPerStep + prevPredictionsPerStep + frozenMasksPerStep
                  + (params.subBlockCommit ? frozenPrefixLensPerStep : [])
-                 + creditPerStep.compactMap { $0 })
+                 + creditPerStep.compactMap { $0 }
+                 + pendingSnapTensors)
 
             // Proposal B (WP-1a elastic, nBuf == 1 only): refresh the delayed boundary from
             // the batch's last evaluated drift similarities.
@@ -292,6 +299,7 @@ extension DiffusionEngine {
 
             // Early exit transition
             if let j = firstEarlyExit, j <= (firstBreak ?? Int.max) && j <= (firstActivation ?? Int.max) {
+                stats?.stepPendingKVSnapshots.removeAll(keepingCapacity: true)
                 applyStats(j + 1)
                 applyWindow(nextWindows[j], posts: postsPerStep[j], jotStableCount: jotStableCountsPerStep[j], prevPredictions: prevPredictionsPerStep[j], frozenMask: frozenMasksPerStep[j], credit: creditPerStep[j])
                 addSteps(j + 1)
@@ -301,6 +309,7 @@ extension DiffusionEngine {
 
             // Break wins a same-step tie: the commit re-derives activation from fresh state.
             if let j = firstBreak, j <= (firstActivation ?? Int.max) {
+                stats?.selectedBreakStepInBatch = j
                 applyStats(j + 1)
                 let frontPost = Int(postsPerStep[j][0].item(Int32.self))  // memcpy, evaluated above
                 let isBudget = frontPost > params.maxPostSteps
@@ -312,6 +321,7 @@ extension DiffusionEngine {
                 addSteps(j + 1)
                 return makePhaseResult(event: .frontBreak, frontPostAtBreak: frontPost)
             }
+            stats?.stepPendingKVSnapshots.removeAll(keepingCapacity: true)
             if let j = firstActivation {
                 applyStats(j + 1)
                 applyWindow(nextWindows[j], posts: postsPerStep[j], jotStableCount: jotStableCountsPerStep[j], prevPredictions: prevPredictionsPerStep[j], frozenMask: frozenMasksPerStep[j], credit: creditPerStep[j])

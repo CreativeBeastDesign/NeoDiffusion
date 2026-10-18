@@ -81,7 +81,7 @@ public class LLaDA2MoeModel: Module {
     /// stack with per-layer frozen-K/V holds, then the FP32 output head. Returns `[1, A, vocab]`.
     public func callAsFunction(
         _ activeIds: MLXArray, positionIds: MLXArray, caches: [LayerKVCache],
-        jotCaches: [LayerJotCache], frozen: MLXArray, mask: MLXArray? = nil, capacity: Int? = nil,
+        jotCaches: [LayerJotCache], frozen: MLXArray? = nil, mask: MLXArray? = nil, capacity: Int? = nil,
         flashBlockEnabled: Bool = false, flashBlockTau: Int = 4, isFirstStepOfBlock: Bool = false,
         dirtyPerSeq: [Int] = [0], ablation: ModuleAblation = .none,
         csa2Config: CSA2Config? = nil, stepInBlock: Int = 0
@@ -208,7 +208,7 @@ public class LLaDA2MoeInnerModel: Module {
     /// representation. `jotCaches` and `caches` are both aligned with `layers` and updated in place.
     public func callAsFunction(
         _ activeIds: MLXArray, positionIds: MLXArray, caches: [LayerKVCache],
-        jotCaches: [LayerJotCache], frozen: MLXArray, mask: MLXArray? = nil, capacity: Int? = nil,
+        jotCaches: [LayerJotCache], frozen: MLXArray? = nil, mask: MLXArray? = nil, capacity: Int? = nil,
         flashBlockEnabled: Bool = false, flashBlockTau: Int = 4, isFirstStepOfBlock: Bool = false,
         dirtyPerSeq: [Int] = [0], ablation: ModuleAblation = .none,
         csa2Config: CSA2Config? = nil, stepInBlock: Int = 0

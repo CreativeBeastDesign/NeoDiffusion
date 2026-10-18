@@ -22,24 +22,44 @@ public final class ExactPrefixCache {
     public init(
         layerCount: Int,
         usePool: Bool = false,
-        initialPoolCapacity: Int = 512,
+        initialPoolCapacity: Int = 256,
         quantization: KVCacheQuantization = .none
     ) {
         self.usePool = usePool
         self.quantization = quantization
-        self.layers = (0 ..< layerCount).map { _ in
-            LayerKVCache(usePool: usePool, initialPoolCapacity: initialPoolCapacity, quantization: quantization)
+        self.layers = (0 ..< layerCount).map { l in
+            let layerQuant: KVCacheQuantization
+            if quantization == .k8v4s4 {
+                layerQuant = (l < 4) ? .k8v4 : .fp4
+            } else {
+                layerQuant = quantization
+            }
+            return LayerKVCache(usePool: usePool, initialPoolCapacity: initialPoolCapacity, quantization: layerQuant)
         }
     }
 
     /// Committed token count (all layers advance in lockstep; layer 0 is representative).
     public var committedLength: Int { layers.first?.committedLength ?? 0 }
 
+    /// Total logical bytes across all layers of the committed prefix KV cache.
+    public var logicalBytes: Int { layers.reduce(0) { $0 + $1.logicalBytes } }
+
+    /// Total allocated bytes across all layers of the committed prefix KV cache (including pool slack and FlashBlock accumulators).
+    public var allocatedBytes: Int { layers.reduce(0) { $0 + $1.allocatedBytes } }
+
+    /// Total FlashBlock cache refreshes (layer 0 is representative; all layers run the same step kind).
+    public var flashBlockRefreshes: Int { layers.first?.flashBlockRefreshes ?? 0 }
+
+    /// Total FlashBlock cache reuses (layer 0 is representative).
+    public var flashBlockReuses: Int { layers.first?.flashBlockReuses ?? 0 }
+
     /// Commit the pending (last-captured) active-block K/V on every layer — the block-commit
     /// transition. Callers must have run a capture forward over the final committed tokens first.
     public func commitBlock(usePool: Bool? = nil, quantization: KVCacheQuantization? = nil) {
         let poolFlag = usePool ?? self.usePool
-        let quantMode = quantization ?? self.quantization
-        for layer in layers { layer.commitPending(usePool: poolFlag, quantization: quantMode) }
+        for layer in layers {
+            let quantMode = quantization ?? layer.quantizationMode
+            layer.commitPending(usePool: poolFlag, quantization: quantMode)
+        }
     }
 }

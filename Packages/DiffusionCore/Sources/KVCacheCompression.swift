@@ -1,22 +1,78 @@
 import Foundation
 import MLX
 
-/// KV Cache Quantization mode for Inter-Block Prefix Storage (2026 Dual Caching Tier 1).
+/// KV Cache Quantization mode for Inter-Block Prefix Storage (2026 Dual Caching Tier 1 & Track 1 Ablations).
 ///
-/// - `none`: Full-precision storage (FP16 / BF16).
-/// - `fp8`: 8-bit quantized KV with per-group scaling (50% memory reduction, < 0.02 max deviation).
-/// - `fp4`: 4-bit packed KV with per-group scaling (75% memory reduction).
+/// **Naming caveat (errata 2026-10-18)**: every mode here is MLX *affine integer* group quantization
+/// (`MLX.quantized` default mode: per-group scale + bias). `fp8`/`fp4`/`fp4g32` are historical names
+/// for **int8 / int4 / int4-g32** — there is no floating-point FP8/FP4 format anywhere in this file.
+/// The raw values are kept because they are recorded in bench JSONL rows and CLI arm names; use
+/// ``KVCacheQuantization/parse(_:)`` to also accept the accurate aliases `int8`, `int4`, `int4g32`.
+///
+/// - `none`: Full-precision storage (FP16 / BF16, 40,960 B/tok across 20 layers).
+/// - `fp8` (`K8V8`): 8-bit quantized K and V with per-group scaling (group 64, 21,760 B/tok, -46.88% size).
+/// - `k8v4` (`K8V4`): Asymmetric 8-bit Keys + 4-bit Values (group 64, 16,640 B/tok, -59.38% size; preserves QK^T softmax precision).
+/// - `k4v8` (`K4V8`): Asymmetric 4-bit Keys + 8-bit Values (group 64, 16,640 B/tok, -59.38% size; 2x2 factorial counterpart to K8V4).
+/// - `fp4` (`K4V4`): 4-bit packed K and V with per-group scaling (group 64, 11,520 B/tok, -71.88% size).
+/// - `fp4g32` (`K4V4-g32`): 4-bit packed K and V with finer group-32 scaling (12,800 B/tok, -68.75% size).
+/// - `kivi4` (`K4-chan-V4-tok`): KIVI dual-axis 4-bit quantization — Keys quantized per-channel along the 32-token block axis (group 32), Values quantized per-token along headDim (group 64) (12,160 B/tok, -70.31% size).
+/// - `k8v4s4` (`K8V4-shallow4 + K4V4-deep16`): KVTuner-style depth-hybrid allocation — K8V4 in shallow layers 0..<4 and K4V4 in deeper layers 4..<20 (12,544 B/tok, -69.38% size).
 public enum KVCacheQuantization: String, Sendable, Equatable, CaseIterable {
     case none
     case fp8
+    case k8v4
+    case k4v8
     case fp4
+    case fp4g32
+    case kivi4
+    case k8v4s4
     
-    public var bits: Int {
+    /// Parses a mode from its raw value or an accurate integer alias (`int8`→`fp8`, `int4`→`fp4`,
+    /// `int4g32`→`fp4g32`). Returns `nil` for unknown strings — callers must surface that, not ignore it.
+    public static func parse(_ s: String) -> KVCacheQuantization? {
+        switch s.lowercased() {
+        case "int8": return .fp8
+        case "int4": return .fp4
+        case "int4g32": return .fp4g32
+        default: return KVCacheQuantization(rawValue: s)
+        }
+    }
+
+    /// Key bit-width. (Historically named `bits`; values may use a different width — see `valueBits`.)
+    public var bits: Int { keyBits }
+    
+    public var keyBits: Int {
         switch self {
         case .none: return 16
-        case .fp8: return 8
-        case .fp4: return 4
+        case .fp8, .k8v4, .k8v4s4: return 8
+        case .k4v8, .fp4, .fp4g32, .kivi4: return 4
         }
+    }
+    
+    public var valueBits: Int {
+        switch self {
+        case .none: return 16
+        case .fp8, .k4v8: return 8
+        case .k8v4, .fp4, .fp4g32, .kivi4, .k8v4s4: return 4
+        }
+    }
+    
+    public var keyGroupSize: Int {
+        switch self {
+        case .fp4g32, .kivi4: return 32
+        default: return 64
+        }
+    }
+    
+    public var valueGroupSize: Int {
+        switch self {
+        case .fp4g32: return 32
+        default: return 64
+        }
+    }
+    
+    public var keyPerChannel: Bool {
+        self == .kivi4
     }
 }
 
@@ -28,33 +84,91 @@ public struct CompressedKVTensor {
     public let groupSize: Int
     public let bits: Int
     public let originalShape: [Int]
+    public let perChannel: Bool
     
-    public init(packed: MLXArray, scales: MLXArray, biases: MLXArray?, groupSize: Int, bits: Int, originalShape: [Int]) {
+    public init(
+        packed: MLXArray,
+        scales: MLXArray,
+        biases: MLXArray?,
+        groupSize: Int,
+        bits: Int,
+        originalShape: [Int],
+        perChannel: Bool = false
+    ) {
         self.packed = packed
         self.scales = scales
         self.biases = biases
         self.groupSize = groupSize
         self.bits = bits
         self.originalShape = originalShape
+        self.perChannel = perChannel
     }
     
-    /// Compresses a full-precision tensor using fine-grained group quantization.
-    public static func compress(_ x: MLXArray, mode: KVCacheQuantization, groupSize: Int = 64) -> CompressedKVTensor? {
-        guard mode != .none else { return nil }
-        let (q, scales, biases) = MLX.quantized(x, groupSize: groupSize, bits: mode.bits)
+    /// Total bytes occupied by the quantized representation (packed + scales + biases).
+    public var byteCount: Int {
+        packed.nbytes + scales.nbytes + (biases?.nbytes ?? 0)
+    }
+    
+    /// Compresses a full-precision tensor using fine-grained group quantization with explicit bit-width
+    /// and optional per-channel quantization (transposing sequence axis 2 and head-dim axis 3).
+    public static func compress(
+        _ x: MLXArray,
+        bits: Int,
+        groupSize: Int = 64,
+        perChannel: Bool = false
+    ) -> CompressedKVTensor {
+        let usePerChannel = perChannel && x.ndim == 4 && x.dim(2) % groupSize == 0
+        let target = usePerChannel ? x.transposed(0, 1, 3, 2) : x
+        let (q, scales, biases) = MLX.quantized(target, groupSize: groupSize, bits: bits)
         return CompressedKVTensor(
             packed: q,
             scales: scales,
             biases: biases,
             groupSize: groupSize,
-            bits: mode.bits,
-            originalShape: x.shape
+            bits: bits,
+            originalShape: x.shape,
+            perChannel: usePerChannel
+        )
+    }
+    
+    /// Incrementally quantizes a newly committed block `[B, nKV, blockLen, D]` and appends it along
+    /// sequence axis 2 (or axis 3 in transposed per-channel layout) without re-quantizing or
+    /// materializing the previously committed prefix in FP16.
+    public func append(_ block: MLXArray) -> CompressedKVTensor {
+        let usePerChannel = perChannel && block.ndim == 4 && block.dim(2) % groupSize == 0
+        // A per-channel (transposed) tensor can only grow by whole groups along the sequence axis.
+        // Before 2026-10-18 a misaligned append (e.g. a sub-block commit of n < groupSize tokens
+        // onto a kivi4 prefix) silently took the non-transposed branch and concatenated two
+        // different layouts — a shape crash at best, garbage K/V at worst. Fail loudly instead.
+        precondition(usePerChannel == perChannel,
+                     "CompressedKVTensor.append: per-channel tensor needs appends that are multiples of groupSize=\(groupSize) tokens (got \(block.dim(2))). kivi4 is incompatible with sub-block commit.")
+        let target = usePerChannel ? block.transposed(0, 1, 3, 2) : block
+        let concatAxis = usePerChannel ? 3 : 2
+        let (qBlock, sBlock, bBlock) = MLX.quantized(target, groupSize: groupSize, bits: bits)
+        let newPacked = concatenated([packed, qBlock], axis: concatAxis)
+        let newScales = concatenated([scales, sBlock], axis: concatAxis)
+        let newBiases: MLXArray?
+        if let biases, let bBlock {
+            newBiases = concatenated([biases, bBlock], axis: concatAxis)
+        } else {
+            newBiases = nil
+        }
+        var newShape = originalShape
+        newShape[2] += block.dim(2)
+        return CompressedKVTensor(
+            packed: newPacked,
+            scales: newScales,
+            biases: newBiases,
+            groupSize: groupSize,
+            bits: bits,
+            originalShape: newShape,
+            perChannel: usePerChannel
         )
     }
     
     /// Dequantizes the compressed tensor back to full-precision FP16.
     public func dequantize(dtype: DType = .float16) -> MLXArray {
-        return dequantized(
+        let deq = dequantized(
             packed,
             scales: scales,
             biases: biases,
@@ -62,5 +176,6 @@ public struct CompressedKVTensor {
             bits: bits,
             dtype: dtype
         )
+        return perChannel ? deq.transposed(0, 1, 3, 2) : deq
     }
 }

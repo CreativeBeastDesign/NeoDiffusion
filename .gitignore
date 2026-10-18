@@ -1,6 +1,6 @@
 .DS_Store
 .build/
-models/
+/models/
 scratch/
 .swiftpm/
 DerivedData/

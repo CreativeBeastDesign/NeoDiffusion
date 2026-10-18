@@ -149,10 +149,13 @@ public struct GenerationParams: Sendable, Equatable {
     public var flashBlockEnabled: Bool
     /// Dirty token threshold for FlashBlock cache refresh.
     public var flashBlockTau: Int
+    /// Sync-free temporal cadence for FlashBlock prefix attention refresh (`0` = use legacy `flashBlockTau`;
+    /// `> 0` = refresh on Step 0, Step 1, and every `N` steps thereafter, reusing prefix attention in between).
+    public var flashBlockRefreshInterval: Int = 0
 
     /// Whether Unified Dual Caching is enabled (WP-4e).
     public var dualCachingEnabled: Bool
-    /// KV Cache Quantization mode for Tier-1 Prefix storage (.none, .fp8, .fp4).
+    /// KV Cache Quantization mode for Tier-1 Prefix storage (.none, .fp8, .k8v4, .fp4).
     public var kvQuantization: KVCacheQuantization
     /// Whether to use the pre-allocated memory pool for prefix KV.
     public var kvPoolEnabled: Bool
@@ -164,18 +167,147 @@ public struct GenerationParams: Sendable, Equatable {
     public var csa2Boundary: Int?
     /// CSA2 layer stride (e.g. 2 for alternating).
     public var csa2Stride: Int
+    /// CSA2 temporal step stride (`1` = reuse every step >= minStep; `2` = alternate refresh/reuse so active KV is at most 1 step old).
+    public var csa2StepStride: Int = 1
+    /// CSA2 minimum step in block before active KV reuse begins (`1` = legacy; `2` = capture Step 1 post-mask KV first).
+    public var csa2MinStep: Int = 1
     /// Token stability locking (SureLock / FreeCache unified mode).
     public var sureLockEnabled: Bool
+    /// Skip the redundant `captureAndCommit` full model forward pass at block settle when the break step `j`'s
+    /// `pendingKeys`/`pendingValues` already hold the clean K/V for `committedActive` (saves 1 full forward per block with 100% bitwise parity).
+    public var skipRedundantCommitForward: Bool = true
+
+    /// Whether the clean-commit skip may actually fire for this configuration.
+    ///
+    /// The skip commits the settle step's pending K/V instead of recomputing it. That is exact only
+    /// if the settle step ran a *plain, fresh* forward over exactly the committed tokens, i.e. the
+    /// same computation `captureAndCommit` would run. This is an **allowlist**: every feature that
+    /// makes the step's K/V approximate, stale, or computed over different tokens disables it.
+    ///
+    /// Excluded, with the failure each would cause `[Sourced: code review 2026-10-18]`:
+    /// - CSA2 / dual caching: reuse steps write the *previous* step's active K/V into
+    ///   `pendingKeys` (`LLaDA2Attention` CSA2 branch), so a settle on a reuse step commits K/V
+    ///   computed over pre-update tokens (possibly `[MASK]`) into the exact prefix cache.
+    /// - JOT / SureLock: frozen-column holds put old K/V into pending; JOT can also change
+    ///   tokens on the settle step.
+    /// - FlashBlock: reuse steps compute attention against cached outputs, not fresh K/V paths.
+    /// - Elastic-Cache: approximate active-window recompute.
+    /// - Router reuse (N>1) / MoE capacity: deeper-layer hidden states (hence K/V) differ from a
+    ///   fresh forward.
+    /// - ICE: settle checks only the thinking region, so the step's input may differ from the
+    ///   committed tokens.
+    /// - nBuf≠1, sub-block commit, speculation, module ablation: window/commit shapes differ.
+    public var cleanCommitSkipEligible: Bool {
+        skipRedundantCommitForward
+            && nBuf == 1 && !subBlockCommit && speculation == .none
+            && moduleAblation == .none
+            && !csa2Enabled && !dualCachingEnabled
+            && !jotEnabled && !sureLockEnabled
+            && !flashBlockEnabled
+            && !elasticCacheEnabled
+            && routerReuseSteps <= 1 && moeCapacityRatio == 0
+            && !iceEnabled
+    }
+
+    /// Caching presets from the 2026-10-17/18 Cache Optimisation Campaign.
+    ///
+    /// **Status (errata 2026-10-18)**: only `exact-fast` and `legacy` are output-invariant
+    /// (token-identical, 716/716 on 4-bit M1; Studio BF16 parity still OPEN). Every other preset
+    /// changes the decoding trajectory and has **no blind quality sheet** — standing rule (1): no
+    /// preset ships while its quality gate is open. They are experimental and must be opted into
+    /// (``qualityGateOpen``). Token match vs FP16 is a *parity* number, not a quality number.
+    /// TPS numbers below are aggregate tokens/seconds from `Tools/analysis/cache_campaign_aggregate.py`
+    /// (the original comments quoted mean-of-per-prompt ratios, which overstated gains).
+    /// `fp8` here is affine **int8**, not floating-point FP8.
+    public enum CachePreset: String, Codable, Sendable, CaseIterable {
+        /// Uncompressed FP16 prefix KV + clean-commit skip. Output-invariant.
+        /// Aggregate +9.0% TPS at K=4 / +9.7% at K=1 (≈ −9–10% forwards; ms/fwd unchanged).
+        case exactFast = "exact-fast"
+        /// int8 Keys / int4 Values (group 64) + clean-commit. −59.4% KV bytes. Compute speed ≈ exact-fast
+        /// (ms/fwd equal); any TPS difference is trajectory-driven. Quality gate OPEN.
+        case balancedK8V4 = "k8v4-clean"
+        /// int8 Keys & Values (group 64) + clean-commit. −46.9% KV bytes. Quality gate OPEN.
+        case balancedFP8 = "fp8-clean"
+        /// KIVI-style int4 (Keys per-channel over the 32-token block, Values per-token) + clean-commit.
+        /// −70.3% KV bytes. Incompatible with sub-block commit. Quality gate OPEN.
+        case ultraCompactKIVI4 = "kivi4-clean"
+        /// k8v4 + periodic CSA2 (boundary 4, stride 2, stepStride 2, minStep 2). **UNMEASURED as
+        /// defined**: the campaign arm ran with a clean-commit gate bug that committed stale CSA2 K/V
+        /// (fixed 2026-10-18; CSA2 now makes the skip ineligible), and before 2026-10-18 this preset
+        /// also set `dualCachingEnabled`, which silently enabled FlashBlock. Quality gate OPEN.
+        case dualCodeK8V4 = "dual-k8v4"
+        /// Uncompressed FP16 prefix KV, separate capture forward on commit (pre-campaign behaviour).
+        case legacy = "legacy"
+
+        /// `true` for presets that change the decoding trajectory and have no scored blind sheet.
+        public var qualityGateOpen: Bool {
+            switch self {
+            case .exactFast, .legacy: return false
+            case .balancedK8V4, .balancedFP8, .ultraCompactKIVI4, .dualCodeK8V4: return true
+            }
+        }
+    }
+
+    /// Applies a validated caching preset to this parameter set.
+    public mutating func applyCachePreset(_ preset: CachePreset) {
+        switch preset {
+        case .exactFast:
+            skipRedundantCommitForward = true
+            kvQuantization = .none
+            kvPoolEnabled = false
+            csa2Enabled = false
+            dualCachingEnabled = false
+        case .balancedK8V4:
+            skipRedundantCommitForward = true
+            kvQuantization = .k8v4
+            kvPoolEnabled = false
+            csa2Enabled = false
+            dualCachingEnabled = false
+        case .balancedFP8:
+            skipRedundantCommitForward = true
+            kvQuantization = .fp8
+            kvPoolEnabled = false
+            csa2Enabled = false
+            dualCachingEnabled = false
+        case .ultraCompactKIVI4:
+            skipRedundantCommitForward = true
+            kvQuantization = .kivi4
+            kvPoolEnabled = false
+            csa2Enabled = false
+            dualCachingEnabled = false
+        case .dualCodeK8V4:
+            skipRedundantCommitForward = true
+            kvQuantization = .k8v4
+            kvPoolEnabled = false
+            csa2Enabled = true
+            csa2Boundary = 4
+            csa2Stride = 2
+            csa2StepStride = 2
+            csa2MinStep = 2
+            // Was `true` until 2026-10-18: `dualCachingEnabled` also switches FlashBlock on
+            // (interval 2), which the measured `cache-dual-k8v4` arm never did.
+            dualCachingEnabled = false
+        case .legacy:
+            skipRedundantCommitForward = false
+            kvQuantization = .none
+            kvPoolEnabled = false
+            csa2Enabled = false
+            dualCachingEnabled = false
+        }
+    }
 
     /// Resolved CSA2 configuration if CSA2 or Dual Caching is enabled.
     public var csa2Config: CSA2Config? {
         guard csa2Enabled || dualCachingEnabled else { return nil }
+        let effStepStride = dualCachingEnabled && !csa2Enabled ? max(2, csa2StepStride) : csa2StepStride
+        let effMinStep = dualCachingEnabled && !csa2Enabled ? max(2, csa2MinStep) : csa2MinStep
         if let boundary = csa2Boundary {
-            return .boundary(boundary)
+            return .boundary(boundary, stepStride: effStepStride, minStep: effMinStep)
         } else {
-            return .alternating(stride: csa2Stride)
+            return .alternating(stride: csa2Stride, stepStride: effStepStride, minStep: effMinStep)
         }
     }
+
 
 
     /// Whether Temporal Self-Consistency Voting is enabled.
@@ -259,14 +391,18 @@ public struct GenerationParams: Sendable, Equatable {
         subBlockMinPrefix: Int = 8,
         flashBlockEnabled: Bool = false,
         flashBlockTau: Int = 4,
+        flashBlockRefreshInterval: Int = 0,
         dualCachingEnabled: Bool = false,
         kvQuantization: KVCacheQuantization = .none,
         kvPoolEnabled: Bool = false,
-        kvPoolCapacity: Int = 512,
+        kvPoolCapacity: Int = 256,
         csa2Enabled: Bool = false,
         csa2Boundary: Int? = nil,
         csa2Stride: Int = 2,
+        csa2StepStride: Int = 1,
+        csa2MinStep: Int = 1,
         sureLockEnabled: Bool = false,
+        skipRedundantCommitForward: Bool = true,
         temporalVotingEnabled: Bool = false,
         temporalVotingAlpha: Float = 0.0,
         temporalVotingCutoff: Float = 0.9,
@@ -312,6 +448,7 @@ public struct GenerationParams: Sendable, Equatable {
         self.subBlockMinPrefix = subBlockMinPrefix
         self.flashBlockEnabled = flashBlockEnabled
         self.flashBlockTau = flashBlockTau
+        self.flashBlockRefreshInterval = flashBlockRefreshInterval
         self.dualCachingEnabled = dualCachingEnabled
         self.kvQuantization = kvQuantization
         self.kvPoolEnabled = kvPoolEnabled
@@ -319,7 +456,10 @@ public struct GenerationParams: Sendable, Equatable {
         self.csa2Enabled = csa2Enabled
         self.csa2Boundary = csa2Boundary
         self.csa2Stride = csa2Stride
+        self.csa2StepStride = csa2StepStride
+        self.csa2MinStep = csa2MinStep
         self.sureLockEnabled = sureLockEnabled
+        self.skipRedundantCommitForward = skipRedundantCommitForward
         self.temporalVotingEnabled = temporalVotingEnabled
         self.temporalVotingAlpha = temporalVotingAlpha
         self.temporalVotingCutoff = temporalVotingCutoff

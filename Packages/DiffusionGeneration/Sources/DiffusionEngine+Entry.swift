@@ -98,10 +98,20 @@ extension DiffusionEngine {
             precondition(!params.elasticCacheEnabled,
                 "Dual caching and Elastic-Cache cannot be enabled together.")
         }
+        precondition(!(params.subBlockCommit && params.kvQuantization.keyPerChannel),
+            "kivi4 (per-channel Keys, group = 32 tokens) cannot take sub-block commits of < 32 tokens.")
         precondition(!params.subBlockCommit || (params.jotEnabled && params.jotFaithful),
             "sub-block prefix commit (Option C) requires faithful JOT (it keys off the frozen "
             + "mask and commits into the ExactPrefixCache); enable jotEnabled + jotFaithful.")
 
+
+        func updateCacheTelemetry() {
+            stats.kvCacheLogicalBytes = cache.logicalBytes
+            stats.kvCacheAllocatedBytes = cache.allocatedBytes
+            stats.committedTokensCount = cache.committedLength
+            stats.flashBlockRefreshes = cache.flashBlockRefreshes
+            stats.flashBlockReuses = cache.flashBlockReuses
+        }
 
         // Capture forward over a full block of `ids` at absolute `startPos`, then commit its K/V.
         func captureAndCommit(_ ids: MLXArray, startPos: Int) {
@@ -115,9 +125,10 @@ extension DiffusionEngine {
             // block's first denoising batch.
             if instrument {
                 for layer in cache.layers {
-                    if let k = layer.keys, let v = layer.values { eval(k, v) }
+                    layer.evalStorage()
                 }
             }
+            updateCacheTelemetry()
         }
 
         // Prefill: commit the pure-prompt blocks [0, prefillBlocks) into the cache so the first
@@ -130,6 +141,7 @@ extension DiffusionEngine {
             captureAndCommit(ids, startPos: b * B)
         }
         stats.prefillSeconds = Date().timeIntervalSince(prefillStart)
+        updateCacheTelemetry()
 
         // Router-reuse state is per-layer and lives on the gate modules, which outlive a single
         // generation. Clear it here: a routing decision cached from a *previous prompt* is
@@ -164,7 +176,7 @@ extension DiffusionEngine {
 
         // Active-only forward: slice the active window out of the full window; positions are
         // absolute from the committed length (== window length − active length).
-        let forward: Forward = { [self, model, cache, activeCache, jotCache, boundaryHolder] windowIds, activeLen, frozen in
+        let forward: Forward = { [self, model, cache, activeCache, jotCache, boundaryHolder, stats] windowIds, activeLen, frozen in
             let W = windowIds.dim(windowIds.ndim - 1)
             let activeIds = windowIds[0..., (W - activeLen)...]
             let positionIds = MLXArray(Int32(W - activeLen) ..< Int32(W)).expandedDimensions(axis: 0)
@@ -174,9 +186,20 @@ extension DiffusionEngine {
             let stepInBlock = stepIndex
             stepIndex += 1
 
+            // Allowlist — see `GenerationParams.cleanCommitSkipEligible` for every exclusion.
+            let canSnapshotPending = params.cleanCommitSkipEligible
+            func recordPendingSnapshot() {
+                guard canSnapshotPending else { return }
+                stats.stepPendingKVSnapshots.append(
+                    cache.layers.map { (k: $0.pendingKeys, v: $0.pendingValues) })
+            }
+
             // Faithful JOT (WP-3a v2) / FlashBlock (WP-3b) / CSA2 / SureLock / Dual Caching
             if params.flashBlockEnabled || (params.jotEnabled && params.jotFaithful) || params.dualCachingEnabled || params.csa2Enabled || params.sureLockEnabled {
-                let frozenMaskVal = frozen ?? MLXArray.zeros([1, activeLen], dtype: .bool)
+                let needsFrozenHold = (params.jotEnabled && params.jotFaithful) || params.sureLockEnabled
+                let frozenMaskVal: MLXArray? = needsFrozenHold
+                    ? (frozen ?? MLXArray.zeros([1, activeLen], dtype: .bool))
+                    : nil
                 let capacity: Int? = (params.moeCapacityRatio > 0 && (params.jotEnabled || params.sureLockEnabled))
                     ? Int((params.moeCapacityRatio * Float(activeLen)).rounded(.up))
                     : nil
@@ -186,10 +209,16 @@ extension DiffusionEngine {
                 // FlashBlock never reused its cache. WP-3b's wall-clock verdict predates this fix.
                 let isFirstStep = (stepInBlock == 0)
                 
+                // Sync-free FlashBlock step selection: never call `.item()` inside `forward`!
+                // When `flashBlockRefreshInterval > 0` (or `dualCachingEnabled` defaults to interval 2),
+                // refresh on Step 0, Step 1 (post-mask initialization), and every `interval` steps thereafter.
+                let effFBInterval = params.flashBlockRefreshInterval > 0
+                    ? params.flashBlockRefreshInterval
+                    : (params.dualCachingEnabled ? 2 : 0)
                 let dirtyCount: Int
-                if let frozen {
-                    let dirtyMask = (MLXArray.ones(like: frozen) - frozen.asType(.int32))
-                    dirtyCount = Int(dirtyMask.sum().item(Int32.self))
+                if effFBInterval > 0 {
+                    let shouldRefresh = (stepInBlock <= 1) || ((stepInBlock - 1) % effFBInterval == 0)
+                    dirtyCount = shouldRefresh ? max(activeLen, params.flashBlockTau) : 0
                 } else {
                     dirtyCount = activeLen
                 }
@@ -197,12 +226,14 @@ extension DiffusionEngine {
                 let fbEnabled = params.flashBlockEnabled || params.dualCachingEnabled
                 let csa2 = params.csa2Config
 
-                return model(activeIds, positionIds: positionIds, caches: cache.layers,
-                             jotCaches: jotCache.layers, frozen: frozenMaskVal, mask: nil, capacity: capacity,
-                             flashBlockEnabled: fbEnabled, flashBlockTau: params.flashBlockTau,
-                             isFirstStepOfBlock: isFirstStep, dirtyPerSeq: [dirtyCount],
-                             ablation: params.moduleAblation,
-                             csa2Config: csa2, stepInBlock: stepInBlock)
+                let logits = model(activeIds, positionIds: positionIds, caches: cache.layers,
+                                   jotCaches: jotCache.layers, frozen: frozenMaskVal, mask: nil, capacity: capacity,
+                                   flashBlockEnabled: fbEnabled, flashBlockTau: params.flashBlockTau,
+                                   isFirstStepOfBlock: isFirstStep, dirtyPerSeq: [dirtyCount],
+                                   ablation: params.moduleAblation,
+                                   csa2Config: csa2, stepInBlock: stepInBlock)
+                recordPendingSnapshot()
+                return logits
             }
 
 
@@ -222,9 +253,11 @@ extension DiffusionEngine {
                     && stepInBlock % params.routerReuseSteps != 0
 
                 guard activeLen > B else {
-                    return model(activeIds, positionIds: positionIds, caches: cache.layers, mask: nil,
-                                 frozen: frozen, ablation: params.moduleAblation,
-                                 reuseRouter: reuseRouter)
+                    let logits = model(activeIds, positionIds: positionIds, caches: cache.layers, mask: nil,
+                                       frozen: frozen, ablation: params.moduleAblation,
+                                       reuseRouter: reuseRouter)
+                    recordPendingSnapshot()
+                    return logits
                 }
                 let prefixLen = W - activeLen
                 let mask = maskMemo[prefixLen] ?? {
@@ -233,9 +266,11 @@ extension DiffusionEngine {
                     maskMemo[prefixLen] = m
                     return m
                 }()
-                return model(activeIds, positionIds: positionIds, caches: cache.layers, mask: mask,
-                             frozen: frozen, ablation: params.moduleAblation,
-                             reuseRouter: reuseRouter)
+                let logits = model(activeIds, positionIds: positionIds, caches: cache.layers, mask: mask,
+                                   frozen: frozen, ablation: params.moduleAblation,
+                                   reuseRouter: reuseRouter)
+                recordPendingSnapshot()
+                return logits
             }
 
             let prefixLen = W - activeLen
@@ -276,6 +311,7 @@ extension DiffusionEngine {
                 eval(similarities)
             }
 
+            recordPendingSnapshot()
             return logits
         }
 
@@ -300,11 +336,36 @@ extension DiffusionEngine {
             }
             : nil
 
-        // On settle, run the capture forward over the committed tokens and commit clean K/V.
+        // On settle, commit clean K/V (either directly from the settle step's already-evaluated
+        // pending K/V when `skipRedundantCommitForward` is enabled, or via `captureAndCommit`).
         let onSettled: (Int, MLXArray) -> Void = { _, committedActive in
-            // Commit at the current committed length, not blockIndex*B — a block that already
-            // sub-committed a prefix (Option C) starts its suffix past the block-aligned offset.
-            captureAndCommit(committedActive, startPos: cache.committedLength)
+            let canSkipCapture = params.cleanCommitSkipEligible
+            if canSkipCapture,
+               let j = stats.selectedBreakStepInBatch,
+               j < stats.stepPendingKVSnapshots.count,
+               stats.stepPendingKVSnapshots[j].allSatisfy({ $0.k != nil && $0.v != nil }) {
+                let snap = stats.stepPendingKVSnapshots[j]
+                for l in 0 ..< cache.layers.count {
+                    cache.layers[l].pendingKeys = snap[l].k
+                    cache.layers[l].pendingValues = snap[l].v
+                }
+                stats.stepPendingKVSnapshots.removeAll(keepingCapacity: true)
+                stats.selectedBreakStepInBatch = nil
+                cache.commitBlock()
+                stats.commitForwardsSaved += 1
+                if self.instrument {
+                    for layer in cache.layers {
+                        layer.evalStorage()
+                    }
+                }
+                updateCacheTelemetry()
+            } else {
+                stats.stepPendingKVSnapshots.removeAll(keepingCapacity: true)
+                stats.selectedBreakStepInBatch = nil
+                // Commit at the current committed length, not blockIndex*B — a block that already
+                // sub-committed a prefix (Option C) starts its suffix past the block-aligned offset.
+                captureAndCommit(committedActive, startPos: cache.committedLength)
+            }
             activeCache.clear()
             // Faithful JOT: the held K/V belong to the settled block's active window; the next
             // block starts with no frozen columns, so drop them (also avoids carrying a stale
@@ -317,6 +378,8 @@ extension DiffusionEngine {
         // Option C (WP-3a §11): commit a settled frozen prefix mid-block. Captures the prefix's KV
         // into the ExactPrefixCache at its absolute start and drops the held JOT columns for it.
         let onPrefixSettled: (Int, MLXArray) -> Void = { startPos, prefixIds in
+            stats.stepPendingKVSnapshots.removeAll(keepingCapacity: true)
+            stats.selectedBreakStepInBatch = nil
             captureAndCommit(prefixIds, startPos: startPos)
             jotCache.dropPrefix(prefixIds.dim(1))
         }

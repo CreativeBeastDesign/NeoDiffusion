@@ -253,6 +253,99 @@ final class DenoisingLoopParityTests: XCTestCase {
             + "worst syncs/step ratio %.3f (K=%d, ideal ~%.3f)", worstRatio, K, 1.0 / Double(K)))
     }
 
+    /// Verify that `skipRedundantCommitForward` saves exactly 1 full forward per generated block
+    /// while remaining 100% token-for-token and block-commit identical to the reference across
+    /// all 20 loop-fixture cases at both K=1 and K=4.
+    func testSkipRedundantCommitForwardParity() throws {
+        var failures: [String] = []
+        for k in [1, 4] {
+            let engine = DiffusionEngine(model: model, speculationK: k)
+            for c in traces.cases {
+                var pBase = c.params.toGenerationParams()
+                pBase.skipRedundantCommitForward = false
+                var pClean = pBase
+                pClean.skipRedundantCommitForward = true
+
+                let base = engine.generateCached(prompt: c.prompt, params: pBase)
+                let clean = engine.generateCached(prompt: c.prompt, params: pClean)
+
+                if clean.finalSequence != c.finalX {
+                    failures.append("\(c.name) (K=\(k)): final_x != reference "
+                        + "(first diff \(firstDiff(clean.finalSequence, c.finalX)))")
+                }
+                if clean.finalSequence != base.finalSequence {
+                    failures.append("\(c.name) (K=\(k)): clean != base")
+                }
+                let expectedSaved = clean.stepsPerBlock.count
+                if clean.metrics.commitForwardsSaved != expectedSaved {
+                    failures.append("\(c.name) (K=\(k)): saved \(clean.metrics.commitForwardsSaved) != \(expectedSaved) blocks")
+                }
+                if clean.metrics.forwardsEvaluated != base.metrics.forwardsEvaluated - expectedSaved {
+                    failures.append("\(c.name) (K=\(k)): forwards \(clean.metrics.forwardsEvaluated) != \(base.metrics.forwardsEvaluated - expectedSaved)")
+                }
+            }
+        }
+        XCTAssertTrue(failures.isEmpty,
+            "skipRedundantCommitForward parity failures (\(failures.count)):\n"
+            + failures.joined(separator: "\n"))
+        print("[Cache-Opt] skipRedundantCommitForward: 100% token-for-token parity across all \(traces.cases.count) cases at K=1 and K=4, saving 1 forward/block")
+    }
+
+    /// Regression for the 2026-10-18 clean-commit gate bug: on a CSA2 reuse step the pending K/V
+    /// is the *previous* step's, so committing it would put stale K/V into the exact prefix
+    /// cache. With CSA2 on, the skip must be ineligible — zero forwards saved, and output
+    /// identical to the same CSA2 config with the skip explicitly off.
+    func testCleanCommitSkipIsIneligibleUnderCSA2() throws {
+        let engine = DiffusionEngine(model: model, speculationK: 1)
+        var failures: [String] = []
+        for c in traces.cases {
+            var pOff = c.params.toGenerationParams()
+            pOff.csa2Enabled = true
+            pOff.csa2StepStride = 2
+            pOff.csa2MinStep = 2
+            pOff.skipRedundantCommitForward = false
+            var pOn = pOff
+            pOn.skipRedundantCommitForward = true
+            XCTAssertFalse(pOn.cleanCommitSkipEligible)
+
+            let off = engine.generateCached(prompt: c.prompt, params: pOff)
+            let on = engine.generateCached(prompt: c.prompt, params: pOn)
+            if on.metrics.commitForwardsSaved != 0 {
+                failures.append("\(c.name): saved \(on.metrics.commitForwardsSaved) forwards under CSA2")
+            }
+            if on.finalSequence != off.finalSequence {
+                failures.append("\(c.name): CSA2 output depends on the (ineligible) skip flag")
+            }
+        }
+        XCTAssertTrue(failures.isEmpty, failures.joined(separator: "\n"))
+    }
+
+    /// The allowlist itself: each trajectory- or K/V-altering feature must disable the skip.
+    func testCleanCommitSkipEligibilityAllowlist() throws {
+        let base = traces.cases[0].params.toGenerationParams()
+        XCTAssertTrue(base.cleanCommitSkipEligible, "plain path must stay eligible")
+        let disablers: [(String, (inout GenerationParams) -> Void)] = [
+            ("csa2", { $0.csa2Enabled = true }),
+            ("dualCaching", { $0.dualCachingEnabled = true }),
+            ("jot", { $0.jotEnabled = true }),
+            ("sureLock", { $0.sureLockEnabled = true }),
+            ("flashBlock", { $0.flashBlockEnabled = true }),
+            ("elastic", { $0.elasticCacheEnabled = true }),
+            ("routerReuse", { $0.routerReuseSteps = 2 }),
+            ("moeCapacity", { $0.moeCapacityRatio = 0.5 }),
+            ("ice", { $0.iceEnabled = true }),
+            ("nBuf2", { $0.nBuf = 2 }),
+            ("subBlockCommit", { $0.subBlockCommit = true }),
+            ("s2d2", { $0.speculation = .s2d2 }),
+            ("flagOff", { $0.skipRedundantCommitForward = false }),
+        ]
+        for (name, apply) in disablers {
+            var p = base
+            apply(&p)
+            XCTAssertFalse(p.cleanCommitSkipEligible, "\(name) must make the clean-commit skip ineligible")
+        }
+    }
+
     private func firstDiff(_ a: [Int], _ b: [Int]) -> String {
         let n = min(a.count, b.count)
         for i in 0 ..< n where a[i] != b[i] { return "idx \(i): \(a[i]) != \(b[i])" }

@@ -1,4 +1,5 @@
 import Foundation
+import CryptoKit
 import MLX
 import DiffusionCore
 import DiffusionModel
@@ -53,6 +54,24 @@ func freeMemoryMB() -> Double {
     return Double(stats.free_count) * Double(pageSize) / 1_048_576
 }
 
+/// Reclaims clean inactive VFS page-cache pages (left over from reading `model.safetensors`)
+/// into XNU's `vm_page_free_count` when `freeMemoryMB()` sits below the 1024 MB floor after
+/// Metal wires the 9.56 GB model weights on a 16 GB host.
+func reclaimCleanInactivePagesIfNeeded(minFreeMB: Double = 1350) {
+    let currentFree = freeMemoryMB()
+    guard currentFree > 0 && currentFree < minFreeMB else { return }
+    let bytesToTouch = Int(minFreeMB + 256) * 1_048_576
+    guard let ptr = mmap(nil, bytesToTouch, PROT_READ | PROT_WRITE, MAP_ANON | MAP_PRIVATE, -1, 0),
+          ptr != MAP_FAILED else { return }
+    let bytePtr = ptr.assumingMemoryBound(to: UInt8.self)
+    var i = 0
+    while i < bytesToTouch {
+        bytePtr[i] = 1
+        i += 16384
+    }
+    munmap(ptr, bytesToTouch)
+}
+
 /// ProcessInfo thermal state as a stable string.
 func thermalStateName() -> String {
     switch ProcessInfo.processInfo.thermalState {
@@ -82,6 +101,15 @@ struct EnvSnapshot: Codable {
     let totalMemoryMB: Double
     let thermalBefore: String
     let thermalAfter: String
+    /// `true` iff `--reclaim-pages` touched anonymous memory before this row (errata 2026-10-18).
+    var reclaimPerformed: Bool = false
+    /// Swap / free readings taken *before* any reclaim. When a reclaim ran, swap growth is
+    /// measured from this earlier baseline so swap-outs the reclaim itself caused are counted.
+    var swapUsedMBPreReclaim: Double? = nil
+    var freeMemoryMBPreReclaim: Double? = nil
+
+    /// Swap growth over the row, from the earliest baseline taken.
+    var swapGrowthMB: Double { swapUsedMBAfter - (swapUsedMBPreReclaim ?? swapUsedMBBefore) }
 
     /// Fraction of physical RAM that must be free at row start. The original rule (m6-logbook
     /// §5 rule 5) used an absolute 1 GB floor, set on the 16 GB dev M1 — i.e. 1/16 of that
@@ -102,15 +130,18 @@ struct EnvSnapshot: Codable {
     /// 0, and 4.4 GB free cleared a 1 GB floor 4× over. Swap growth cannot see a machine that
     /// was already saturated before the row started; only the free-page level can.
     var isValid: Bool {
-        swapUsedMBAfter - swapUsedMBBefore <= 256
+        swapGrowthMB <= 256
             && freeMemoryMBBefore >= minFreeMemoryMB
             && (thermalBefore == "nominal" || thermalBefore == "fair")
     }
 
     var note: String {
         var parts: [String] = []
-        if swapUsedMBAfter - swapUsedMBBefore > 256 {
-            parts.append(String(format: "swap +%.0f MB", swapUsedMBAfter - swapUsedMBBefore))
+        if swapGrowthMB > 256 {
+            parts.append(String(format: "swap +%.0f MB", swapGrowthMB))
+        }
+        if reclaimPerformed {
+            parts.append(String(format: "reclaim ran (free %.0f MB before it)", freeMemoryMBPreReclaim ?? -1))
         }
         if freeMemoryMBBefore < minFreeMemoryMB {
             parts.append(String(format: "free %.0f MB < %.0f MB floor (1/16 of %.0f MB RAM)",
@@ -214,6 +245,10 @@ struct LLaDARunResult: Codable {
     let transfersTotal: Int
     let editsTotal: Int
     let meanTransferConfidence: Double
+    let unmaskingSteps: Int
+    let starvationSteps: Int
+    let starvationRate: Double
+    let transfersPerStep: [[Int]]
     let eosBlockIndex: Int?
     let totalSeconds: Double
     let prefillSeconds: Double
@@ -280,6 +315,26 @@ struct LLaDARunResult: Codable {
     let creditAlpha: Float
     let creditBeta: Float
     let creditGamma: Float
+    // Unified Dual Caching & Cache Optimization effective echoes + telemetry (rule F7)
+    let flashBlockEnabled: Bool
+    let flashBlockTau: Int
+    let flashBlockRefreshInterval: Int
+    let flashBlockRefreshes: Int
+    let flashBlockReuses: Int
+    let dualCachingEnabled: Bool
+    let kvQuantization: String
+    let kvPoolEnabled: Bool
+    let csa2Enabled: Bool
+    let csa2Boundary: Int
+    let csa2Stride: Int
+    let csa2StepStride: Int
+    let csa2MinStep: Int
+    let sureLockEnabled: Bool
+    let skipRedundantCommitForward: Bool
+    let commitForwardsSaved: Int
+    let kvCacheLogicalBytes: Int
+    let kvCacheAllocatedBytes: Int
+    let committedTokensCount: Int
     // In-situ module attribution (diagnostic). "none" on every served row. Rows must be
     // self-describing (m6-logbook rule 3) — an ablated row's TPS is meaningless and its text is
     // garbage, so the label has to travel with the data.
@@ -318,6 +373,38 @@ struct BuildProvenance: Codable {
     /// Swift compiler that built this binary, major.minor (compile-time, so it describes
     /// the build rather than whatever toolchain happens to be on PATH at run time).
     let swiftCompiler: String
+    /// Source state at run time (errata 2026-10-18: before this, a row could not be tied to the
+    /// code that produced it — the 2026-10-17 campaign ran on an uncommitted tree). Like
+    /// `mlxSwiftPackage` this is a run-time *hint*: it describes the checkout when the bench
+    /// started, which matches the binary only if you built from that checkout without edits.
+    /// `gitDiffSHA256` hashes `git diff HEAD` (tracked files) so two dirty runs can be compared.
+    var gitCommit: String = "unknown"
+    var gitDirtyFileCount: Int = -1
+    var gitDiffSHA256: String = "unknown"
+}
+
+/// Runs `git` in `repoRoot` and returns stdout (nil on failure). Called once per process.
+func gitOutput(_ args: [String], repoRoot: String) -> Data? {
+    let p = Process()
+    p.executableURL = URL(fileURLWithPath: "/usr/bin/git")
+    p.arguments = ["-C", repoRoot] + args
+    let out = Pipe()
+    p.standardOutput = out
+    p.standardError = Pipe()
+    do { try p.run() } catch { return nil }
+    let data = out.fileHandleForReading.readDataToEndOfFile()
+    p.waitUntilExit()
+    return p.terminationStatus == 0 ? data : nil
+}
+
+func sourceProvenance(repoRoot: String) -> (commit: String, dirtyFiles: Int, diffSHA: String) {
+    let commit = gitOutput(["rev-parse", "HEAD"], repoRoot: repoRoot)
+        .map { String(decoding: $0, as: UTF8.self).trimmingCharacters(in: .whitespacesAndNewlines) } ?? "unknown"
+    let dirty = gitOutput(["status", "--porcelain", "--untracked-files=no"], repoRoot: repoRoot)
+        .map { String(decoding: $0, as: UTF8.self).split(separator: "\n").count } ?? -1
+    let diffSHA = gitOutput(["diff", "HEAD"], repoRoot: repoRoot)
+        .map { SHA256.hash(data: $0).map { String(format: "%02x", $0) }.joined() } ?? "unknown"
+    return (commit, dirty, diffSHA)
 }
 
 // MLX exposes no Swift-level version API and does not vend Cmlx as a product, so the C
@@ -373,10 +460,14 @@ func runLLaDABench() async throws {
     let repoRoot = FileManager.default.currentDirectoryPath
     // P4: stamped on every row. Computed once — the MLX query is a C call per invocation
     // and the answer cannot change within a process.
+    let src = sourceProvenance(repoRoot: repoRoot)
     let buildProvenance = BuildProvenance(
         mlxCoreVersion: mlxCoreVersionString(),
         mlxSwiftPackage: mlxSwiftPackageVersion(repoRoot: repoRoot),
-        swiftCompiler: swiftCompilerVersion())
+        swiftCompiler: swiftCompilerVersion(),
+        gitCommit: src.commit,
+        gitDirtyFileCount: src.dirtyFiles,
+        gitDiffSHA256: src.diffSHA)
     let modelDir = URL(fileURLWithPath: argValue("--model")
         ?? "\(repoRoot)/models/llada2-1-mini-4bit")
     let tokenizerDir = URL(fileURLWithPath: argValue("--tokenizer")
@@ -390,6 +481,8 @@ func runLLaDABench() async throws {
     // work, identical FLOPs). ~30 GB — Studio only. See ExpertDequantization.
     let dequantExperts = hasFlag("--dequantize-experts")
     let genLength = Int(argValue("--gen-length") ?? "128") ?? 128
+    // Off by default since 2026-10-18 — see the reclaim call in `generate`.
+    let reclaimPages = hasFlag("--reclaim-pages")
     let iceEnabled = hasFlag("--ice") || iceSweep
     let iceTau = Float(argValue("--ice-tau") ?? "0.9") ?? 0.9
     let iceNt = Int(argValue("--ice-nt") ?? "3") ?? 3
@@ -470,10 +563,36 @@ func runLLaDABench() async throws {
     // FlashBlock attention caching (WP-3b)
     let flashBlockEnabled = hasFlag("--flashblock")
     let flashBlockTau = Int(argValue("--flashblock-tau") ?? "4") ?? 4
+    let flashBlockRefreshInterval = Int(argValue("--flashblock-interval") ?? "0") ?? 0
     precondition(!flashBlockEnabled || speculationK == 1,
         "--flashblock requires --speculation-k 1 (Metal command queue runs synchronously)")
     precondition(!flashBlockEnabled || !elasticCache,
         "--flashblock and --elastic are mutually exclusive")
+
+    // Cache Optimization feature flags (2026-10-17)
+    let cachePreset = argValue("--cache-preset").map { v -> GenerationParams.CachePreset in
+        guard let p = GenerationParams.CachePreset(rawValue: v) else {
+            fatalError("Unknown --cache-preset '\(v)'. Valid: \(GenerationParams.CachePreset.allCases.map(\.rawValue))")
+        }
+        return p
+    }
+    let kvQuantOverride = argValue("--kv-quant").map { v -> KVCacheQuantization in
+        guard let q = KVCacheQuantization.parse(v) else {
+            fatalError("Unknown --kv-quant '\(v)'. Valid: \(KVCacheQuantization.allCases.map(\.rawValue)) or int8/int4/int4g32")
+        }
+        return q
+    }
+    let kvPoolEnabledFlag = hasFlag("--kv-pool")
+    let skipRedundantCommitForwardFlag: Bool = {
+        if hasFlag("--no-clean-commit") { return false }
+        if hasFlag("--clean-commit") { return true }
+        return true // Default-on per 2026-10-17 Cache Optimisation Campaign acceptance
+    }()
+    let csa2EnabledFlag = hasFlag("--csa2")
+    let csa2BoundaryFlag = argValue("--csa2-boundary").flatMap(Int.init)
+    let csa2StrideFlag = Int(argValue("--csa2-stride") ?? "2") ?? 2
+    let csa2StepStrideFlag = Int(argValue("--csa2-step-stride") ?? "2") ?? 2
+    let csa2MinStepFlag = Int(argValue("--csa2-min-step") ?? "2") ?? 2
 
     // Prompt suites: fixed cases checked into Tools/diffusion-bench/PromptSuites (M6).
     // --prompt TEXT replaces them with a single ad-hoc case.
@@ -504,12 +623,19 @@ func runLLaDABench() async throws {
         arms = [
             LLaDAArm(name: "q-cached", mode: .q, cached: true, mask: .strict),
             LLaDAArm(name: "s-cached", mode: .s, cached: true, mask: .strict),
+            LLaDAArm(name: "q-cached-legacy", mode: .q, cached: true, mask: .strict) {
+                $0.skipRedundantCommitForward = false
+            },
             // F-k: q-cached at fixed K, interleaved in ONE process to settle whether the served
             // speculationK=4 default is net-negative on reasoning/code (cross-process data says
             // K=1 beats K=4 by +16-17%, but cross-process = the F-j drift confound). Run e.g.:
             //   diffusion-bench llada --arms spk-1,spk-4 --runs 5 --suites reasoning,code
-            LLaDAArm(name: "spk-1", mode: .q, cached: true, mask: .strict) .withK(1),
-            LLaDAArm(name: "spk-4", mode: .q, cached: true, mask: .strict) .withK(4),
+            LLaDAArm(name: "spk-1", mode: .q, cached: true, mask: .strict) {
+                $0.skipRedundantCommitForward = false
+            }.withK(1),
+            LLaDAArm(name: "spk-4", mode: .q, cached: true, mask: .strict) {
+                $0.skipRedundantCommitForward = false
+            }.withK(4),
             LLaDAArm(name: "wp3b-vanilla", mode: .q, cached: true, mask: .strict) {
                 $0.flashBlockEnabled = false
             },
@@ -686,6 +812,127 @@ func runLLaDABench() async throws {
             LLaDAArm(name: "bl-32", mode: .q, cached: true, mask: .strict) { $0.blockLength = 32 },
             LLaDAArm(name: "bl-64", mode: .q, cached: true, mask: .strict) { $0.blockLength = 64 },
             LLaDAArm(name: "bl-128", mode: .q, cached: true, mask: .strict) { $0.blockLength = 128 },
+            // Cache Optimisation Campaign Arms (2026-10-17):
+            // 1. Uncached vs ExactPrefixCache baseline (interleaved within-process)
+            LLaDAArm(name: "q-uncached", mode: .q, cached: false, mask: .strict),
+            // 2. Tier-1 Prefix Cache Size, Pooling, Quantization & Clean-Commit (K=4 compatible)
+            LLaDAArm(name: "cache-clean-commit", mode: .q, cached: true, mask: .strict) {
+                $0.skipRedundantCommitForward = true
+            },
+            LLaDAArm(name: "cache-pool", mode: .q, cached: true, mask: .strict) {
+                $0.kvPoolEnabled = true
+                $0.skipRedundantCommitForward = false
+            },
+            LLaDAArm(name: "cache-fp8", mode: .q, cached: true, mask: .strict) {
+                $0.kvQuantization = .fp8
+                $0.skipRedundantCommitForward = false
+            },
+            LLaDAArm(name: "cache-k8v4", mode: .q, cached: true, mask: .strict) {
+                $0.kvQuantization = .k8v4
+                $0.skipRedundantCommitForward = false
+            },
+            LLaDAArm(name: "cache-fp4", mode: .q, cached: true, mask: .strict) {
+                $0.kvQuantization = .fp4
+                $0.skipRedundantCommitForward = false
+            },
+            LLaDAArm(name: "cache-fp8-clean", mode: .q, cached: true, mask: .strict) {
+                $0.kvQuantization = .fp8
+                $0.skipRedundantCommitForward = true
+            },
+            LLaDAArm(name: "cache-k8v4-clean", mode: .q, cached: true, mask: .strict) {
+                $0.kvQuantization = .k8v4
+                $0.skipRedundantCommitForward = true
+            },
+            LLaDAArm(name: "cache-fp4-clean", mode: .q, cached: true, mask: .strict) {
+                $0.kvQuantization = .fp4
+                $0.skipRedundantCommitForward = true
+            },
+            // 3. Tier-2 Within-Block Caching & Unified Dual Caching + Track 1 Asymmetric KV Factorial
+            LLaDAArm(name: "cache-clean-commit-k1", mode: .q, cached: true, mask: .strict) {
+                $0.skipRedundantCommitForward = true
+            }.withK(1),
+            LLaDAArm(name: "cache-fp8-clean-k1", mode: .q, cached: true, mask: .strict) {
+                $0.kvQuantization = .fp8
+                $0.skipRedundantCommitForward = true
+            }.withK(1),
+            LLaDAArm(name: "cache-k8v4-clean-k1", mode: .q, cached: true, mask: .strict) {
+                $0.kvQuantization = .k8v4
+                $0.skipRedundantCommitForward = true
+            }.withK(1),
+            LLaDAArm(name: "cache-k4v8-clean-k1", mode: .q, cached: true, mask: .strict) {
+                $0.kvQuantization = .k4v8
+                $0.skipRedundantCommitForward = true
+            }.withK(1),
+            LLaDAArm(name: "cache-fp4-clean-k1", mode: .q, cached: true, mask: .strict) {
+                $0.kvQuantization = .fp4
+                $0.skipRedundantCommitForward = true
+            }.withK(1),
+            LLaDAArm(name: "cache-fp4g32-clean-k1", mode: .q, cached: true, mask: .strict) {
+                $0.kvQuantization = .fp4g32
+                $0.skipRedundantCommitForward = true
+            }.withK(1),
+            LLaDAArm(name: "cache-kivi4-clean-k1", mode: .q, cached: true, mask: .strict) {
+                $0.kvQuantization = .kivi4
+                $0.skipRedundantCommitForward = true
+            }.withK(1),
+            LLaDAArm(name: "cache-hybrid4-clean-k1", mode: .q, cached: true, mask: .strict) {
+                $0.kvQuantization = .k8v4s4
+                $0.skipRedundantCommitForward = true
+            }.withK(1),
+            LLaDAArm(name: "cache-csa2-legacy", mode: .q, cached: true, mask: .strict) {
+                $0.csa2Enabled = true
+                $0.csa2Boundary = 4
+                $0.csa2Stride = 2
+                $0.csa2StepStride = 1
+                $0.csa2MinStep = 1
+                $0.skipRedundantCommitForward = false
+            }.withK(1),
+            LLaDAArm(name: "cache-csa2-periodic", mode: .q, cached: true, mask: .strict) {
+                $0.csa2Enabled = true
+                $0.csa2Boundary = 4
+                $0.csa2Stride = 2
+                $0.csa2StepStride = 2
+                $0.csa2MinStep = 2
+                $0.skipRedundantCommitForward = false
+            }.withK(1),
+            LLaDAArm(name: "cache-csa2-periodic-k4", mode: .q, cached: true, mask: .strict) {
+                $0.csa2Enabled = true
+                $0.csa2Boundary = 4
+                $0.csa2Stride = 2
+                $0.csa2StepStride = 2
+                $0.csa2MinStep = 2
+                $0.skipRedundantCommitForward = true
+            },
+            LLaDAArm(name: "cache-flashblock-tau4", mode: .q, cached: true, mask: .strict) {
+                $0.flashBlockEnabled = true
+                $0.flashBlockTau = 4
+                $0.flashBlockRefreshInterval = 0
+                $0.skipRedundantCommitForward = false
+            }.withK(1),
+            LLaDAArm(name: "cache-flashblock-int2", mode: .q, cached: true, mask: .strict) {
+                $0.flashBlockEnabled = true
+                $0.flashBlockTau = 4
+                $0.flashBlockRefreshInterval = 2
+                $0.skipRedundantCommitForward = false
+            }.withK(1),
+            LLaDAArm(name: "cache-dual-opt", mode: .q, cached: true, mask: .strict) {
+                $0.kvQuantization = .fp8
+                $0.csa2Enabled = true
+                $0.csa2Boundary = 4
+                $0.csa2Stride = 2
+                $0.csa2StepStride = 2
+                $0.csa2MinStep = 2
+                $0.skipRedundantCommitForward = true
+            }.withK(1),
+            LLaDAArm(name: "cache-dual-k8v4", mode: .q, cached: true, mask: .strict) {
+                $0.kvQuantization = .k8v4
+                $0.csa2Enabled = true
+                $0.csa2Boundary = 4
+                $0.csa2Stride = 2
+                $0.csa2StepStride = 2
+                $0.csa2MinStep = 2
+                $0.skipRedundantCommitForward = true
+            }.withK(1),
         ]
         if let filter = argValue("--arms") {
             let wanted = Set(filter.split(separator: ",").map(String.init))
@@ -699,7 +946,7 @@ func runLLaDABench() async throws {
             }
             arms = arms.filter { wanted.contains($0.name) }
         } else {
-            arms = arms.filter { !$0.name.hasPrefix("attr-") && !$0.name.hasPrefix("bl-") && !$0.name.hasPrefix("reuse-") && !$0.name.hasPrefix("wp3b-") && !$0.name.hasPrefix("dt-") && !$0.name.hasPrefix("lf-") && !$0.name.hasPrefix("cmp-") && !$0.name.hasPrefix("spk-") }
+            arms = arms.filter { !$0.name.hasPrefix("attr-") && !$0.name.hasPrefix("bl-") && !$0.name.hasPrefix("reuse-") && !$0.name.hasPrefix("wp3b-") && !$0.name.hasPrefix("dt-") && !$0.name.hasPrefix("lf-") && !$0.name.hasPrefix("cmp-") && !$0.name.hasPrefix("spk-") && !$0.name.hasPrefix("cache-") && $0.name != "q-uncached" && $0.name != "q-cached-legacy" }
         }
     }
     for arm in arms {
@@ -717,7 +964,7 @@ func runLLaDABench() async throws {
 
     print("diffusion-bench llada — model \(modelDir.path)")
     print("build: host \(sysctlString("hw.model")) | MLX core \(buildProvenance.mlxCoreVersion) "
-        + "(mlx-swift \(buildProvenance.mlxSwiftPackage)) | Swift \(buildProvenance.swiftCompiler)")
+        + "(mlx-swift \(buildProvenance.mlxSwiftPackage)) | Swift \(buildProvenance.swiftCompiler) | git \(buildProvenance.gitCommit.prefix(10)) dirty=\(buildProvenance.gitDirtyFileCount) diff=\(buildProvenance.gitDiffSHA256.prefix(12))")
     let loadStart = Date()
     let container = try DiffusionModel.load(from: modelDir)
     if hasFlag("--quantize-lm-head") {
@@ -855,6 +1102,25 @@ func runLLaDABench() async throws {
         // FlashBlock (WP-3b)
         p.flashBlockEnabled = flashBlockEnabled
         p.flashBlockTau = flashBlockTau
+        p.flashBlockRefreshInterval = flashBlockRefreshInterval
+        // Cache Optimization flags & presets (2026-10-17)
+        p.skipRedundantCommitForward = skipRedundantCommitForwardFlag
+        if let preset = cachePreset {
+            p.applyCachePreset(preset)
+        }
+        if let kvQ = kvQuantOverride {
+            p.kvQuantization = kvQ
+        }
+        if kvPoolEnabledFlag {
+            p.kvPoolEnabled = true
+        }
+        if csa2EnabledFlag {
+            p.csa2Enabled = true
+            p.csa2Boundary = csa2BoundaryFlag
+            p.csa2Stride = csa2StrideFlag
+            p.csa2StepStride = csa2StepStrideFlag
+            p.csa2MinStep = csa2MinStepFlag
+        }
         // Temporal voting (WP-4a)
         p.temporalVotingEnabled = temporalVotingOverride ?? temporalVoting
         p.temporalVotingAlpha = votingAlpha; p.temporalVotingCutoff = votingCutoff
@@ -884,10 +1150,19 @@ func runLLaDABench() async throws {
             env: EnvSnapshot, warmup: Bool) {
         let warmup = llaDAProcessFirstGeneration
         llaDAProcessFirstGeneration = false
+        Memory.clearCache()
+        GPU.resetPeakMemory()
+        // Opt-in only (errata 2026-10-18): touching ~1.6 GB of anonymous memory right before the
+        // baseline readings can push other pages to swap/compression and lift `freeMemoryMB`
+        // over the validity floor — i.e. it can launder the very condition `envValid` exists to
+        // catch. When enabled, the pre-reclaim readings are kept and swap growth uses them.
+        let swapPreReclaim = swapUsedMB()
+        let freePreReclaim = freeMemoryMB()
+        let reclaimed = reclaimPages && freePreReclaim > 0 && freePreReclaim < 1350  // reclaim fn's own trigger
+        if reclaimed { reclaimCleanInactivePagesIfNeeded() }
         let swapBefore = swapUsedMB()
         let freeBefore = freeMemoryMB()
         let thermalBefore = thermalStateName()
-        GPU.resetPeakMemory()
         let start = Date()
         var lastCommit = start
         var blockIndex = 0
@@ -1014,7 +1289,10 @@ func runLLaDABench() async throws {
             freeMemoryMBBefore: freeBefore,
             totalMemoryMB: totalMemoryMB(),
             thermalBefore: thermalBefore,
-            thermalAfter: thermalStateName())
+            thermalAfter: thermalStateName(),
+            reclaimPerformed: reclaimed,
+            swapUsedMBPreReclaim: reclaimed ? swapPreReclaim : nil,
+            freeMemoryMBPreReclaim: reclaimed ? freePreReclaim : nil)
         return (finalOutput, seconds, Double(Memory.peakMemory) / 1_073_741_824, env, warmup)
     }
 
@@ -1059,6 +1337,15 @@ func runLLaDABench() async throws {
                 guard !confs.isEmpty else { return 0 }
                 return confs.map { Double($0.0) }.reduce(0, +) / Double(confs.count)
             }(),
+            unmaskingSteps: output.metrics.transfersPerStep.flatMap { $0 }.filter { $0 > 0 }.count,
+            starvationSteps: output.metrics.transfersPerStep.flatMap { $0 }.filter { $0 == 1 }.count,
+            starvationRate: {
+                let unmasking = output.metrics.transfersPerStep.flatMap { $0 }.filter { $0 > 0 }
+                guard !unmasking.isEmpty else { return 0 }
+                let starved = unmasking.filter { $0 == 1 }.count
+                return Double(starved) / Double(unmasking.count)
+            }(),
+            transfersPerStep: output.metrics.transfersPerStep,
             eosBlockIndex: output.metrics.eosBlockIndex,
             totalSeconds: seconds,
             prefillSeconds: output.metrics.prefillSeconds,
@@ -1121,6 +1408,25 @@ func runLLaDABench() async throws {
             creditAlpha: output.metrics.effectiveCreditAlpha,
             creditBeta: output.metrics.effectiveCreditBeta,
             creditGamma: output.metrics.effectiveCreditGamma,
+            flashBlockEnabled: output.metrics.effectiveFlashBlockEnabled,
+            flashBlockTau: output.metrics.effectiveFlashBlockTau,
+            flashBlockRefreshInterval: output.metrics.effectiveFlashBlockRefreshInterval,
+            flashBlockRefreshes: output.metrics.flashBlockRefreshes,
+            flashBlockReuses: output.metrics.flashBlockReuses,
+            dualCachingEnabled: output.metrics.effectiveDualCachingEnabled,
+            kvQuantization: output.metrics.effectiveKVQuantization,
+            kvPoolEnabled: output.metrics.effectiveKVPoolEnabled,
+            csa2Enabled: output.metrics.effectiveCSA2Enabled,
+            csa2Boundary: output.metrics.effectiveCSA2Boundary,
+            csa2Stride: output.metrics.effectiveCSA2Stride,
+            csa2StepStride: output.metrics.effectiveCSA2StepStride,
+            csa2MinStep: output.metrics.effectiveCSA2MinStep,
+            sureLockEnabled: output.metrics.effectiveSureLockEnabled,
+            skipRedundantCommitForward: output.metrics.effectiveSkipRedundantCommitForward,
+            commitForwardsSaved: output.metrics.commitForwardsSaved,
+            kvCacheLogicalBytes: output.metrics.kvCacheLogicalBytes,
+            kvCacheAllocatedBytes: output.metrics.kvCacheAllocatedBytes,
+            committedTokensCount: output.metrics.committedTokensCount,
             moduleAblation: output.metrics.effectiveModuleAblation.rawValue,
             warmupIncluded: warmup,
             processId: Int(ProcessInfo.processInfo.processIdentifier),
@@ -1513,10 +1819,14 @@ func runLLaDABench() async throws {
     // generation, naming names.
     if speculationK != 1 {
         let k1Conflicts = arms.compactMap { arm -> String? in
+            let effK = arm.speculationKOverride ?? speculationK
+            guard effK != 1 else { return nil }
             let p = params(for: arm.mode, arm: arm)
             var reasons: [String] = []
             if p.flashBlockEnabled { reasons.append("flashBlock") }
             if p.jotFaithful { reasons.append("faithful-JOT") }
+            if p.dualCachingEnabled { reasons.append("dualCaching") }
+            if p.sureLockEnabled { reasons.append("sureLock") }
             return reasons.isEmpty ? nil : "\(arm.name) (\(reasons.joined(separator: "+")))"
         }
         if !k1Conflicts.isEmpty {
@@ -1536,6 +1846,17 @@ func runLLaDABench() async throws {
     // each arm across the whole elapsed span. --arm-major restores the legacy order — the A/B
     // that validates the interleaving itself (final-plan P2). Loop bounds swap; the body is
     // order-agnostic (`arm`/`run` bound per unit; JSONL already carries `run`).
+    if hasFlag("--warmup-once"), let firstSuite = suites.first, let firstPrompt = firstSuite.prompts.first, let firstArm = arms.first {
+        let promptIds = try encodePrompt(firstPrompt.user)
+        let (output, seconds, peakGB, env, warmup) = generate(firstArm, promptIds: promptIds)
+        let text = tokenizer.decode(tokens: output.tokens)
+        appendResult(firstArm, run: -1, suite: firstSuite.name, prompt: firstPrompt,
+                     promptIds: promptIds, output: output, seconds: seconds,
+                     peakGB: peakGB, env: env, warmup: warmup, text: text)
+        print(String(format: "[warmup-once | %@ | %@] completed in %.1fs (excluded from steady-state run>=0 rows)",
+                     firstArm.name, firstPrompt.id, seconds))
+    }
+
     let armMajor = hasFlag("--arm-major")
     var armTotals: [String: [Double]] = [:]
     var firstUnit = true
@@ -1564,6 +1885,7 @@ func runLLaDABench() async throws {
                             "arm": arm.name, "suite": suite.name, "promptId": prompt.id,
                             "run": String(run), "user": prompt.user, "text": text,
                             "tokens": String(output.tokens.count),
+                            "tokenIds": output.tokens.map(String.init).joined(separator: ","),
                             "eosBlock": output.metrics.eosBlockIndex.map(String.init) ?? "none",
                         ]
                         if let data = try? JSONEncoder().encode(record),
@@ -1586,10 +1908,12 @@ func runLLaDABench() async throws {
                     var flags = ""
                     if warmup { flags += " [warmup]" }
                     if !env.isValid { flags += " [ENV-INVALID: \(env.note)]" }
+                    let kvLogicalMB = Double(output.metrics.kvCacheLogicalBytes) / 1_048_576
+                    let kvAllocMB = Double(output.metrics.kvCacheAllocatedBytes) / 1_048_576
                     print(String(
                         format: "[%@ run %d | %@] %d tok in %.1fs | %.2f tok/s | "
                             + "TPF %.2f (honest %.2f) | steps/blk %.1f | post/blk %.1f | "
-                            + "sync %d | peak %.2f GB%@",
+                            + "kv %.2f/%.2f MB | sync %d | peak %.2f GB%@",
                         arm.name, run, prompt.id, output.tokens.count, seconds,
                         Double(output.tokens.count) / seconds,
                         steps > 0 ? Double(output.tokens.count) / Double(steps) : 0,
@@ -1601,6 +1925,7 @@ func runLLaDABench() async throws {
                         output.metrics.postStepsPerBlock.isEmpty ? 0
                             : Double(output.metrics.postStepsPerBlock.reduce(0, +))
                                 / Double(output.metrics.postStepsPerBlock.count),
+                        kvLogicalMB, kvAllocMB,
                         output.syncPoints, peakGB, flags))
                     // Step 3 (final-plan §2): forward-remainder decomposition. Shares of
                     // denoiseSeconds, NOT production ms — the per-sub-phase evals are inflated

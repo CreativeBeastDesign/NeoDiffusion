@@ -222,12 +222,26 @@ public final class DiffusionEngine {
         public let effectiveCreditBeta: Float
         public let effectiveCreditGamma: Float
 
-        // MARK: Unified Dual Caching effective echoes
+        // MARK: Unified Dual Caching & Cache Optimization effective echoes + telemetry
+        public let effectiveFlashBlockEnabled: Bool
+        public let effectiveFlashBlockTau: Int
+        public let effectiveFlashBlockRefreshInterval: Int
+        public let flashBlockRefreshes: Int
+        public let flashBlockReuses: Int
         public let effectiveDualCachingEnabled: Bool
         public let effectiveKVQuantization: String
         public let effectiveKVPoolEnabled: Bool
         public let effectiveCSA2Enabled: Bool
+        public let effectiveCSA2Boundary: Int
+        public let effectiveCSA2Stride: Int
+        public let effectiveCSA2StepStride: Int
+        public let effectiveCSA2MinStep: Int
         public let effectiveSureLockEnabled: Bool
+        public let effectiveSkipRedundantCommitForward: Bool
+        public let commitForwardsSaved: Int
+        public let kvCacheLogicalBytes: Int
+        public let kvCacheAllocatedBytes: Int
+        public let committedTokensCount: Int
 
         // MARK: In-situ attribution effective echo
         /// What the engine **actually ran with**, not what was requested. Load-bearing: an
@@ -243,6 +257,14 @@ public final class DiffusionEngine {
     final class RunStats {
         var prefillSeconds: Double = 0
         var extraForwards: Int = 0
+        var commitForwardsSaved: Int = 0
+        var kvCacheLogicalBytes: Int = 0
+        var kvCacheAllocatedBytes: Int = 0
+        var committedTokensCount: Int = 0
+        var flashBlockRefreshes: Int = 0
+        var flashBlockReuses: Int = 0
+        var stepPendingKVSnapshots: [[(k: MLXArray?, v: MLXArray?)]] = []
+        var selectedBreakStepInBatch: Int? = nil
     }
 
     /// Signature of an injected forward: given the current window ids `[1, W]` and the count of
