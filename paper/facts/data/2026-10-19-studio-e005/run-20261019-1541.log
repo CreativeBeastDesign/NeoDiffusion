@@ -1,0 +1,22 @@
+15:41:54 === E-005 start | host Mac14,14 | git bd7aa08 | gen 768
+15:41:54 registered: paper/experiments/E-005.md @ bd7aa08
+15:41:54 memory: free 131438 MB (envValid floor on this host: 12288 MB)
+15:41:54 build: release diffusion-bench
+15:42:07 e005: model llada2-1-mini-4bit suites gsm8k_100 gen 768
+16:02:23 e005: rc=0 rows 501 text 500
+cache-clean-commit-k1    n=100 hit-limit=  3 hit-limit-no-EOS=  3 (3.0%)
+cache-fp4-clean-k1       n=100 hit-limit=  3 hit-limit-no-EOS=  3 (3.0%)
+cache-k4v8-clean-k1      n=100 hit-limit=  4 hit-limit-no-EOS=  4 (4.0%)
+cache-k8v4-clean-k1      n=100 hit-limit=  2 hit-limit-no-EOS=  1 (1.0%)
+cache-kivi4-clean-k1     n=100 hit-limit=  2 hit-limit-no-EOS=  1 (1.0%)
+rows: 500 non-warmup (+1 warmup excluded); envValid(v2) false: 0; envValidV1 false: 0
+  none   83/100 = 0.830
+  k8v4   81/100 = 0.810
+  k4v8   82/100 = 0.820
+  fp4    81/100 = 0.810
+  kivi4  83/100 = 0.830
+  vs none: k8v4   lost 5, gained 3 (paired discordant, n=100)
+  vs none: k4v8   lost 7, gained 6 (paired discordant, n=100)
+  vs none: fp4    lost 8, gained 6 (paired discordant, n=100)
+  vs none: kivi4  lost 4, gained 4 (paired discordant, n=100)
+16:02:23 === done. Report: /Users/andrebarlocher/Documents/Swift/NeoDiffusion/scratch/2026-10-19/studio-e005/e005-REPORT-20261019-1541.txt

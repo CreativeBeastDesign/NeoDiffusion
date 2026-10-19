@@ -1,0 +1,41 @@
+cache-clean-commit-k1    n=100 hit-limit=  3 hit-limit-no-EOS=  3 (3.0%)
+cache-fp4-clean-k1       n=100 hit-limit=  3 hit-limit-no-EOS=  3 (3.0%)
+cache-k4v8-clean-k1      n=100 hit-limit=  4 hit-limit-no-EOS=  4 (4.0%)
+cache-k8v4-clean-k1      n=100 hit-limit=  2 hit-limit-no-EOS=  1 (1.0%)
+cache-kivi4-clean-k1     n=100 hit-limit=  2 hit-limit-no-EOS=  1 (1.0%)
+input e005-rows-20261019-1541.jsonl sha256 571abf9c48d9fea89ac8b0ae4405b2c8e7f7dfd88c17eaeaeed7b79d3664fd04
+input e005-text-20261019-1541.jsonl sha256 9360d7431526ef88d23aea2a4c4ecb534fa66d1da162f1368fc80004cdb2116e
+host ['Mac14,14'] mlxCore 0.31.1 mlx-swift 0.31.6 git bd7aa08818 dirty 0 schedule ['interleaved'] K [1] genLength [768]
+rows: 500 non-warmup (+1 warmup excluded); envValid(v2) false: 0; envValidV1 false: 0
+step-cap hits (B-NT safety net; should be none): none
+
+per-arm aggregates (valid rows):
+  arm                       n   steps     fwd     tok tok/unmask 1-tr frac  aggTPS  ms/fwd
+  none                    100    7130    7321   27732      4.813     0.467 115.962    32.7
+  k8v4                    100    6687    6878   27039      5.076     0.440 119.468    32.9
+  k4v8                    100    7743    7934   28157      4.496     0.477 107.875    32.9
+  fp4                     100    7609    7800   27974      4.560     0.464 109.164    32.9
+  kivi4                   100    6677    6868   26945      5.140     0.447 119.298    32.9
+
+paired logical-step deltas vs none (mean, bootstrap 95% CI, 10000 resamples, seed 20261018):
+  k8v4   n=100 mean -4.430 [-9.810, +0.010]  more/fewer/equal 46/49/5
+  k4v8   n=100 mean +6.130 [-4.220, +15.740]  more/fewer/equal 61/30/9
+  fp4    n=100 mean +4.790 [-5.080, +14.670]  more/fewer/equal 60/40/0
+  kivi4  n=100 mean -4.530 [-15.820, +5.710]  more/fewer/equal 51/43/6
+  kivi4−fp4 n=100 mean -9.320 [-20.200, +0.760]
+
+pre-registered predictions:
+  (1) k4v8 & fp4 delta > 0 (CI excl. 0) and > k8v4's ............ FAILS   → I-001 REFUTED
+  (2) k8v4 CI includes 0 ............................................ HOLDS
+  (3) kivi4 below fp4 (paired CI excl. 0) ........................... FAILS   → I-002 REFUTED
+
+gsm8k accuracy (valid rows; last integer vs answer):
+  none   83/100 = 0.830
+  k8v4   81/100 = 0.810
+  k4v8   82/100 = 0.820
+  fp4    81/100 = 0.810
+  kivi4  83/100 = 0.830
+  vs none: k8v4   lost 5, gained 3 (paired discordant, n=100)
+  vs none: k4v8   lost 7, gained 6 (paired discordant, n=100)
+  vs none: fp4    lost 8, gained 6 (paired discordant, n=100)
+  vs none: kivi4  lost 4, gained 4 (paired discordant, n=100)
