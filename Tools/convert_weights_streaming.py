@@ -8,10 +8,16 @@ import numpy as np
 import mlx.core as mx
 from safetensors import safe_open # kept for reference, not used for loading
 
+# --no-quantize (2026-10-19): write every tensor unquantized (16-bit; router/expert bias F32) into ONE
+# model.safetensors that DiffusionModel.load can read. Used for the unquantized-weights control (H5).
+NO_QUANTIZE = False
+
 def should_quantize(key):
     """
     Decides whether a weight tensor should be quantized to 4-bit.
     """
+    if NO_QUANTIZE:
+        return False
     if not key.endswith(".weight"):
         return False
     if "word_embeddings" in key or "embed_tokens" in key or "wte" in key:
@@ -66,9 +72,12 @@ def convert_and_quantize_streaming(src_dir, dest_dir, bits=4, group_size=64,
     config_path = os.path.join(src_dir, "config.json")
     with open(config_path, "r") as f:
         config = json.load(f)
-    config["quantization"] = {"bits": bits, "group_size": group_size, "mode": mode,
-                              "expert_bits": expert_bits,
-                              "expert_group_size": expert_group_size}
+    if NO_QUANTIZE:
+        config.pop("quantization", None)
+    else:
+        config["quantization"] = {"bits": bits, "group_size": group_size, "mode": mode,
+                                  "expert_bits": expert_bits,
+                                  "expert_group_size": expert_group_size}
     with open(os.path.join(dest_dir, "config.json"), "w") as f:
         json.dump(config, f, indent=2)
 
@@ -222,7 +231,7 @@ def convert_and_quantize_streaming(src_dir, dest_dir, bits=4, group_size=64,
                 print(f"Quantized and streamed: {src_name}")
             else:
                 # Cast and write
-                out_dtype = "F32" if (src_name.endswith(".gate.weight") or "gate.expert_bias" in src_name) else "F16"
+                out_dtype = "F32" if (src_name.endswith(".gate.weight") or "gate.expert_bias" in src_name) else "F16"  # header uses the same rule
                 x_cast = x.astype(mx.float32 if out_dtype == "F32" else mx.float16)
                 mx.eval(x_cast)
 
@@ -257,7 +266,11 @@ if __name__ == "__main__":
                         help="Quant format: affine (default artefact) or mxfp4 "
                              "(Step 4c-ii diagnostic; forces g32/4-bit, no biases)")
 
+    parser.add_argument("--no-quantize", action="store_true",
+                        help="Write all tensors unquantized (F16; router/expert bias F32) into one "
+                             "model.safetensors — the unquantized-weights control artefact (~33 GB)")
     args = parser.parse_args()
+    NO_QUANTIZE = args.no_quantize
 
     try:
         convert_and_quantize_streaming(args.src_dir, args.dest_dir, bits=args.bits,

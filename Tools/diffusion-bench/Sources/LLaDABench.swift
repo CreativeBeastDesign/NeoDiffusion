@@ -1070,6 +1070,8 @@ func runLLaDABench() async throws {
     // WP-2a calibration / JOT pre-experiment: per-step per-position trace dump (offline runs
     // only — adds a per-step readback; use with --runs 1). One JSONL line per logical step.
     var tracePromptId = ""
+    var traceArm = ""      // 2026-10-19: trace lines must say which arm produced them (interleaved runs)
+    var traceRun = 0
     // P-3 schedule bookkeeping (stamped on every row by appendResult).
     var currentSchedule = "blocked"
     var scheduleCounter = 0
@@ -1082,6 +1084,8 @@ func runLLaDABench() async throws {
         engine.onTrace = { t in
             let rec: [String: Any] = [
                 "promptId": tracePromptId,
+                "arm": traceArm,
+                "run": traceRun,
                 "block": t.blockIndex,
                 "step": t.stepInBlock,
                 "conf": t.confidence.map { Double($0) },
@@ -1927,6 +1931,9 @@ func runLLaDABench() async throws {
     // order-agnostic (`arm`/`run` bound per unit; JSONL already carries `run`).
     if hasFlag("--warmup-once"), let firstSuite = suites.first, let firstPrompt = firstSuite.prompts.first, let firstArm = arms.first {
         let promptIds = try encodePrompt(firstPrompt.user)
+        tracePromptId = firstPrompt.id
+        traceArm = "warmup"     // excluded by trace analysis
+        traceRun = -1
         let (output, seconds, peakGB, env, warmup) = generate(firstArm, promptIds: promptIds)
         let text = tokenizer.decode(tokens: output.tokens)
         currentSchedule = "warmup"
@@ -1942,6 +1949,8 @@ func runLLaDABench() async throws {
     func runPrompt(_ arm: LLaDAArm, run: Int, suite: LLaDAPromptSuite, prompt: LLaDAPromptCase) throws -> Double {
         let promptIds = try encodePrompt(prompt.user)
         tracePromptId = prompt.id
+        traceArm = arm.name
+        traceRun = run
         let (output, seconds, peakGB, env, warmup) = generate(arm, promptIds: promptIds)
         let text = tokenizer.decode(tokens: output.tokens)
         appendResult(arm, run: run, suite: suite.name, prompt: prompt,
