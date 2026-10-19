@@ -1,0 +1,26 @@
+## E-002
+cache-clean-commit-k1    n=100 hit-limit= 14 hit-limit-no-EOS= 13 (13.0%)  <-- > 10 %: accuracy uninterpretable
+cache-fp4-clean-k1       n=100 hit-limit= 16 hit-limit-no-EOS= 13 (13.0%)  <-- > 10 %: accuracy uninterpretable
+cache-k4v8-clean-k1      n=100 hit-limit= 16 hit-limit-no-EOS= 15 (15.0%)  <-- > 10 %: accuracy uninterpretable
+cache-k8v4-clean-k1      n=100 hit-limit= 13 hit-limit-no-EOS= 11 (11.0%)  <-- > 10 %: accuracy uninterpretable
+cache-kivi4-clean-k1     n=100 hit-limit= 13 hit-limit-no-EOS= 12 (12.0%)  <-- > 10 %: accuracy uninterpretable
+  none   80/100 = 0.800
+  k8v4   75/100 = 0.750
+  k4v8   73/100 = 0.730
+  fp4    75/100 = 0.750
+  kivi4  78/100 = 0.780
+  vs none: k8v4   lost 8, gained 3 (paired discordant, n=100)
+  vs none: k4v8   lost 9, gained 2 (paired discordant, n=100)
+  vs none: fp4    lost 9, gained 4 (paired discordant, n=100)
+  vs none: kivi4  lost 4, gained 2 (paired discordant, n=100)
+## E003A (llada2-1-mini-4bit)
+rows: 560 non-warmup (+1 warmup excluded); envValid(v2) false: 0; envValidV1 false: 0
+step-cap hits (B-NT safety net; should be none): none
+  k8v4   n=112 mean -0.625 [-2.009, +0.741]  more/fewer/equal 49/50/13
+  k4v8   n=112 mean +2.455 [+0.554, +4.277]  more/fewer/equal 71/38/3
+  fp4    n=112 mean +3.170 [+1.277, +5.045]  more/fewer/equal 63/44/5
+  kivi4  n=112 mean +0.259 [-1.652, +2.196]  more/fewer/equal 55/48/9
+  kivi4−fp4 n=112 mean -2.911 [-4.920, -0.768]
+  (1) k4v8 & fp4 delta > 0 (CI excl. 0) and > k8v4's ............ HOLDS   → I-001 not refuted
+  (2) k8v4 CI includes 0 ............................................ HOLDS
+  (3) kivi4 below fp4 (paired CI excl. 0) ........................... HOLDS   → I-002 not refuted

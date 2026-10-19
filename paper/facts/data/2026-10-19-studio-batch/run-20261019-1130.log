@@ -1,0 +1,13 @@
+11:30:32 === studio batch start | host Mac14,14 192 GB | git b41a25f | phases: e002 e003a
+11:30:32 registered: paper/experiments/E-002.md @ 4edab0a
+11:30:32 registered: paper/experiments/E-003.md @ 4edab0a
+11:30:32 registered: paper/experiments/E-004.md @ 4edab0a
+11:30:32 registered: paper/scripts/e001_analysis.py @ e6cb3cb
+11:30:32 registered: paper/scripts/truncation.py @ 2ebbd65
+11:30:33 registered: paper/scripts/e004_traces.py @ cf915f5
+11:30:33 build: release diffusion-bench
+11:30:46 e002: model llada2-1-mini-4bit suites gsm8k_100 gen 384 
+11:49:03 e002: rc=0 rows 501 text 500
+11:49:03 e003a: model llada2-1-mini-4bit suites gsm8k_100,chat,reasoning,code gen 128 
+12:01:09 e003a: rc=0 rows 561 text 560
+12:01:09 === done. Summary: /Users/andrebarlocher/Documents/Swift/NeoDiffusion/scratch/2026-10-19/studio-batch/SUMMARY-20261019-1130.txt (full reports alongside)

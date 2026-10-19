@@ -1,0 +1,18 @@
+10:38:35 === studio batch start | host Mac14,14 192 GB | git b41a25f | phases: convert e002 e003a e003b e004
+10:38:35 registered: paper/experiments/E-002.md @ 4edab0a
+10:38:35 registered: paper/experiments/E-003.md @ 4edab0a
+10:38:35 registered: paper/experiments/E-004.md @ 4edab0a
+10:38:35 registered: paper/scripts/e001_analysis.py @ e6cb3cb
+10:38:35 registered: paper/scripts/truncation.py @ 2ebbd65
+10:38:35 registered: paper/scripts/e004_traces.py @ cf915f5
+10:38:35 build: release diffusion-bench
+10:40:08 convert: /Users/andrebarlocher/Documents/Swift/NeoDiffusion/models/llada2-1-mini -> /Users/andrebarlocher/Documents/Swift/NeoDiffusion/models/llada2-1-mini-f16 (unquantized F16, ~33 GB)
+10:41:49 e002: model llada2-1-mini-4bit suites gsm8k_100 gen 384 
+11:00:18 e002: rc=0 rows 501 text 500
+11:00:18 e003a: model llada2-1-mini-4bit suites gsm8k_100,chat,reasoning,code gen 128 
+11:12:38 e003a: rc=0 rows 561 text 560
+11:12:38 e003b: model llada2-1-mini-f16 suites gsm8k_100,chat,reasoning,code gen 128 
+11:26:35 e003b: rc=0 rows 561 text 560
+11:26:36 e004: model llada2-1-mini-4bit suites gsm8k_20,chat,reasoning,code gen 128 --dump-traces /Users/andrebarlocher/Documents/Swift/NeoDiffusion/scratch/2026-10-19/studio-batch/e004-traces-20261019-1038.jsonl
+11:30:19 e004: rc=0 rows 161 text 160
+11:30:20 === done. Summary: /Users/andrebarlocher/Documents/Swift/NeoDiffusion/scratch/2026-10-19/studio-batch/SUMMARY-20261019-1038.txt (full reports alongside)

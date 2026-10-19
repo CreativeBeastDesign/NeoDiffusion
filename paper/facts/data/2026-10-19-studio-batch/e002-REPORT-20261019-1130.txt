@@ -1,0 +1,41 @@
+cache-clean-commit-k1    n=100 hit-limit= 14 hit-limit-no-EOS= 13 (13.0%)  <-- > 10 %: accuracy uninterpretable
+cache-fp4-clean-k1       n=100 hit-limit= 16 hit-limit-no-EOS= 13 (13.0%)  <-- > 10 %: accuracy uninterpretable
+cache-k4v8-clean-k1      n=100 hit-limit= 16 hit-limit-no-EOS= 15 (15.0%)  <-- > 10 %: accuracy uninterpretable
+cache-k8v4-clean-k1      n=100 hit-limit= 13 hit-limit-no-EOS= 11 (11.0%)  <-- > 10 %: accuracy uninterpretable
+cache-kivi4-clean-k1     n=100 hit-limit= 13 hit-limit-no-EOS= 12 (12.0%)  <-- > 10 %: accuracy uninterpretable
+input e002-rows-20261019-1130.jsonl sha256 6db9a5d3480bac9b890a5fa05d32d966d919842dcf1a05b5526dcf413f230337
+input e002-text-20261019-1130.jsonl sha256 ee2e4b71843aad89127fcff6ee536e585a00cf388f7899ece9dd98c056a2a326
+host ['Mac14,14'] mlxCore 0.31.1 mlx-swift 0.31.6 git b41a25f619 dirty 0 schedule ['interleaved'] K [1] genLength [384]
+rows: 500 non-warmup (+1 warmup excluded); envValid(v2) false: 0; envValidV1 false: 0
+step-cap hits (B-NT safety net; should be none): none
+
+per-arm aggregates (valid rows):
+  arm                       n   steps     fwd     tok tok/unmask 1-tr frac  aggTPS  ms/fwd
+  none                    100    6355    6546   25548      5.041     0.450 120.214    32.5
+  k8v4                    100    6213    6404   25506      5.195     0.431 121.790    32.7
+  k4v8                    100    6818    7009   25485      4.677     0.462 111.267    32.7
+  fp4                     100    6841    7032   25692      4.708     0.447 111.884    32.7
+  kivi4                   100    6232    6423   25312      5.206     0.440 120.526    32.7
+
+paired logical-step deltas vs none (mean, bootstrap 95% CI, 10000 resamples, seed 20261018):
+  k8v4   n=100 mean -1.420 [-4.410, +1.480]  more/fewer/equal 45/50/5
+  k4v8   n=100 mean +4.630 [-0.460, +9.280]  more/fewer/equal 64/28/8
+  fp4    n=100 mean +4.860 [+0.780, +9.040]  more/fewer/equal 60/40/0
+  kivi4  n=100 mean -1.230 [-5.720, +3.100]  more/fewer/equal 51/43/6
+  kivi4−fp4 n=100 mean -6.090 [-10.940, -1.430]
+
+pre-registered predictions:
+  (1) k4v8 & fp4 delta > 0 (CI excl. 0) and > k8v4's ............ FAILS   → I-001 REFUTED
+  (2) k8v4 CI includes 0 ............................................ HOLDS
+  (3) kivi4 below fp4 (paired CI excl. 0) ........................... HOLDS   → I-002 not refuted
+
+gsm8k accuracy (valid rows; last integer vs answer):
+  none   80/100 = 0.800
+  k8v4   75/100 = 0.750
+  k4v8   73/100 = 0.730
+  fp4    75/100 = 0.750
+  kivi4  78/100 = 0.780
+  vs none: k8v4   lost 8, gained 3 (paired discordant, n=100)
+  vs none: k4v8   lost 9, gained 2 (paired discordant, n=100)
+  vs none: fp4    lost 9, gained 4 (paired discordant, n=100)
+  vs none: kivi4  lost 4, gained 2 (paired discordant, n=100)

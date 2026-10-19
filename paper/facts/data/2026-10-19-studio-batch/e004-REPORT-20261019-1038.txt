@@ -1,0 +1,22 @@
+H2 — fraction of masked-position confidences > 0.7, by step-in-block:
+  arm                       step0  step1  step2  step3
+  cache-clean-commit-k1     0.344  0.265  0.250  0.217
+  cache-fp4-clean-k1        0.321  0.237  0.218  0.200
+  cache-k4v8-clean-k1       0.319  0.237  0.199  0.177
+  cache-k8v4-clean-k1       0.319  0.225  0.206  0.228
+  cache-kivi4-clean-k1      0.345  0.256  0.219  0.195
+
+Fallback steps (masked positions present, none above tau → top-1 forced) — exploratory:
+  cache-clean-commit-k1      280 /  1019 steps = 0.275
+  cache-fp4-clean-k1         325 /  1120 steps = 0.290
+  cache-k4v8-clean-k1        333 /  1152 steps = 0.289
+  cache-k8v4-clean-k1        299 /  1070 steps = 0.279
+  cache-kivi4-clean-k1       305 /  1058 steps = 0.288
+
+H3 — first divergence vs none (position counted from first generated token):
+  cache-fp4-clean-k1       divergent prompts  32; conf known  32; arm conf >= none's: 14
+  cache-k4v8-clean-k1      divergent prompts  32; conf known  32; arm conf >= none's: 14
+  cache-k8v4-clean-k1      divergent prompts  30; conf known  30; arm conf >= none's: 14
+  cache-kivi4-clean-k1     divergent prompts  32; conf known  32; arm conf >= none's: 15
+
+Note: assumes trace `block` is the absolute block index (prefill blocks included) — verify on the first run (H3 'conf known' should be close to 'divergent prompts'); exploratory either way.

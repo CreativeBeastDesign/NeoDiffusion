@@ -1,0 +1,47 @@
+## E-002
+cache-clean-commit-k1    n=100 hit-limit= 14 hit-limit-no-EOS= 13 (13.0%)  <-- > 10 %: accuracy uninterpretable
+cache-fp4-clean-k1       n=100 hit-limit= 16 hit-limit-no-EOS= 13 (13.0%)  <-- > 10 %: accuracy uninterpretable
+cache-k4v8-clean-k1      n=100 hit-limit= 16 hit-limit-no-EOS= 15 (15.0%)  <-- > 10 %: accuracy uninterpretable
+cache-k8v4-clean-k1      n=100 hit-limit= 13 hit-limit-no-EOS= 11 (11.0%)  <-- > 10 %: accuracy uninterpretable
+cache-kivi4-clean-k1     n=100 hit-limit= 13 hit-limit-no-EOS= 12 (12.0%)  <-- > 10 %: accuracy uninterpretable
+## E003A (llada2-1-mini-4bit)
+rows: 560 non-warmup (+1 warmup excluded); envValid(v2) false: 560; envValidV1 false: 560
+step-cap hits (B-NT safety net; should be none): none
+WARNING: arms with no valid rows: ['cache-clean-commit-k1', 'cache-fp4-clean-k1', 'cache-k4v8-clean-k1', 'cache-k8v4-clean-k1', 'cache-kivi4-clean-k1']
+  (1) k4v8 & fp4 delta > 0 (CI excl. 0) and > k8v4's ............ n/a (missing data)   → I-001 ?
+  (2) k8v4 CI includes 0 ............................................ n/a (missing data)
+  (3) kivi4 below fp4 (paired CI excl. 0) ........................... n/a (missing data)   → I-002 ?
+## E003B (llada2-1-mini-f16)
+rows: 560 non-warmup (+1 warmup excluded); envValid(v2) false: 0; envValidV1 false: 0
+step-cap hits (B-NT safety net; should be none): none
+  k8v4   n=112 mean -2.009 [-3.777, -0.348]  more/fewer/equal 45/60/7
+  k4v8   n=112 mean +0.509 [-1.420, +2.339]  more/fewer/equal 59/47/6
+  fp4    n=112 mean +0.670 [-1.304, +2.500]  more/fewer/equal 64/45/3
+  kivi4  n=112 mean -1.946 [-3.643, -0.321]  more/fewer/equal 42/65/5
+  kivi4−fp4 n=112 mean -2.616 [-4.143, -1.062]
+  (1) k4v8 & fp4 delta > 0 (CI excl. 0) and > k8v4's ............ FAILS   → I-001 REFUTED
+  (2) k8v4 CI includes 0 ............................................ FAILS
+  (3) kivi4 below fp4 (paired CI excl. 0) ........................... HOLDS   → I-002 not refuted
+## E-004
+H2 — fraction of masked-position confidences > 0.7, by step-in-block:
+  arm                       step0  step1  step2  step3
+  cache-clean-commit-k1     0.344  0.265  0.250  0.217
+  cache-fp4-clean-k1        0.321  0.237  0.218  0.200
+  cache-k4v8-clean-k1       0.319  0.237  0.199  0.177
+  cache-k8v4-clean-k1       0.319  0.225  0.206  0.228
+  cache-kivi4-clean-k1      0.345  0.256  0.219  0.195
+
+Fallback steps (masked positions present, none above tau → top-1 forced) — exploratory:
+  cache-clean-commit-k1      280 /  1019 steps = 0.275
+  cache-fp4-clean-k1         325 /  1120 steps = 0.290
+  cache-k4v8-clean-k1        333 /  1152 steps = 0.289
+  cache-k8v4-clean-k1        299 /  1070 steps = 0.279
+  cache-kivi4-clean-k1       305 /  1058 steps = 0.288
+
+H3 — first divergence vs none (position counted from first generated token):
+  cache-fp4-clean-k1       divergent prompts  32; conf known  32; arm conf >= none's: 14
+  cache-k4v8-clean-k1      divergent prompts  32; conf known  32; arm conf >= none's: 14
+  cache-k8v4-clean-k1      divergent prompts  30; conf known  30; arm conf >= none's: 14
+  cache-kivi4-clean-k1     divergent prompts  32; conf known  32; arm conf >= none's: 15
+
+Note: assumes trace `block` is the absolute block index (prefill blocks included) — verify on the first run (H3 'conf known' should be close to 'divergent prompts'); exploratory either way.

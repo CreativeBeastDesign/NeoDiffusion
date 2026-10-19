@@ -16,6 +16,8 @@ Planning is **complete**; implementation is **underway**. **M0–M5 are implemen
 
 ## Mac Studio runbook — experiment batch E-002…E-004 (2026-10-19)
 
+**Status: RUN 2026-10-19 on the Studio** — results below `--- RESULTS ---` in `paper/experiments/E-00{2,3,4}.md`, facts F-008…F-014, data `paper/facts/data/2026-10-19-studio-batch/`. Headlines: E-003 erosion replicates with 4-bit weights but vanishes with F16 weights (I-001 narrowed); E-002 accuracy uninterpretable (13 % truncation at gen 384); E-004 H2/H3 not supported. Studio now has `models/llada2-1-mini` (BF16, HF rev 20e64e2a), `models/llada2-1-mini-f16`, and an mlx venv at `~/.venvs/neodiffusion-mlx` (put it first on PATH; Homebrew python3 has no mlx; no tmux — use `screen`). Do not re-run unless asked.
+
 If you are an agent on the **Mac Studio** asked to run or follow up "the Studio batch", this is the whole job:
 
 1. **Run**: `git checkout kernel && git pull`, then `tmux new -s batch 'caffeinate -ims Tools/run-studio-batch.sh'` (the script refuses a dirty tracked tree — never "fix" that by editing pre-registered files). Phases and env overrides (`PHASES`, `M4`, `MF16`, `BF16SRC`, `TOK`) are documented in the script header. Every heavy step goes through `Tools/compute-gate.sh` (on the Studio the floors are 20 GB for bench phases, 40 GB for conversion).
