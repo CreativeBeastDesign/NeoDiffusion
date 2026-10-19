@@ -1,0 +1,84 @@
+### E-008 PRIMARY
+input e008-rows-20261019-2126.jsonl sha256 f3354dbf196182f978cf7ed49c1e5f2c9bb78c8942f605f0a2d64947604f4955
+grouping: ctx; suite filter: none; conditions: ['gsm8k_ctx0', 'gsm8k_ctx1000', 'gsm8k_ctx2000', 'gsm8k_ctx3500']
+  gsm8k_ctx0: rows 500, envValid=false 0
+  gsm8k_ctx1000: rows 500, envValid=false 0
+  gsm8k_ctx2000: rows 500, envValid=false 0
+  gsm8k_ctx3500: rows 500, envValid=false 0
+
+per-condition aggregates (valid rows): steps, forwards, tokens, ms/forward, total s per generation
+  gsm8k_ctx0     cache-clean-commit-k1    steps   3805 fwd   4074 tok  12749 ms/fwd   27.6 s/gen   1.30
+  gsm8k_ctx0     cache-k8v4-clean-k1      steps   3851 fwd   4120 tok  12746 ms/fwd   27.8 s/gen   1.32
+  gsm8k_ctx0     cache-k4v8-clean-k1      steps   4113 fwd   4382 tok  12739 ms/fwd   27.8 s/gen   1.40
+  gsm8k_ctx0     cache-fp4-clean-k1       steps   4150 fwd   4419 tok  12754 ms/fwd   27.8 s/gen   1.41
+  gsm8k_ctx0     cache-kivi4-clean-k1     steps   3884 fwd   4153 tok  12756 ms/fwd   27.7 s/gen   1.33
+  gsm8k_ctx1000  cache-clean-commit-k1    steps   3726 fwd   6289 tok  11910 ms/fwd   18.7 s/gen   2.13
+  gsm8k_ctx1000  cache-k8v4-clean-k1      steps   3821 fwd   6384 tok  11974 ms/fwd   19.0 s/gen   2.18
+  gsm8k_ctx1000  cache-k4v8-clean-k1      steps   4242 fwd   6805 tok  11940 ms/fwd   19.8 s/gen   2.32
+  gsm8k_ctx1000  cache-fp4-clean-k1       steps   4481 fwd   7044 tok  12051 ms/fwd   20.2 s/gen   2.40
+  gsm8k_ctx1000  cache-kivi4-clean-k1     steps   3616 fwd   6179 tok  11791 ms/fwd   18.5 s/gen   2.11
+  gsm8k_ctx2000  cache-clean-commit-k1    steps   3905 fwd   9305 tok  12235 ms/fwd   14.4 s/gen   3.36
+  gsm8k_ctx2000  cache-k8v4-clean-k1      steps   3905 fwd   9305 tok  12162 ms/fwd   14.6 s/gen   3.39
+  gsm8k_ctx2000  cache-k4v8-clean-k1      steps   4725 fwd  10125 tok  12125 ms/fwd   16.2 s/gen   3.68
+  gsm8k_ctx2000  cache-fp4-clean-k1       steps   4688 fwd  10088 tok  12177 ms/fwd   16.1 s/gen   3.66
+  gsm8k_ctx2000  cache-kivi4-clean-k1     steps   3772 fwd   9172 tok  12100 ms/fwd   14.2 s/gen   3.33
+  gsm8k_ctx3500  cache-clean-commit-k1    steps   3706 fwd  14056 tok  11923 ms/fwd   10.2 s/gen   5.48
+  gsm8k_ctx3500  cache-k8v4-clean-k1      steps   3508 fwd  13858 tok  11936 ms/fwd    9.9 s/gen   5.36
+  gsm8k_ctx3500  cache-k4v8-clean-k1      steps   4505 fwd  14855 tok  12093 ms/fwd   11.9 s/gen   5.78
+  gsm8k_ctx3500  cache-fp4-clean-k1       steps   4551 fwd  14901 tok  11970 ms/fwd   11.9 s/gen   5.78
+  gsm8k_ctx3500  cache-kivi4-clean-k1     steps   3480 fwd  13830 tok  11938 ms/fwd    9.8 s/gen   5.35
+
+paired logical-step deltas vs none, per condition:
+  gsm8k_ctx0     k8v4   n=100 mean +0.460 [-1.480, +2.320]
+  gsm8k_ctx0     k4v8   n=100 mean +3.080 [+0.680, +5.490]
+  gsm8k_ctx0     fp4    n=100 mean +3.450 [+1.140, +5.800]
+  gsm8k_ctx0     kivi4  n=100 mean +0.790 [-1.220, +2.730]
+  gsm8k_ctx1000  k8v4   n=100 mean +0.950 [-0.850, +2.740]
+  gsm8k_ctx1000  k4v8   n=100 mean +5.160 [+3.310, +6.880]
+  gsm8k_ctx1000  fp4    n=100 mean +7.550 [+5.320, +9.860]
+  gsm8k_ctx1000  kivi4  n=100 mean -1.100 [-2.750, +0.620]
+  gsm8k_ctx2000  k8v4   n=100 mean +0.000 [-2.100, +1.920]
+  gsm8k_ctx2000  k4v8   n=100 mean +8.200 [+5.030, +11.330]
+  gsm8k_ctx2000  fp4    n=100 mean +7.830 [+4.970, +10.680]
+  gsm8k_ctx2000  kivi4  n=100 mean -1.330 [-3.050, +0.320]
+  gsm8k_ctx3500  k8v4   n=100 mean -1.980 [-4.370, +0.320]
+  gsm8k_ctx3500  k4v8   n=100 mean +7.990 [+5.220, +10.870]
+  gsm8k_ctx3500  fp4    n=100 mean +8.450 [+5.390, +11.660]
+  gsm8k_ctx3500  kivi4  n=100 mean -2.260 [-4.760, +0.060]
+
+contrast: delta[gsm8k_ctx3500] − delta[gsm8k_ctx0], per arm:
+  k8v4   n=100 mean -2.440 [-5.530, +0.670]
+  k4v8   n=100 mean +4.910 [+1.030, +8.790]
+  fp4    n=100 mean +5.000 [+0.930, +9.160]
+  kivi4  n=100 mean -3.050 [-6.070, -0.160]
+
+kivi4 − k4v8 at gsm8k_ctx3500: n=100 mean -10.250 [-12.820, -7.880]
+
+pre-registered predictions:
+  (1) k4v8 delta grows: delta[gsm8k_ctx3500] − delta[gsm8k_ctx0] CI > 0 ................ HOLDS
+  (2) k4v8 delta CI > 0 at gsm8k_ctx3500 ...................................... HOLDS
+  (3) k8v4 delta CI spans 0 at every condition .......................... HOLDS
+  (4) kivi4 − k4v8 at gsm8k_ctx3500 CI < 0 ....................................... HOLDS
+
+### E-008 exploratory accuracy
+input e008-text-20261019-2126.jsonl sha256 91effd3ae322e07e9ac5eb698f7996a54d08ba22432e3b919e410c86bad366d9
+  gsm8k_ctx0       cache-clean-commit-k1      6/100
+  gsm8k_ctx0       cache-fp4-clean-k1         9/100  vs none lost 1 gained 4
+  gsm8k_ctx0       cache-k4v8-clean-k1       10/100  vs none lost 1 gained 5
+  gsm8k_ctx0       cache-k8v4-clean-k1       10/100  vs none lost 0 gained 4
+  gsm8k_ctx0       cache-kivi4-clean-k1      13/100  vs none lost 0 gained 7
+  gsm8k_ctx1000    cache-clean-commit-k1     40/100
+  gsm8k_ctx1000    cache-fp4-clean-k1        35/100  vs none lost 8 gained 3
+  gsm8k_ctx1000    cache-k4v8-clean-k1       39/100  vs none lost 8 gained 7
+  gsm8k_ctx1000    cache-k8v4-clean-k1       39/100  vs none lost 5 gained 4
+  gsm8k_ctx1000    cache-kivi4-clean-k1      35/100  vs none lost 6 gained 1
+  gsm8k_ctx2000    cache-clean-commit-k1     34/100
+  gsm8k_ctx2000    cache-fp4-clean-k1        34/100  vs none lost 7 gained 7
+  gsm8k_ctx2000    cache-k4v8-clean-k1       34/100  vs none lost 6 gained 6
+  gsm8k_ctx2000    cache-k8v4-clean-k1       35/100  vs none lost 2 gained 3
+  gsm8k_ctx2000    cache-kivi4-clean-k1      40/100  vs none lost 0 gained 6
+  gsm8k_ctx3500    cache-clean-commit-k1     39/100
+  gsm8k_ctx3500    cache-fp4-clean-k1        39/100  vs none lost 8 gained 8
+  gsm8k_ctx3500    cache-k4v8-clean-k1       41/100  vs none lost 6 gained 8
+  gsm8k_ctx3500    cache-k8v4-clean-k1       41/100  vs none lost 4 gained 6
+  gsm8k_ctx3500    cache-kivi4-clean-k1      37/100  vs none lost 6 gained 4

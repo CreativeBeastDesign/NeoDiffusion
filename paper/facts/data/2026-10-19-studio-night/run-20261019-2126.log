@@ -1,0 +1,36 @@
+21:26:09 === overnight start | host Mac14,14 | git c951e7e | phases: e007 e008
+21:26:09 registered: paper/experiments/E-007.md @ c951e7e
+21:26:09 registered: paper/experiments/E-008.md @ c951e7e
+21:26:09 registered: paper/scripts/group_deltas.py @ 440da75
+21:26:09 build: release diffusion-bench
+21:26:23 e007-tau0.5: suites gsm8k_tau200,chat,reasoning,code --threshold-mask 0.5 | free 73806 MB
+21:45:37 e007-tau0.5: rc=0 rows 1061 text 1060
+21:45:37 e007-tau0.7: suites gsm8k_tau200,chat,reasoning,code --threshold-mask 0.7 | free 68304 MB
+22:07:30 e007-tau0.7: rc=0 rows 1061 text 1060
+22:07:30 e007-tau0.9: suites gsm8k_tau200,chat,reasoning,code --threshold-mask 0.9 | free 67345 MB
+22:39:13 e007-tau0.9: rc=0 rows 1061 text 1060
+## E-007
+  0.50: rows 1000, envValid=false 0
+  0.70: rows 1000, envValid=false 0
+  0.90: rows 1000, envValid=false 0
+  (1) k4v8 delta grows: delta[0.90] − delta[0.50] CI > 0 ................ FAILS
+  (2) k4v8 delta CI > 0 at 0.70 ...................................... HOLDS
+  (3) k8v4 delta CI spans 0 at every condition .......................... HOLDS
+  0.50: rows 1060, envValid=false 0
+  0.70: rows 1060, envValid=false 0
+  0.90: rows 1060, envValid=false 0
+  (1) k4v8 delta grows: delta[0.90] − delta[0.50] CI > 0 ................ FAILS
+  (2) k4v8 delta CI > 0 at 0.70 ...................................... HOLDS
+  (3) k8v4 delta CI spans 0 at every condition .......................... HOLDS
+22:39:17 e008: suites gsm8k_ctx0,gsm8k_ctx1000,gsm8k_ctx2000,gsm8k_ctx3500  | free 73688 MB
+00:25:07 e008: rc=0 rows 2001 text 2000
+## E-008
+  gsm8k_ctx0: rows 500, envValid=false 0
+  gsm8k_ctx1000: rows 500, envValid=false 0
+  gsm8k_ctx2000: rows 500, envValid=false 0
+  gsm8k_ctx3500: rows 500, envValid=false 0
+  (1) k4v8 delta grows: delta[gsm8k_ctx3500] − delta[gsm8k_ctx0] CI > 0 ................ HOLDS
+  (2) k4v8 delta CI > 0 at gsm8k_ctx3500 ...................................... HOLDS
+  (3) k8v4 delta CI spans 0 at every condition .......................... HOLDS
+  (4) kivi4 − k4v8 at gsm8k_ctx3500 CI < 0 ....................................... HOLDS
+00:25:08 === done. Reports in /Users/andrebarlocher/Documents/Swift/NeoDiffusion/scratch/2026-10-19/studio-night

@@ -1,0 +1,105 @@
+### E-007 PRIMARY (gsm8k_tau200)
+input e007-tau0.5-rows-20261019-2126.jsonl sha256 dc7d9bd28c11af88c9c014963f50e8d4bc8709f814351c17f05d0c2ac7976ff9
+input e007-tau0.7-rows-20261019-2126.jsonl sha256 cfd4bf036bbc3e87ef9550372ad6b33a80aa7b9942ee07ef58d68e845d6538f0
+input e007-tau0.9-rows-20261019-2126.jsonl sha256 a70f6c50b29c71305abfd1d1da56ed1978ea9a405491e4947ad5da90de1e35aa
+grouping: tau; suite filter: gsm8k_tau200; conditions: ['0.50', '0.70', '0.90']
+  0.50: rows 1000, envValid=false 0
+  0.70: rows 1000, envValid=false 0
+  0.90: rows 1000, envValid=false 0
+
+per-condition aggregates (valid rows): steps, forwards, tokens, ms/forward, total s per generation
+  0.50           cache-clean-commit-k1    steps   6097 fwd   6478 tok  25291 ms/fwd   27.9 s/gen   1.04
+  0.50           cache-k8v4-clean-k1      steps   6204 fwd   6585 tok  25290 ms/fwd   28.0 s/gen   1.07
+  0.50           cache-k4v8-clean-k1      steps   6549 fwd   6930 tok  25269 ms/fwd   28.1 s/gen   1.12
+  0.50           cache-fp4-clean-k1       steps   6301 fwd   6682 tok  25262 ms/fwd   28.1 s/gen   1.08
+  0.50           cache-kivi4-clean-k1     steps   6169 fwd   6550 tok  25273 ms/fwd   28.1 s/gen   1.06
+  0.70           cache-clean-commit-k1    steps   7015 fwd   7396 tok  25275 ms/fwd   28.1 s/gen   1.18
+  0.70           cache-k8v4-clean-k1      steps   7120 fwd   7501 tok  25301 ms/fwd   28.1 s/gen   1.21
+  0.70           cache-k4v8-clean-k1      steps   7568 fwd   7949 tok  25275 ms/fwd   28.2 s/gen   1.27
+  0.70           cache-fp4-clean-k1       steps   7410 fwd   7791 tok  25273 ms/fwd   28.2 s/gen   1.25
+  0.70           cache-kivi4-clean-k1     steps   7048 fwd   7429 tok  25337 ms/fwd   28.1 s/gen   1.19
+  0.90           cache-clean-commit-k1    steps  10414 fwd  10795 tok  25246 ms/fwd   28.6 s/gen   1.72
+  0.90           cache-k8v4-clean-k1      steps  10366 fwd  10747 tok  25256 ms/fwd   28.7 s/gen   1.72
+  0.90           cache-k4v8-clean-k1      steps  11144 fwd  11525 tok  25257 ms/fwd   28.8 s/gen   1.84
+  0.90           cache-fp4-clean-k1       steps  11029 fwd  11410 tok  25242 ms/fwd   28.8 s/gen   1.82
+  0.90           cache-kivi4-clean-k1     steps  10418 fwd  10799 tok  25297 ms/fwd   28.7 s/gen   1.73
+
+paired logical-step deltas vs none, per condition:
+  0.50           k8v4   n=200 mean +0.535 [-0.910, +2.015]
+  0.50           k4v8   n=200 mean +2.260 [+0.625, +3.885]
+  0.50           fp4    n=200 mean +1.020 [-0.525, +2.505]
+  0.50           kivi4  n=200 mean +0.360 [-1.170, +1.885]
+  0.70           k8v4   n=200 mean +0.525 [-0.660, +1.775]
+  0.70           k4v8   n=200 mean +2.765 [+1.255, +4.235]
+  0.70           fp4    n=200 mean +1.975 [+0.475, +3.410]
+  0.70           kivi4  n=200 mean +0.165 [-1.225, +1.500]
+  0.90           k8v4   n=200 mean -0.240 [-1.520, +1.005]
+  0.90           k4v8   n=200 mean +3.650 [+2.100, +5.170]
+  0.90           fp4    n=200 mean +3.075 [+1.485, +4.650]
+  0.90           kivi4  n=200 mean +0.020 [-1.380, +1.425]
+
+contrast: delta[0.90] − delta[0.50], per arm:
+  k8v4   n=200 mean -0.775 [-2.710, +1.135]
+  k4v8   n=200 mean +1.390 [-0.795, +3.560]
+  fp4    n=200 mean +2.055 [+0.020, +4.065]
+  kivi4  n=200 mean -0.340 [-2.395, +1.770]
+
+kivi4 − k4v8 at 0.90: n=200 mean -3.630 [-5.350, -1.900]
+
+pre-registered predictions:
+  (1) k4v8 delta grows: delta[0.90] − delta[0.50] CI > 0 ................ FAILS
+  (2) k4v8 delta CI > 0 at 0.70 ...................................... HOLDS
+  (3) k8v4 delta CI spans 0 at every condition .......................... HOLDS
+
+### E-007 SECONDARY (all 212)
+input e007-tau0.5-rows-20261019-2126.jsonl sha256 dc7d9bd28c11af88c9c014963f50e8d4bc8709f814351c17f05d0c2ac7976ff9
+input e007-tau0.7-rows-20261019-2126.jsonl sha256 cfd4bf036bbc3e87ef9550372ad6b33a80aa7b9942ee07ef58d68e845d6538f0
+input e007-tau0.9-rows-20261019-2126.jsonl sha256 a70f6c50b29c71305abfd1d1da56ed1978ea9a405491e4947ad5da90de1e35aa
+grouping: tau; suite filter: none; conditions: ['0.50', '0.70', '0.90']
+  0.50: rows 1060, envValid=false 0
+  0.70: rows 1060, envValid=false 0
+  0.90: rows 1060, envValid=false 0
+
+per-condition aggregates (valid rows): steps, forwards, tokens, ms/forward, total s per generation
+  0.50           cache-clean-commit-k1    steps   6476 fwd   6869 tok  26613 ms/fwd   28.1 s/gen   1.04
+  0.50           cache-k8v4-clean-k1      steps   6655 fwd   7048 tok  26633 ms/fwd   28.2 s/gen   1.08
+  0.50           cache-k4v8-clean-k1      steps   6951 fwd   7344 tok  26601 ms/fwd   28.3 s/gen   1.13
+  0.50           cache-fp4-clean-k1       steps   6684 fwd   7077 tok  26574 ms/fwd   28.2 s/gen   1.09
+  0.50           cache-kivi4-clean-k1     steps   6562 fwd   6955 tok  26613 ms/fwd   28.2 s/gen   1.07
+  0.70           cache-clean-commit-k1    steps   7468 fwd   7861 tok  26591 ms/fwd   28.3 s/gen   1.19
+  0.70           cache-k8v4-clean-k1      steps   7586 fwd   7979 tok  26639 ms/fwd   28.3 s/gen   1.21
+  0.70           cache-k4v8-clean-k1      steps   8081 fwd   8474 tok  26611 ms/fwd   28.3 s/gen   1.28
+  0.70           cache-fp4-clean-k1       steps   7911 fwd   8304 tok  26616 ms/fwd   28.4 s/gen   1.26
+  0.70           cache-kivi4-clean-k1     steps   7531 fwd   7924 tok  26678 ms/fwd   28.3 s/gen   1.21
+  0.90           cache-clean-commit-k1    steps  11099 fwd  11492 tok  26582 ms/fwd   29.0 s/gen   1.74
+  0.90           cache-k8v4-clean-k1      steps  11025 fwd  11418 tok  26591 ms/fwd   29.0 s/gen   1.74
+  0.90           cache-k4v8-clean-k1      steps  11833 fwd  12226 tok  26596 ms/fwd   29.1 s/gen   1.86
+  0.90           cache-fp4-clean-k1       steps  11748 fwd  12141 tok  26556 ms/fwd   29.1 s/gen   1.85
+  0.90           cache-kivi4-clean-k1     steps  11073 fwd  11466 tok  26635 ms/fwd   29.1 s/gen   1.75
+
+paired logical-step deltas vs none, per condition:
+  0.50           k8v4   n=212 mean +0.844 [-0.571, +2.250]
+  0.50           k4v8   n=212 mean +2.241 [+0.693, +3.825]
+  0.50           fp4    n=212 mean +0.981 [-0.505, +2.462]
+  0.50           kivi4  n=212 mean +0.406 [-1.123, +1.896]
+  0.70           k8v4   n=212 mean +0.557 [-0.575, +1.689]
+  0.70           k4v8   n=212 mean +2.892 [+1.434, +4.344]
+  0.70           fp4    n=212 mean +2.090 [+0.637, +3.476]
+  0.70           kivi4  n=212 mean +0.297 [-1.104, +1.651]
+  0.90           k8v4   n=212 mean -0.349 [-1.538, +0.816]
+  0.90           k4v8   n=212 mean +3.462 [+1.995, +4.986]
+  0.90           fp4    n=212 mean +3.061 [+1.524, +4.623]
+  0.90           kivi4  n=212 mean -0.123 [-1.472, +1.236]
+
+contrast: delta[0.90] − delta[0.50], per arm:
+  k8v4   n=212 mean -1.193 [-3.042, +0.656]
+  k4v8   n=212 mean +1.222 [-0.915, +3.311]
+  fp4    n=212 mean +2.080 [+0.052, +4.094]
+  kivi4  n=212 mean -0.528 [-2.575, +1.509]
+
+kivi4 − k4v8 at 0.90: n=212 mean -3.585 [-5.231, -1.906]
+
+pre-registered predictions:
+  (1) k4v8 delta grows: delta[0.90] − delta[0.50] CI > 0 ................ FAILS
+  (2) k4v8 delta CI > 0 at 0.70 ...................................... HOLDS
+  (3) k8v4 delta CI spans 0 at every condition .......................... HOLDS
