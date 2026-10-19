@@ -1,0 +1,15 @@
+00:25:39 === E-009 start | host Mac14,14 | git e9ae9c9 | free 72120 MB
+00:25:39 registered: paper/experiments/E-009.md @ e9ae9c9
+00:25:53 compat check: one prompt, uncompressed cache
+00:26:08 compat: rc=0 text: ['391<|role_end|><|endoftext|>']
+00:26:08 e009: suites gsm8k_flash200,chat,reasoning,code | free 63415 MB
+01:35:07 e009: rc=0 rows 1061 text 1060
+rows 1000, envValid=false 0; mlxCore 0.31.1 mlx-swift 0.31.6 git e9ae9c990c dirty 0
+  (1) k4v8 delta CI > 0 ................................ HOLDS
+  (2) k8v4 delta CI spans 0 ............................ HOLDS
+  (3) k4v8 − k8v4 CI > 0 (Key/Value asymmetry) ......... HOLDS
+rows 1060, envValid=false 0; mlxCore 0.31.1 mlx-swift 0.31.6 git e9ae9c990c dirty 0
+  (1) k4v8 delta CI > 0 ................................ HOLDS
+  (2) k8v4 delta CI spans 0 ............................ HOLDS
+  (3) k4v8 − k8v4 CI > 0 (Key/Value asymmetry) ......... HOLDS
+01:35:08 === done. Report: /Users/andrebarlocher/Documents/Swift/NeoDiffusion/scratch/2026-10-20/studio-e009/e009-REPORT-20261020-0025.txt

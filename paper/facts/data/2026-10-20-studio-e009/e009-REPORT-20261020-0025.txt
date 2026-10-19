@@ -1,0 +1,49 @@
+### E-009 PRIMARY (gsm8k_flash200)
+input e009-rows-20261020-0025.jsonl sha256 eba3bdf0f0319bb6d29702a93d85d837df0532c01c6fd4502609611166717e66; suite filter: gsm8k_flash200
+rows 1000, envValid=false 0; mlxCore 0.31.1 mlx-swift 0.31.6 git e9ae9c990c dirty 0
+
+per-arm aggregates: steps fwd tok ms/fwd
+  cache-clean-commit-k1      6465   6856  25449  101.2
+  cache-k8v4-clean-k1        6352   6743  25453  101.0
+  cache-k4v8-clean-k1        6829   7220  25473  101.6
+  cache-fp4-clean-k1         6687   7078  25510  101.4
+  cache-kivi4-clean-k1       6623   7014  25462  101.2
+
+paired logical-step deltas vs none:
+  k8v4   n=200 mean -0.565 [-1.565, +0.405]
+  k4v8   n=200 mean +1.820 [+0.500, +3.140]
+  fp4    n=200 mean +1.110 [+0.000, +2.255]
+  kivi4  n=200 mean +0.790 [-0.325, +1.955]
+
+k4v8 − k8v4: n=200 mean +2.385 [+1.070, +3.765]
+kivi4 − k4v8: n=200 mean -1.030 [-2.340, +0.240]
+
+pre-registered predictions (E-009; meaningful with --suite gsm8k_flash200):
+  (1) k4v8 delta CI > 0 ................................ HOLDS
+  (2) k8v4 delta CI spans 0 ............................ HOLDS
+  (3) k4v8 − k8v4 CI > 0 (Key/Value asymmetry) ......... HOLDS
+
+### E-009 SECONDARY (all 212)
+input e009-rows-20261020-0025.jsonl sha256 eba3bdf0f0319bb6d29702a93d85d837df0532c01c6fd4502609611166717e66; suite filter: none
+rows 1060, envValid=false 0; mlxCore 0.31.1 mlx-swift 0.31.6 git e9ae9c990c dirty 0
+
+per-arm aggregates: steps fwd tok ms/fwd
+  cache-clean-commit-k1      6962   7365  26781  101.4
+  cache-k8v4-clean-k1        6807   7210  26787  101.3
+  cache-k4v8-clean-k1        7321   7724  26806  101.8
+  cache-fp4-clean-k1         7165   7568  26855  101.6
+  cache-kivi4-clean-k1       7075   7478  26810  101.4
+
+paired logical-step deltas vs none:
+  k8v4   n=212 mean -0.731 [-1.708, +0.255]
+  k4v8   n=212 mean +1.693 [+0.448, +3.005]
+  fp4    n=212 mean +0.958 [-0.146, +2.057]
+  kivi4  n=212 mean +0.533 [-0.585, +1.675]
+
+k4v8 − k8v4: n=212 mean +2.425 [+1.108, +3.731]
+kivi4 − k4v8: n=212 mean -1.160 [-2.425, +0.028]
+
+pre-registered predictions (E-009; meaningful with --suite gsm8k_flash200):
+  (1) k4v8 delta CI > 0 ................................ HOLDS
+  (2) k8v4 delta CI spans 0 ............................ HOLDS
+  (3) k4v8 − k8v4 CI > 0 (Key/Value asymmetry) ......... HOLDS
