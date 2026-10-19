@@ -12,6 +12,10 @@ traces_p, text_p, rows_p = sys.argv[1], sys.argv[2], sys.argv[3]
 plen = {(r["arm"], r["promptId"]): r["promptTokens"] for r in map(json.loads, open(rows_p)) if r.get("run", 0) >= 0}
 tau = float(sys.argv[sys.argv.index("--tau") + 1]) if "--tau" in sys.argv else 0.7
 above = defaultdict(lambda: defaultdict(lambda: [0, 0]))      # arm -> step -> [above, total]
+# EXPLORATORY, added 2026-10-19 after registration but before the run (question from André:
+# "did the threshold ever fail so the top-1 fallback had to unmask?"): a step is a FALLBACK step if
+# masked positions exist and none has confidence > tau, so Γ is filled by the top-1 fallback.
+fallback = defaultdict(lambda: [0, 0])                          # arm -> [fallback steps, unmask-eligible steps]
 commit_conf = defaultdict(dict)                                 # (arm, prompt) -> {(block,pos): conf}
 for l in open(traces_p):
     t = json.loads(l)
@@ -19,6 +23,9 @@ for l in open(traces_p):
     if arm in ("", "warmup") or t.get("run", 0) < 0:
         continue
     key = (arm, t["promptId"])
+    mconf = [c for c, m in zip(t["conf"], t["masked"]) if m]
+    if mconf:
+        f = fallback[arm]; f[1] += 1; f[0] += max(mconf) <= tau
     for i, (c, m) in enumerate(zip(t["conf"], t["masked"])):
         if m and t["step"] <= 3:
             a = above[arm][t["step"]]; a[0] += c > tau; a[1] += 1
@@ -29,6 +36,10 @@ arms = sorted(above)
 print("  " + f"{'arm':24s}" + "".join(f"  step{s}" for s in range(4)))
 for arm in arms:
     print("  " + f"{arm:24s}" + "".join(f"  {above[arm][s][0] / max(above[arm][s][1], 1):.3f}" for s in range(4)))
+print("\nFallback steps (masked positions present, none above tau → top-1 forced) — exploratory:")
+for arm in arms:
+    f = fallback[arm]
+    print(f"  {arm:24s} {f[0]:5d} / {f[1]:5d} steps = {f[0] / max(f[1], 1):.3f}")
 toks = {}
 for l in open(text_p):
     t = json.loads(l)
