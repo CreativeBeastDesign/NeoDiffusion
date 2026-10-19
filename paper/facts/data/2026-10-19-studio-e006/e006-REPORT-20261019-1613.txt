@@ -1,0 +1,131 @@
+### PRIMARY (fresh prompts)
+prompt filter: suite == gsm8k_fresh200
+input 4bit: e006-4bit-rows-20261019-1613.jsonl sha256 8c0f375d3715c9e73e50816910ebc00a4e64c903e482f4d53dd4145c32094928  rows 1000, envValid=false 0
+input 8bit: e006-8bit-rows-20261019-1613.jsonl sha256 10cf5c158d645934ac720bfa948b992457c876e8190a6bdce34eabf0f8d0eeee  rows 1000, envValid=false 0
+input f16: e006-f16-rows-20261019-1613.jsonl sha256 3e4567a3e0a40c02d9ff46d2b1cf8fd0eebd86562f3462f86b760ec26e106852  rows 1000, envValid=false 0
+
+paired logical-step deltas vs none, per artefact:
+  4bit  k8v4   n=200 mean -0.140 [-1.400, +1.110]
+  4bit  k4v8   n=200 mean +1.340 [-0.250, +2.920]
+  4bit  fp4    n=200 mean +0.875 [-0.745, +2.460]
+  4bit  kivi4  n=200 mean -0.685 [-1.985, +0.550]
+  8bit  k8v4   n=200 mean -0.650 [-1.835, +0.505]
+  8bit  k4v8   n=200 mean +1.850 [+0.385, +3.225]
+  8bit  fp4    n=200 mean +2.060 [+0.555, +3.525]
+  8bit  kivi4  n=200 mean -0.110 [-1.425, +1.210]
+  f16   k8v4   n=200 mean -0.755 [-1.770, +0.265]
+  f16   k4v8   n=200 mean +2.450 [+1.230, +3.670]
+  f16   fp4    n=200 mean +1.570 [+0.455, +2.695]
+  f16   kivi4  n=200 mean +0.450 [-0.585, +1.505]
+
+weight interaction: delta_w1 − delta_w2, per arm:
+  4bit−f16   k8v4   n=200 mean +0.615 [-0.840, +2.140]
+  4bit−f16   k4v8   n=200 mean -1.110 [-3.040, +0.870]
+  4bit−f16   fp4    n=200 mean -0.695 [-2.595, +1.145]
+  4bit−f16   kivi4  n=200 mean -1.135 [-2.875, +0.475]
+  4bit−8bit  k8v4   n=200 mean +0.510 [-1.205, +2.260]
+  4bit−8bit  k4v8   n=200 mean -0.510 [-2.685, +1.715]
+  4bit−8bit  fp4    n=200 mean -1.185 [-3.420, +1.060]
+  4bit−8bit  kivi4  n=200 mean -0.575 [-2.525, +1.325]
+  8bit−f16   k8v4   n=200 mean +0.105 [-1.350, +1.520]
+  8bit−f16   k4v8   n=200 mean -0.600 [-2.290, +1.045]
+  8bit−f16   fp4    n=200 mean +0.490 [-1.105, +2.115]
+  8bit−f16   kivi4  n=200 mean -0.560 [-2.200, +1.080]
+
+Key specificity: (delta_w1 − delta_w2)[k4v8] − (delta_w1 − delta_w2)[k8v4]:
+  4bit−f16   n=200 mean -1.725 [-3.420, +0.035]
+  4bit−8bit  n=200 mean -1.020 [-2.750, +0.685]
+
+pre-registered predictions (E-006; meaningful on --suite gsm8k_fresh200 only):
+  (P1) 4-bit replication: k4v8 & fp4 CI > 0, k8v4 CI spans 0 ........ FAILS
+  (P2) weight interaction: 4bit−f16 for k4v8 CI > 0 ................. FAILS
+  (P3) Key specificity: 4bit−f16 k4v8 minus k8v4 CI > 0 ............. FAILS
+  (P4) dose: 8-bit k4v8 CI spans 0 and 4bit−8bit k4v8 CI > 0 ........ FAILS
+
+### S2a original 112 (not blind)
+prompt filter: suite != gsm8k_fresh200
+input 4bit: e006-4bit-rows-20261019-1613.jsonl sha256 8c0f375d3715c9e73e50816910ebc00a4e64c903e482f4d53dd4145c32094928  rows 560, envValid=false 0
+input 8bit: e006-8bit-rows-20261019-1613.jsonl sha256 10cf5c158d645934ac720bfa948b992457c876e8190a6bdce34eabf0f8d0eeee  rows 560, envValid=false 0
+input f16: e006-f16-rows-20261019-1613.jsonl sha256 3e4567a3e0a40c02d9ff46d2b1cf8fd0eebd86562f3462f86b760ec26e106852  rows 560, envValid=false 0
+
+paired logical-step deltas vs none, per artefact:
+  4bit  k8v4   n=112 mean -0.625 [-1.991, +0.759]
+  4bit  k4v8   n=112 mean +2.455 [+0.580, +4.286]
+  4bit  fp4    n=112 mean +3.170 [+1.286, +5.018]
+  4bit  kivi4  n=112 mean +0.259 [-1.598, +2.143]
+  8bit  k8v4   n=112 mean +0.598 [-0.920, +2.152]
+  8bit  k4v8   n=112 mean +1.804 [+0.384, +3.286]
+  8bit  fp4    n=112 mean +1.250 [-0.286, +2.830]
+  8bit  kivi4  n=112 mean -0.161 [-1.616, +1.411]
+  f16   k8v4   n=112 mean -2.009 [-3.795, -0.330]
+  f16   k4v8   n=112 mean +0.509 [-1.339, +2.330]
+  f16   fp4    n=112 mean +0.670 [-1.286, +2.473]
+  f16   kivi4  n=112 mean -1.946 [-3.670, -0.304]
+
+weight interaction: delta_w1 − delta_w2, per arm:
+  4bit−f16   k8v4   n=112 mean +1.384 [-0.875, +3.696]
+  4bit−f16   k4v8   n=112 mean +1.946 [-0.571, +4.554]
+  4bit−f16   fp4    n=112 mean +2.500 [-0.107, +5.161]
+  4bit−f16   kivi4  n=112 mean +2.205 [-0.179, +4.688]
+  4bit−8bit  k8v4   n=112 mean -1.223 [-3.357, +0.786]
+  4bit−8bit  k4v8   n=112 mean +0.652 [-1.696, +2.946]
+  4bit−8bit  fp4    n=112 mean +1.920 [-0.259, +4.116]
+  4bit−8bit  kivi4  n=112 mean +0.420 [-1.884, +2.661]
+  8bit−f16   k8v4   n=112 mean +2.607 [+0.527, +4.786]
+  8bit−f16   k4v8   n=112 mean +1.295 [-0.812, +3.652]
+  8bit−f16   fp4    n=112 mean +0.580 [-1.562, +2.964]
+  8bit−f16   kivi4  n=112 mean +1.786 [+0.125, +3.491]
+
+Key specificity: (delta_w1 − delta_w2)[k4v8] − (delta_w1 − delta_w2)[k8v4]:
+  4bit−f16   n=112 mean +0.562 [-1.812, +3.018]
+  4bit−8bit  n=112 mean +1.875 [-0.768, +4.571]
+
+pre-registered predictions (E-006; meaningful on --suite gsm8k_fresh200 only):
+  (P1) 4-bit replication: k4v8 & fp4 CI > 0, k8v4 CI spans 0 ........ HOLDS
+  (P2) weight interaction: 4bit−f16 for k4v8 CI > 0 ................. FAILS
+  (P3) Key specificity: 4bit−f16 k4v8 minus k8v4 CI > 0 ............. FAILS
+  (P4) dose: 8-bit k4v8 CI spans 0 and 4bit−8bit k4v8 CI > 0 ........ FAILS
+
+### S2b all 312 (not blind)
+prompt filter: all suites
+input 4bit: e006-4bit-rows-20261019-1613.jsonl sha256 8c0f375d3715c9e73e50816910ebc00a4e64c903e482f4d53dd4145c32094928  rows 1560, envValid=false 0
+input 8bit: e006-8bit-rows-20261019-1613.jsonl sha256 10cf5c158d645934ac720bfa948b992457c876e8190a6bdce34eabf0f8d0eeee  rows 1560, envValid=false 0
+input f16: e006-f16-rows-20261019-1613.jsonl sha256 3e4567a3e0a40c02d9ff46d2b1cf8fd0eebd86562f3462f86b760ec26e106852  rows 1560, envValid=false 0
+
+paired logical-step deltas vs none, per artefact:
+  4bit  k8v4   n=312 mean -0.314 [-1.256, +0.631]
+  4bit  k4v8   n=312 mean +1.740 [+0.532, +2.958]
+  4bit  fp4    n=312 mean +1.699 [+0.468, +2.920]
+  4bit  kivi4  n=312 mean -0.346 [-1.397, +0.715]
+  8bit  k8v4   n=312 mean -0.202 [-1.106, +0.734]
+  8bit  k4v8   n=312 mean +1.833 [+0.801, +2.881]
+  8bit  fp4    n=312 mean +1.769 [+0.683, +2.865]
+  8bit  kivi4  n=312 mean -0.128 [-1.093, +0.856]
+  f16   k8v4   n=312 mean -1.205 [-2.106, -0.308]
+  f16   k4v8   n=312 mean +1.753 [+0.702, +2.779]
+  f16   fp4    n=312 mean +1.247 [+0.221, +2.228]
+  f16   kivi4  n=312 mean -0.410 [-1.340, +0.494]
+
+weight interaction: delta_w1 − delta_w2, per arm:
+  4bit−f16   k8v4   n=312 mean +0.891 [-0.369, +2.183]
+  4bit−f16   k4v8   n=312 mean -0.013 [-1.606, +1.599]
+  4bit−f16   fp4    n=312 mean +0.452 [-1.128, +2.010]
+  4bit−f16   kivi4  n=312 mean +0.064 [-1.349, +1.478]
+  4bit−8bit  k8v4   n=312 mean -0.112 [-1.429, +1.192]
+  4bit−8bit  k4v8   n=312 mean -0.093 [-1.715, +1.551]
+  4bit−8bit  fp4    n=312 mean -0.071 [-1.737, +1.522]
+  4bit−8bit  kivi4  n=312 mean -0.218 [-1.683, +1.224]
+  8bit−f16   k8v4   n=312 mean +1.003 [-0.147, +2.208]
+  8bit−f16   k4v8   n=312 mean +0.080 [-1.234, +1.413]
+  8bit−f16   fp4    n=312 mean +0.522 [-0.772, +1.849]
+  8bit−f16   kivi4  n=312 mean +0.282 [-0.923, +1.519]
+
+Key specificity: (delta_w1 − delta_w2)[k4v8] − (delta_w1 − delta_w2)[k8v4]:
+  4bit−f16   n=312 mean -0.904 [-2.298, +0.554]
+  4bit−8bit  n=312 mean +0.019 [-1.449, +1.494]
+
+pre-registered predictions (E-006; meaningful on --suite gsm8k_fresh200 only):
+  (P1) 4-bit replication: k4v8 & fp4 CI > 0, k8v4 CI spans 0 ........ HOLDS
+  (P2) weight interaction: 4bit−f16 for k4v8 CI > 0 ................. FAILS
+  (P3) Key specificity: 4bit−f16 k4v8 minus k8v4 CI > 0 ............. FAILS
+  (P4) dose: 8-bit k4v8 CI spans 0 and 4bit−8bit k4v8 CI > 0 ........ FAILS

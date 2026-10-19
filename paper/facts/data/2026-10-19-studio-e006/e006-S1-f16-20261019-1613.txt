@@ -1,0 +1,11 @@
+input e003b-rows-20261019-1038.jsonl sha256 a9e731a83be952f1e1323b932d4280b0f606a74419fce8d6ae6bd1989c42f04c
+input e006-f16-rows-20261019-1613.jsonl sha256 3e4567a3e0a40c02d9ff46d2b1cf8fd0eebd86562f3462f86b760ec26e106852
+input e003b-text-20261019-1038.jsonl sha256 080c62f4699de106d7cb80d05038f0c693b69051d1637f714e14b2a9de2017bd
+input e006-f16-text-20261019-1613.jsonl sha256 72e8797e678e16785ab22184cd5b57947f4eabd36e5a5495f72bbc61ed6596af
+rows A: 560 non-warmup; envValid {True: 560}
+rows B: 1560 non-warmup; envValid {True: 1560}
+keys in both: 560 (only A 0, only B 1000)
+  logicalSteps       mismatches: 0/560
+  forwardsEvaluated  mismatches: 0/560
+  tokensGenerated    mismatches: 0/560
+  text               mismatches: 0/560

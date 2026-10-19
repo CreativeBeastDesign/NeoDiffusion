@@ -1,0 +1,36 @@
+input e006-f16-rows-20261019-1613.jsonl sha256 3e4567a3e0a40c02d9ff46d2b1cf8fd0eebd86562f3462f86b760ec26e106852
+input e006-f16-text-20261019-1613.jsonl sha256 72e8797e678e16785ab22184cd5b57947f4eabd36e5a5495f72bbc61ed6596af
+host ['Mac14,14'] mlxCore 0.31.1 mlx-swift 0.31.6 git be77caa2c2 dirty 0 schedule ['interleaved'] K [1] genLength [128]
+rows: 1560 non-warmup (+1 warmup excluded); envValid(v2) false: 0; envValidV1 false: 0
+step-cap hits (B-NT safety net; should be none): none
+
+per-arm aggregates (valid rows):
+  arm                       n   steps     fwd     tok tok/unmask 1-tr frac  aggTPS  ms/fwd
+  none                    312   10448   11047   39142      5.027     0.418  89.551    39.6
+  k8v4                    312   10072   10671   39147      5.250     0.393  91.862    39.9
+  k4v8                    312   10995   11594   39122      4.736     0.417  84.684    39.8
+  fp4                     312   10837   11436   39188      4.808     0.405  85.926    39.9
+  kivi4                   312   10320   10919   39083      5.088     0.404  89.706    39.9
+
+paired logical-step deltas vs none (mean, bootstrap 95% CI, 10000 resamples, seed 20261018):
+  k8v4   n=312 mean -1.205 [-2.093, -0.298]  more/fewer/equal 120/160/32
+  k4v8   n=312 mean +1.753 [+0.715, +2.779]  more/fewer/equal 173/116/23
+  fp4    n=312 mean +1.247 [+0.253, +2.234]  more/fewer/equal 184/112/16
+  kivi4  n=312 mean -0.410 [-1.314, +0.506]  more/fewer/equal 136/160/16
+  kivi4−fp4 n=312 mean -1.657 [-2.641, -0.702]
+
+pre-registered predictions:
+  (1) k4v8 & fp4 delta > 0 (CI excl. 0) and > k8v4's ............ HOLDS   → I-001 not refuted
+  (2) k8v4 CI includes 0 ............................................ FAILS
+  (3) kivi4 below fp4 (paired CI excl. 0) ........................... HOLDS   → I-002 not refuted
+
+gsm8k accuracy (valid rows; last integer vs answer):
+  none   12/100 = 0.120
+  k8v4   13/100 = 0.130
+  k4v8   15/100 = 0.150
+  fp4    10/100 = 0.100
+  kivi4  15/100 = 0.150
+  vs none: k8v4   lost 2, gained 3 (paired discordant, n=100)
+  vs none: k4v8   lost 3, gained 6 (paired discordant, n=100)
+  vs none: fp4    lost 5, gained 3 (paired discordant, n=100)
+  vs none: kivi4  lost 2, gained 5 (paired discordant, n=100)
