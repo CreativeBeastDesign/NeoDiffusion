@@ -1,0 +1,26 @@
+| prompt | label | words | max4gramRepeat | maskLeak | eosBlock | tokens |
+|---|---|---|---|---|---|---|
+| lc-chat-email | A | 146 | 1 | False | 8 | 260 |
+| lc-chat-email | B | 121 | 1 | False | 7 | 228 |
+| lc-chat-explain | A | 346 | 2 | False | none | 512 |
+| lc-chat-explain | B | 342 | 2 | False | none | 512 |
+| lc-chat-question | A | 90 | 1 | False | 4 | 133 |
+| lc-chat-question | B | 101 | 1 | False | 5 | 150 |
+| lc-chat-summary | A | 128 | 1 | False | 6 | 180 |
+| lc-chat-summary | B | 150 | 1 | False | 7 | 211 |
+| lc-code-explain | A | 272 | 2 | False | none | 512 |
+| lc-code-explain | B | 243 | 1 | False | none | 512 |
+| lc-code-refactor | A | 229 | 1 | False | none | 512 |
+| lc-code-refactor | B | 229 | 2 | False | none | 512 |
+| lc-code-review | A | 292 | 2 | False | none | 512 |
+| lc-code-review | B | 274 | 2 | False | none | 512 |
+| lc-code-test | A | 224 | 3 | False | none | 512 |
+| lc-code-test | B | 232 | 3 | False | none | 512 |
+| lc-reason-gsm1300 | A | 73 | 1 | False | 4 | 130 |
+| lc-reason-gsm1300 | B | 73 | 1 | False | 4 | 130 |
+| lc-reason-gsm1301 | A | 162 | 1 | False | 9 | 295 |
+| lc-reason-gsm1301 | B | 149 | 2 | False | 8 | 276 |
+| lc-reason-table | A | 171 | 1 | False | none | 512 |
+| lc-reason-table | B | 202 | 1 | False | none | 512 |
+| lc-reason-weights | A | 214 | 2 | False | 13 | 428 |
+| lc-reason-weights | B | 205 | 3 | False | 12 | 396 |

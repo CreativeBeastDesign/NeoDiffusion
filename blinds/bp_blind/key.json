@@ -1,0 +1,50 @@
+{
+  "lc-chat-email": {
+    "A": "prefill-c128",
+    "B": "prefill-off"
+  },
+  "lc-chat-explain": {
+    "A": "prefill-off",
+    "B": "prefill-c128"
+  },
+  "lc-chat-question": {
+    "A": "prefill-off",
+    "B": "prefill-c128"
+  },
+  "lc-chat-summary": {
+    "A": "prefill-off",
+    "B": "prefill-c128"
+  },
+  "lc-code-explain": {
+    "A": "prefill-c128",
+    "B": "prefill-off"
+  },
+  "lc-code-refactor": {
+    "A": "prefill-off",
+    "B": "prefill-c128"
+  },
+  "lc-code-review": {
+    "A": "prefill-c128",
+    "B": "prefill-off"
+  },
+  "lc-code-test": {
+    "A": "prefill-c128",
+    "B": "prefill-off"
+  },
+  "lc-reason-gsm1300": {
+    "A": "prefill-off",
+    "B": "prefill-c128"
+  },
+  "lc-reason-gsm1301": {
+    "A": "prefill-off",
+    "B": "prefill-c128"
+  },
+  "lc-reason-table": {
+    "A": "prefill-off",
+    "B": "prefill-c128"
+  },
+  "lc-reason-weights": {
+    "A": "prefill-c128",
+    "B": "prefill-off"
+  }
+}
