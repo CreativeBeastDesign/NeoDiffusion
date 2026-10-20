@@ -1,0 +1,15 @@
+input e011-rows-20261020-0529.jsonl sha256 112f07a7ba6d12b954098eaf86217eff3d58f274f2a43feb9640f1b8707437f4
+input e011-text-20261020-0529.jsonl sha256 d7ae627aa12e3ab7aca6e999b09f00f96d884d9800cafd283adecc12c1195a65
+mean generated tokens: clean-commit-k1 211.2, k4v8 272.0, k8v4 215.7, kivi4 221.9
+
+cache-k4v8-clean-k1: lost 32 (arm truncated in 13, not truncated in 19)
+  questions with neither generation truncated: 179; arm 154 vs none 168; lost 19 gained 5
+  4-gram repetition, arm text: lost 0.100 vs other 0.032; none's text on the same lost questions 0.020
+
+cache-k8v4-clean-k1: lost 9 (arm truncated in 1, not truncated in 8)
+  questions with neither generation truncated: 195; arm 179 vs none 181; lost 8 gained 6
+  4-gram repetition, arm text: lost 0.031 vs other 0.020; none's text on the same lost questions 0.023
+
+cache-kivi4-clean-k1: lost 6 (arm truncated in 2, not truncated in 4)
+  questions with neither generation truncated: 192; arm 179 vs none 180; lost 4 gained 3
+  4-gram repetition, arm text: lost 0.039 vs other 0.024; none's text on the same lost questions 0.013

@@ -65,6 +65,8 @@ def main() -> int:
     for x, arm in ARMS.items():
         qs = [q for q in ps if (arm, q) in steps and (BASE, q) in steps]
         v = [steps[(arm, q)] - steps[(BASE, q)] for q in qs]
+        if not v:  # arm absent from this run (fix 2026-10-20: E-010/E-011 have no fp4 arm)
+            continue
         res[x] = ci(v); print(f"  {x:6s} {fmt(res[x], len(v))}")
     def pair(x1, x2):
         qs = [q for q in ps if (ARMS[x1], q) in steps and (ARMS[x2], q) in steps]

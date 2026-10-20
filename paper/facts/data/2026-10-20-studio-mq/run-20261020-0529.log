@@ -1,0 +1,22 @@
+05:29:27 === E-010/E-011 start | host Mac14,14 | git d11d294 | phases: e010 e011
+05:29:27 registered: paper/experiments/E-010.md @ d11d294
+05:29:27 registered: paper/experiments/E-011.md @ d11d294
+05:29:42 e010: suite gsm8k_mech2000 gen 128 traces | free 99533 MB
+06:16:01 e010: rc=0 rows 801 traces 32709
+rows: 800 valid generations, envValid=false 0; tau 0.7
+  (M1) first step, matched input: k4v8 above1 − none CI < 0 ................ HOLDS
+  (M2) first step: k8v4 and kivi4 above1 − none CI spans 0 .................. FAILS
+  (M3) trajectory: k4v8 fallback steps F − none CI > 0 ...................... HOLDS
+  (M4) k4v8 fallback share of extra unmasking steps, CI lower bound > 0.5 ..... FAILS
+  (M5) k8v4 and kivi4 fallback steps F − none CI spans 0 .................... HOLDS
+rows 800, envValid=false 0; mlxCore 0.31.1 mlx-swift 0.31.6 git d11d294fdd dirty 0
+06:16:04 e011: suite gsm8k_qual2000 gen 768 | free 98555 MB
+07:19:04 e011: rc=0 rows 801 text 800
+suite gsm8k_qual2000; gen 768; valid generations 800; envValid=false 0
+  (G)  truncation gate: ≤ 10 % of uncompressed-cache generations truncated ............ PASSES
+  (Q1) no KV mode shows a detectable accuracy loss (McNemar p < 0.05, lost > gained) ... FAILS
+       k8v4   detectable loss: no
+       k4v8   detectable loss: YES
+       kivi4  detectable loss: no
+rows 800, envValid=false 0; mlxCore 0.31.1 mlx-swift 0.31.6 git d11d294fdd dirty 0
+07:19:05 === done. Reports in /Users/andrebarlocher/Documents/Swift/NeoDiffusion/scratch/2026-10-20/studio-mq

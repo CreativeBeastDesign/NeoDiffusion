@@ -1,0 +1,67 @@
+### E-010 PRIMARY
+input e010-traces-20261020-0529.jsonl sha256 896213dd9a8fa98174dd06426541932bf5762fdf8d051f89811cdd6d861b9d71
+input e010-rows-20261020-0529.jsonl sha256 2f05fe863bf06cbf8a29cb5ae33c13ea91c4e27bf9cd8f2ae2d3e74fb068282b
+rows: 800 valid generations, envValid=false 0; tau 0.7
+generations with traces: 800; arms: ['cache-clean-commit-k1', 'cache-k4v8-clean-k1', 'cache-k8v4-clean-k1', 'cache-kivi4-clean-k1']
+
+per-arm totals: U (unmasking steps) F (fallback) P (post) G (Γ commits) G/U  F/U  mean above1  mean meanc1
+  cache-clean-commit-k1    n=200 U   6592 F   1889 P  1050 G  27434 G/U 4.162 F/U 0.287 above1 1.970 meanc1 0.3754
+  cache-k8v4-clean-k1      n=200 U   6641 F   1860 P  1134 G  27594 G/U 4.155 F/U 0.280 above1 2.155 meanc1 0.3811
+  cache-k4v8-clean-k1      n=200 U   8481 F   2833 P  1020 G  27658 G/U 3.261 F/U 0.334 above1 1.565 meanc1 0.3447
+  cache-kivi4-clean-k1     n=200 U   6657 F   1909 P  1097 G  27466 G/U 4.126 F/U 0.287 above1 2.030 meanc1 0.3816
+
+paired per-prompt differences, arm − none:
+  k8v4   above1  n=200 mean +0.185 [+0.055, +0.325]
+  k8v4   meanc1  n=200 mean +0.006 [+0.001, +0.011]
+  k8v4   F       n=200 mean -0.145 [-1.340, +1.040]
+  k8v4   U       n=200 mean +0.245 [-1.140, +1.630]
+  k8v4   P       n=200 mean +0.420 [+0.030, +0.850]
+  k8v4   share   sum(ΔF)/sum(ΔU) -0.592 [-11.500, 1.333]  (resamples dropped, sum ΔU ≤ 0: 3753)
+  k4v8   above1  n=200 mean -0.405 [-0.680, -0.135]
+  k4v8   meanc1  n=200 mean -0.031 [-0.045, -0.016]
+  k4v8   F       n=200 mean +4.720 [+2.980, +6.530]
+  k4v8   U       n=200 mean +9.445 [+7.475, +11.410]
+  k4v8   P       n=200 mean -0.150 [-0.380, +0.100]
+  k4v8   share   sum(ΔF)/sum(ΔU) 0.500 [0.386, 0.594]  (resamples dropped, sum ΔU ≤ 0: 0)
+  kivi4  above1  n=200 mean +0.060 [-0.135, +0.255]
+  kivi4  meanc1  n=200 mean +0.006 [-0.001, +0.014]
+  kivi4  F       n=200 mean +0.100 [-1.120, +1.315]
+  kivi4  U       n=200 mean +0.325 [-1.090, +1.715]
+  kivi4  P       n=200 mean +0.235 [-0.075, +0.560]
+  kivi4  share   sum(ΔF)/sum(ΔU) 0.308 [-4.333, 2.565]  (resamples dropped, sum ΔU ≤ 0: 3236)
+
+pre-registered predictions (E-010):
+  (M1) first step, matched input: k4v8 above1 − none CI < 0 ................ HOLDS
+  (M2) first step: k8v4 and kivi4 above1 − none CI spans 0 .................. FAILS
+  (M3) trajectory: k4v8 fallback steps F − none CI > 0 ...................... HOLDS
+  (M4) k4v8 fallback share of extra unmasking steps, CI lower bound > 0.5 ..... FAILS
+  (M5) k8v4 and kivi4 fallback steps F − none CI spans 0 .................... HOLDS
+
+### E-010 SECONDARY (row-level step deltas; verdict lines below are E-009's, not E-010's)
+input e010-rows-20261020-0529.jsonl sha256 2f05fe863bf06cbf8a29cb5ae33c13ea91c4e27bf9cd8f2ae2d3e74fb068282b; suite filter: gsm8k_mech2000
+rows 800, envValid=false 0; mlxCore 0.31.1 mlx-swift 0.31.6 git d11d294fdd dirty 0
+
+per-arm aggregates: steps fwd tok ms/fwd
+  cache-clean-commit-k1      7642  18472  24371   14.1
+  cache-k8v4-clean-k1        7775  18605  24405   14.4
+  cache-k4v8-clean-k1        9501  20331  24509   16.2
+  cache-kivi4-clean-k1       7754  18584  24385   14.4
+
+paired logical-step deltas vs none:
+  k8v4   n=200 mean +0.665 [-0.850, +2.235]
+  k4v8   n=200 mean +9.295 [+7.260, +11.270]
+Traceback (most recent call last):
+  File "/Users/andrebarlocher/Documents/Swift/NeoDiffusion/paper/scripts/e009_analysis.py", line 85, in <module>
+    sys.exit(main())
+             ~~~~^^
+  File "/Users/andrebarlocher/Documents/Swift/NeoDiffusion/paper/scripts/e009_analysis.py", line 68, in main
+    res[x] = ci(v); print(f"  {x:6s} {fmt(res[x], len(v))}")
+             ~~^^^
+  File "/Users/andrebarlocher/Documents/Swift/NeoDiffusion/paper/scripts/e009_analysis.py", line 28, in ci
+    m = sorted(statistics.fmean(rng.choices(xs, k=len(xs))) for _ in range(B))
+  File "/Users/andrebarlocher/Documents/Swift/NeoDiffusion/paper/scripts/e009_analysis.py", line 28, in <genexpr>
+    m = sorted(statistics.fmean(rng.choices(xs, k=len(xs))) for _ in range(B))
+               ~~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/opt/homebrew/Cellar/python@3.14/3.14.7/Frameworks/Python.framework/Versions/3.14/lib/python3.14/statistics.py", line 204, in fmean
+    raise StatisticsError('fmean requires at least one data point')
+statistics.StatisticsError: fmean requires at least one data point

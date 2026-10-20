@@ -1,0 +1,21 @@
+input e011-rows-20261020-0529.jsonl sha256 112f07a7ba6d12b954098eaf86217eff3d58f274f2a43feb9640f1b8707437f4; suite filter: gsm8k_qual2000
+rows 800, envValid=false 0; mlxCore 0.31.1 mlx-swift 0.31.6 git d11d294fdd dirty 0
+
+per-arm aggregates: steps fwd tok ms/fwd
+  cache-clean-commit-k1     11813  22638  42242   18.0
+  cache-k8v4-clean-k1       12375  23200  43147   18.6
+  cache-k4v8-clean-k1       21601  32426  54403   23.6
+  cache-kivi4-clean-k1      13182  24007  44378   19.2
+
+paired logical-step deltas vs none:
+  k8v4   n=200 mean +2.810 [-2.595, +8.635]
+  k4v8   n=200 mean +48.940 [+37.320, +61.795]
+  kivi4  n=200 mean +6.845 [+0.730, +13.680]
+
+k4v8 − k8v4: n=200 mean +46.130 [+33.320, +59.475]
+kivi4 − k4v8: n=200 mean -42.095 [-55.380, -30.060]
+
+pre-registered predictions (E-009; meaningful with --suite gsm8k_flash200):
+  (1) k4v8 delta CI > 0 ................................ HOLDS
+  (2) k8v4 delta CI spans 0 ............................ HOLDS
+  (3) k4v8 − k8v4 CI > 0 (Key/Value asymmetry) ......... HOLDS

@@ -1,0 +1,52 @@
+### E-011 PRIMARY
+input e011-rows-20261020-0529.jsonl sha256 112f07a7ba6d12b954098eaf86217eff3d58f274f2a43feb9640f1b8707437f4
+input e011-text-20261020-0529.jsonl sha256 d7ae627aa12e3ab7aca6e999b09f00f96d884d9800cafd283adecc12c1195a65
+suite gsm8k_qual2000; gen 768; valid generations 800; envValid=false 0
+
+truncation (reached gen limit with no EOS):
+  cache-clean-commit-k1      4/200 (2.0%)
+  cache-k8v4-clean-k1        3/200 (1.5%)
+  cache-k4v8-clean-k1       20/200 (10.0%)
+  cache-kivi4-clean-k1       6/200 (3.0%)
+
+accuracy and paired comparison vs none:
+  none   182/200
+  k8v4   180/200  lost  9 gained  7  McNemar p 0.8036  Δacc -0.010 [-0.050, +0.030]
+  k4v8   155/200  lost 32 gained  5  McNemar p 0.0000  Δacc -0.135 [-0.195, -0.080]
+  kivi4  180/200  lost  6 gained  4  McNemar p 0.7539  Δacc -0.010 [-0.040, +0.020]
+
+pre-registered predictions (E-011):
+  (G)  truncation gate: ≤ 10 % of uncompressed-cache generations truncated ............ PASSES
+  (Q1) no KV mode shows a detectable accuracy loss (McNemar p < 0.05, lost > gained) ... FAILS
+       k8v4   detectable loss: no
+       k4v8   detectable loss: YES
+       kivi4  detectable loss: no
+
+### E-011 SECONDARY (row-level step deltas; verdict lines below are E-009's, not E-011's)
+input e011-rows-20261020-0529.jsonl sha256 112f07a7ba6d12b954098eaf86217eff3d58f274f2a43feb9640f1b8707437f4; suite filter: gsm8k_qual2000
+rows 800, envValid=false 0; mlxCore 0.31.1 mlx-swift 0.31.6 git d11d294fdd dirty 0
+
+per-arm aggregates: steps fwd tok ms/fwd
+  cache-clean-commit-k1     11813  22638  42242   18.0
+  cache-k8v4-clean-k1       12375  23200  43147   18.6
+  cache-k4v8-clean-k1       21601  32426  54403   23.6
+  cache-kivi4-clean-k1      13182  24007  44378   19.2
+
+paired logical-step deltas vs none:
+  k8v4   n=200 mean +2.810 [-2.595, +8.635]
+  k4v8   n=200 mean +48.940 [+37.320, +61.795]
+Traceback (most recent call last):
+  File "/Users/andrebarlocher/Documents/Swift/NeoDiffusion/paper/scripts/e009_analysis.py", line 85, in <module>
+    sys.exit(main())
+             ~~~~^^
+  File "/Users/andrebarlocher/Documents/Swift/NeoDiffusion/paper/scripts/e009_analysis.py", line 68, in main
+    res[x] = ci(v); print(f"  {x:6s} {fmt(res[x], len(v))}")
+             ~~^^^
+  File "/Users/andrebarlocher/Documents/Swift/NeoDiffusion/paper/scripts/e009_analysis.py", line 28, in ci
+    m = sorted(statistics.fmean(rng.choices(xs, k=len(xs))) for _ in range(B))
+  File "/Users/andrebarlocher/Documents/Swift/NeoDiffusion/paper/scripts/e009_analysis.py", line 28, in <genexpr>
+    m = sorted(statistics.fmean(rng.choices(xs, k=len(xs))) for _ in range(B))
+               ~~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/opt/homebrew/Cellar/python@3.14/3.14.7/Frameworks/Python.framework/Versions/3.14/lib/python3.14/statistics.py", line 204, in fmean
+    raise StatisticsError('fmean requires at least one data point')
+statistics.StatisticsError: fmean requires at least one data point
