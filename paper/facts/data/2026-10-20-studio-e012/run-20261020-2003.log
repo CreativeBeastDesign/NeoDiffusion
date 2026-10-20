@@ -1,0 +1,18 @@
+20:03:55 === E-012 start | host Mac14,14 | git 765bdef
+20:03:55 registered: paper/experiments/E-012.md @ 765bdef
+20:04:10 e012-c1: --batched-prefill 1 | free 146231 MB
+20:22:59 e012-c1: rc=0 rows 301 text 300
+20:22:59 e012-c16: --batched-prefill 16 | free 137119 MB
+20:34:40 e012-c16: rc=0 rows 301 text 300
+20:34:40 e012-c128: --batched-prefill 128 | free 145457 MB
+20:46:02 e012-c128: rc=0 rows 301 text 300
+off: 294 valid generations, envValid=false 0, effective batchedPrefillBlocks [1]
+c16: 294 valid generations, envValid=false 0, effective batchedPrefillBlocks [16]
+c128: 294 valid generations, envValid=false 0, effective batchedPrefillBlocks [128]
+  (S1) c128 prefill ratio at gsm8k_bp3000, CI upper < 0.5 .................. HOLDS
+  (S2) c16 prefill ratio at gsm8k_bp3000, CI upper < 1 .................... HOLDS
+  (S3) c128 s/gen ratio at gsm8k_bp3000, CI upper < 1 ..................... HOLDS
+  (T1) no systematic step change: Δsteps CI spans 0 for every suite × setting . HOLDS
+  (G)  truncation gate (off, pooled) ≤ 10 % .................................. PASSES
+  (Q1) no detectable accuracy loss (pooled McNemar p < 0.05 with lost > gained) . HOLDS
+20:46:03 === done. Report: /Users/andrebarlocher/Documents/Swift/NeoDiffusion/scratch/2026-10-20/studio-e012/e012-REPORT-20261020-2003.txt

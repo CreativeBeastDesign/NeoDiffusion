@@ -1,0 +1,40 @@
+input e012-c1-rows-20261020-2003.jsonl sha256 8b81b8b8af78fd186aacc291cfdacec71915e94b6cdeac4d8be9adea87ea9585
+input e012-c1-text-20261020-2003.jsonl sha256 38fb93dbae6e38347013ca2cecc5883c1b0cf09283eafe0e45450128c31a05b3
+input e012-c16-rows-20261020-2003.jsonl sha256 37c35560b5ff634556bf382b2dc793d27e089b58ec2fcc491409541cfdd61246
+input e012-c16-text-20261020-2003.jsonl sha256 621609c8d5743c8c5039c018efa7707e2e8e761e547c5088b0b91b481ec3ba37
+input e012-c128-rows-20261020-2003.jsonl sha256 1ad224145035f9eb11a03d590280bd0ef7f172d868703d2812e044f5f6fbf98b
+input e012-c128-text-20261020-2003.jsonl sha256 3b4c189d58d0815cf44db86df8a10e476a7015c19dfa6f389c814afc603f997a
+off: 294 valid generations, envValid=false 0, effective batchedPrefillBlocks [1]
+c16: 294 valid generations, envValid=false 0, effective batchedPrefillBlocks [16]
+c128: 294 valid generations, envValid=false 0, effective batchedPrefillBlocks [128]
+
+== gsm8k_bp0 (n=98): off prefill mean 0.096 s, s/gen 2.173, truncated 0
+  c16  prefill ratio 0.678 [0.657, 0.700] (n=98)  s/gen ratio 0.992 [0.946, 1.043]
+       text identical 7/98; Δsteps -0.449 [-5.204, +4.745]; acc 90 vs off 91 (lost 4, gained 3)
+  c128 prefill ratio 0.670 [0.650, 0.690] (n=98)  s/gen ratio 1.004 [0.957, 1.056]
+       text identical 9/98; Δsteps +0.051 [-4.816, +5.367]; acc 91 vs off 91 (lost 3, gained 3)
+
+== gsm8k_bp2000 (n=98): off prefill mean 1.929 s, s/gen 3.602, truncated 0
+  c16  prefill ratio 0.238 [0.238, 0.239] (n=98)  s/gen ratio 0.578 [0.557, 0.599]
+       text identical 28/98; Δsteps +0.316 [-1.653, +2.337]; acc 94 vs off 93 (lost 0, gained 1)
+  c128 prefill ratio 0.165 [0.165, 0.166] (n=98)  s/gen ratio 0.545 [0.524, 0.568]
+       text identical 22/98; Δsteps +0.673 [-2.265, +3.367]; acc 92 vs off 93 (lost 2, gained 1)
+
+== gsm8k_bp3000 (n=98): off prefill mean 3.338 s, s/gen 5.212, truncated 1
+  c16  prefill ratio 0.226 [0.226, 0.227] (n=98)  s/gen ratio 0.466 [0.446, 0.487]
+       text identical 22/98; Δsteps -3.878 [-11.133, +1.439]; acc 93 vs off 90 (lost 2, gained 5)
+  c128 prefill ratio 0.157 [0.157, 0.157] (n=98)  s/gen ratio 0.418 [0.401, 0.437]
+       text identical 22/98; Δsteps -4.041 [-10.020, +0.541]; acc 90 vs off 90 (lost 5, gained 5)
+
+== pooled over suites
+  off truncated 1/294 (0.3%); accuracy off 274/294
+  c16  accuracy 277/294  lost 6 gained 9  McNemar p 0.6072
+  c128 accuracy 273/294  lost 10 gained 9  McNemar p 1.0000
+
+pre-registered predictions (E-012):
+  (S1) c128 prefill ratio at gsm8k_bp3000, CI upper < 0.5 .................. HOLDS
+  (S2) c16 prefill ratio at gsm8k_bp3000, CI upper < 1 .................... HOLDS
+  (S3) c128 s/gen ratio at gsm8k_bp3000, CI upper < 1 ..................... HOLDS
+  (T1) no systematic step change: Δsteps CI spans 0 for every suite × setting . HOLDS
+  (G)  truncation gate (off, pooled) ≤ 10 % .................................. PASSES
+  (Q1) no detectable accuracy loss (pooled McNemar p < 0.05 with lost > gained) . HOLDS
