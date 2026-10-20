@@ -1,0 +1,56 @@
+input e013-4bit-r1-rows-20261020-2128.jsonl sha256 ca1ec6a280af83c8cc880fa70983ad1662b84755aadd0cdffc9651384e61c562
+input e013-4bit-r1-text-20261020-2128.jsonl sha256 6133502974ae6aa3c8d9f7e82c80f91c9b66691cdb25f479c00e083ef1451d09
+input e013-8bit-r1-rows-20261020-2128.jsonl sha256 f469fd4574787d829ee1f2110931012ca35385c2db000994ee0daf5ebf5fa309
+input e013-8bit-r1-text-20261020-2128.jsonl sha256 3be34e67eba66d4c9d56975b6697ba0abd3f01ca6a4643b9f864549d928c53b8
+input e013-4bit-r2-rows-20261020-2128.jsonl sha256 17f6f238877ce29316478835eeb5fe3807fb9458a860a35f219c635a0a857778
+input e013-4bit-r2-text-20261020-2128.jsonl sha256 8515a710d3d6a3433d711cca0b8f2eaf306ed7e75ef07277b22f0e0af6084c7d
+input e013-8bit-r2-rows-20261020-2128.jsonl sha256 5387d07659fa3fe6dab8f5c6419257a135450bcdbadf9cb2d90715209e83d914
+input e013-8bit-r2-text-20261020-2128.jsonl sha256 51c03c24e31a48ad0cad0444d0fb8f0a4b83af254f43850ac7cdd145248f9101
+4r1: 412 valid rows, envValid=false 0
+8r1: 412 valid rows, envValid=false 0
+4r2: 412 valid rows, envValid=false 0
+8r2: 412 valid rows, envValid=false 0
+
+== chat (n=4)
+  4-bit determinism r1 vs r2: 4/4 texts identical
+  8-bit determinism r1 vs r2: 4/4 texts identical
+  4-bit: tok/s 62.23  steps/token 0.4934  ms/fwd 29.6  peak 9.57 GB
+  8-bit: tok/s 61.05  steps/token 0.4964  ms/fwd 30.4  peak 16.79 GB
+  8/4 tok/s ratio 0.981 [0.881, 1.083]   8/4 steps-per-token ratio 1.006 [0.911, 1.117]
+
+== code (n=4)
+  4-bit determinism r1 vs r2: 4/4 texts identical
+  8-bit determinism r1 vs r2: 4/4 texts identical
+  4-bit: tok/s 110.73  steps/token 0.2711  ms/fwd 30.4  peak 9.59 GB
+  8-bit: tok/s 127.26  steps/token 0.2321  ms/fwd 30.9  peak 16.80 GB
+  8/4 tok/s ratio 1.149 [1.033, 1.238]   8/4 steps-per-token ratio 0.856 [0.788, 0.957]
+
+== gsm8k_tr0 (n=200)
+  4-bit determinism r1 vs r2: 200/200 texts identical
+  8-bit determinism r1 vs r2: 200/200 texts identical
+  4-bit: tok/s 113.11  steps/token 0.2593  ms/fwd 29.2  peak 9.60 GB
+  8-bit: tok/s 121.28  steps/token 0.2355  ms/fwd 29.9  peak 16.82 GB
+  8/4 tok/s ratio 1.072 [1.024, 1.128]   8/4 steps-per-token ratio 0.908 [0.861, 0.953]
+  accuracy 4-bit 180/200  8-bit 182/200  (8 vs 4: lost 4, gained 6, McNemar p 0.7539); 4-bit truncated 4
+
+== gsm8k_tr2000 (n=200)
+  4-bit determinism r1 vs r2: 200/200 texts identical
+  8-bit determinism r1 vs r2: 200/200 texts identical
+  4-bit: tok/s 49.93  steps/token 0.2580  ms/fwd 16.5  peak 9.67 GB
+  8-bit: tok/s 49.15  steps/token 0.2495  ms/fwd 16.8  peak 16.88 GB
+  8/4 tok/s ratio 0.984 [0.958, 1.012]   8/4 steps-per-token ratio 0.967 [0.926, 1.011]
+  accuracy 4-bit 185/200  8-bit 184/200  (8 vs 4: lost 6, gained 5, McNemar p 1.0000); 4-bit truncated 3
+
+== reasoning (n=4)
+  4-bit determinism r1 vs r2: 4/4 texts identical
+  8-bit determinism r1 vs r2: 4/4 texts identical
+  4-bit: tok/s 90.44  steps/token 0.3336  ms/fwd 30.2  peak 9.58 GB
+  8-bit: tok/s 89.84  steps/token 0.3299  ms/fwd 31.1  peak 16.81 GB
+  8/4 tok/s ratio 0.993 [0.917, 1.111]   8/4 steps-per-token ratio 0.989 [0.879, 1.074]
+
+pooled gsm8k_tr*: 8 vs 4 lost 10 gained 11, McNemar p 1.0000
+
+pre-registered predictions (E-013):
+  (W1) 8-bit tok/s ratio vs 4-bit CI > 1 on gsm8k_tr0 AND gsm8k_tr2000 ......... FAILS
+  (W2) 8-bit steps-per-token ratio CI < 1 on both ................................. FAILS
+  (W3) no detectable 8-bit accuracy loss vs 4-bit (pooled McNemar) ................ HOLDS

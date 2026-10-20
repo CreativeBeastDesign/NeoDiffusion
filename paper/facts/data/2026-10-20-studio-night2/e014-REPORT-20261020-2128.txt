@@ -1,0 +1,27 @@
+input e014-c1-rows-20261020-2128.jsonl sha256 d0a9bf10557dbd25d2dccc7409c4bf060df28018eb323a50a25e3f4f7f868e0b
+  envValid=false 0
+input e014-c4-rows-20261020-2128.jsonl sha256 979eaee497936f22fc2cd3b8ec337ac403c718bc7b34360b1223695052f9f94a
+  envValid=false 0
+input e014-c8-rows-20261020-2128.jsonl sha256 5663fe34d0fbe96bc8adfdc95b1336d51eb1448327e20695ab3d7ac85421d26a
+  envValid=false 0
+input e014-c16-rows-20261020-2128.jsonl sha256 5c8c53c959b4c64f87b959c3911c4441b2f59a9ec47741ccf886c6768501a224
+  envValid=false 0
+input e014-c32-rows-20261020-2128.jsonl sha256 747483968893d12d0e2f476c66a4edebb5113d8db857a0dd08a55fe5795c6e11
+  envValid=false 0
+input e014-c64-rows-20261020-2128.jsonl sha256 4bca43de932bdc45290682de2ed0ecc53acade4344c3a695580ed3cdad696ccc
+  envValid=false 0
+input e014-c128-rows-20261020-2128.jsonl sha256 e43f50ce7c452bd5295764c8b09d9c647b0c0c6b4b9c9d9bfc0fae4e9f41e4f7
+  envValid=false 0
+
+chunk  n   mean prefill s  mean prefill fwd  geo-mean ratio vs chunk 1 [95 % CI]
+     1 100      3.375          89.44        1.000 [1.000, 1.000]
+     4 100      1.588          22.96        0.470 [0.470, 0.471]
+     8 100      1.031          11.96        0.306 [0.305, 0.306]
+    16 100      0.745           6.00        0.221 [0.220, 0.221]
+    32 100      0.603           3.00        0.179 [0.178, 0.179]
+    64 100      0.565           2.00        0.167 [0.167, 0.167]
+   128 100      0.519           1.00        0.154 [0.154, 0.154]
+
+fastest chunk: 128 (ratio 0.154)
+pre-registered prediction (E-014):
+  (C1) the largest chunk (128) is within 5 % of the fastest chunk's ratio ...... HOLDS

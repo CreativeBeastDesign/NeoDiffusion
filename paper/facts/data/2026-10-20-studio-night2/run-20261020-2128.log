@@ -1,0 +1,42 @@
+21:28:47 === overnight-2 start | host Mac14,14 | git 0c94dfb
+21:28:47 registered: paper/experiments/E-013.md @ 0c94dfb
+21:28:47 registered: paper/experiments/E-014.md @ 0c94dfb
+21:39:31 e014-c1 | free 64938 MB
+21:46:23 e014-c1: rc=0 rows 101
+21:46:23 e014-c4 | free 57569 MB
+21:50:12 e014-c4: rc=0 rows 101
+21:50:12 e014-c8 | free 56852 MB
+21:53:03 e014-c8: rc=0 rows 101
+21:53:03 e014-c16 | free 56130 MB
+21:55:24 e014-c16: rc=0 rows 101
+21:55:24 e014-c32 | free 54315 MB
+21:57:32 e014-c32: rc=0 rows 101
+21:57:32 e014-c64 | free 56686 MB
+21:59:37 e014-c64: rc=0 rows 101
+21:59:37 e014-c128 | free 55818 MB
+22:01:35 e014-c128: rc=0 rows 101
+  envValid=false 0
+  envValid=false 0
+  envValid=false 0
+  envValid=false 0
+  envValid=false 0
+  envValid=false 0
+  envValid=false 0
+fastest chunk: 128 (ratio 0.154)
+  (C1) the largest chunk (128) is within 5 % of the fastest chunk's ratio ...... HOLDS
+22:01:36 e013-4bit-r1 | free 64979 MB
+22:22:41 e013-4bit-r1: rc=0 rows 413
+22:22:41 e013-8bit-r1 | free 56359 MB
+22:43:21 e013-8bit-r1: rc=0 rows 413
+22:43:21 e013-4bit-r2 | free 49679 MB
+23:04:20 e013-4bit-r2: rc=0 rows 413
+23:04:20 e013-8bit-r2 | free 56681 MB
+23:25:00 e013-8bit-r2: rc=0 rows 413
+4r1: 412 valid rows, envValid=false 0
+8r1: 412 valid rows, envValid=false 0
+4r2: 412 valid rows, envValid=false 0
+8r2: 412 valid rows, envValid=false 0
+  (W1) 8-bit tok/s ratio vs 4-bit CI > 1 on gsm8k_tr0 AND gsm8k_tr2000 ......... FAILS
+  (W2) 8-bit steps-per-token ratio CI < 1 on both ................................. FAILS
+  (W3) no detectable 8-bit accuracy loss vs 4-bit (pooled McNemar) ................ HOLDS
+23:25:02 === done. Reports in /Users/andrebarlocher/Documents/Swift/NeoDiffusion/scratch/2026-10-20/studio-night2
