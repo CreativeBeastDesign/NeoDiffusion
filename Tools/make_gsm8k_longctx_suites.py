@@ -47,6 +47,7 @@ def main() -> int:
     ap.add_argument("--count", type=int, required=True)
     ap.add_argument("--budgets", required=True)
     ap.add_argument("--tokenizer", required=True)
+    ap.add_argument("--name-prefix", default="gsm8k_ctx", help="suite name prefix (default gsm8k_ctx)")
     a = ap.parse_args()
     tok = Tokenizer.from_file(a.tokenizer)
     n = lambda s: len(tok.encode(s, add_special_tokens=False).ids)
@@ -64,12 +65,12 @@ def main() -> int:
                 prefix, k = cand, k + 1
         prompts = [{"id": f"gsm8k-{i:03d}", "user": INSTR + prefix + tails[i], "answer": answers[i]} for i in rows]
         lens = [n(p["user"]) for p in prompts]
-        out = os.path.join(SUITES, f"gsm8k_ctx{b}.json")
+        out = os.path.join(SUITES, f"{a.name_prefix}{b}.json")
         if os.path.exists(out):
             print(f"ABORT: {out} exists"); return 1
         with open(out, "w") as f:
-            json.dump({"name": f"gsm8k_ctx{b}", "prompts": prompts}, f, indent=2)
-        print(f"gsm8k_ctx{b}: {k} shots, user tokens min {min(lens)} median {statistics.median(lens)} max {max(lens)} -> {out}")
+            json.dump({"name": f"{a.name_prefix}{b}", "prompts": prompts}, f, indent=2)
+        print(f"{a.name_prefix}{b}: {k} shots, user tokens min {min(lens)} median {statistics.median(lens)} max {max(lens)} -> {out}")
     return 0
 
 
