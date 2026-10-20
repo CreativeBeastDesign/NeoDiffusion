@@ -48,13 +48,18 @@ def main() -> int:
     ap.add_argument("--budgets", required=True)
     ap.add_argument("--tokenizer", required=True)
     ap.add_argument("--name-prefix", default="gsm8k_ctx", help="suite name prefix (default gsm8k_ctx)")
+    ap.add_argument("--question-split", choices=["test", "train"], default="test",
+                    help="split the QUESTIONS come from (shots are always train rows 0, 1, 2, ...); with train, rows < 20 are refused")
     a = ap.parse_args()
     tok = Tokenizer.from_file(a.tokenizer)
     n = lambda s: len(tok.encode(s, add_special_tokens=False).ids)
     test, train = fetch("test.jsonl"), fetch("train.jsonl")
     rows = list(range(a.test_start, a.test_start + a.count))
-    tails = {i: f"Question: {test[i]['question'].strip()}\nAnswer:" for i in rows}
-    answers = {i: (re.search(r"####\s*(-?\d+)", test[i]["answer"]) or [None, ""])[1] for i in rows}
+    qs = test if a.question_split == "test" else train
+    if a.question_split == "train" and a.test_start < 20:
+        print("ABORT: train-split questions must start at row >= 20 (rows 0-19 are the shot pool)"); return 1
+    tails = {i: f"Question: {qs[i]['question'].strip()}\nAnswer:" for i in rows}
+    answers = {i: (re.search(r"####\s*(-?\d+)", qs[i]["answer"]) or [None, ""])[1] for i in rows}
     for b in map(int, a.budgets.split(",")):
         k, prefix = 0, ""
         if b > 0:
@@ -63,7 +68,7 @@ def main() -> int:
                 if max(n(INSTR + cand + tails[i]) for i in rows) > b:
                     break
                 prefix, k = cand, k + 1
-        prompts = [{"id": f"gsm8k-{i:03d}", "user": INSTR + prefix + tails[i], "answer": answers[i]} for i in rows]
+        prompts = [{"id": (f"gsm8k-{i:03d}" if a.question_split == "test" else f"gsm8ktr-{i:04d}"), "user": INSTR + prefix + tails[i], "answer": answers[i]} for i in rows]
         lens = [n(p["user"]) for p in prompts]
         out = os.path.join(SUITES, f"{a.name_prefix}{b}.json")
         if os.path.exists(out):
