@@ -264,6 +264,12 @@ public final class DiffusionEngine {
         public var stepCapHits: Int = 0
         public var effectiveMaxStepsPerBlock: Int = 0
         public var effectiveSuppressMaskToken: Bool = false
+
+        // MARK: Batched prefill (E-012) — effective echo
+        /// Prefill chunk size actually applied (1 = per-block prefill, the default).
+        public var effectiveBatchedPrefillBlocks: Int = 1
+        /// Capture forwards run during prefill this call (excludes session-reused blocks).
+        public var prefillForwards: Int = 0
     }
 
     /// Mutable stats shared between the cached entry point's closures and `run` (the capture
@@ -281,6 +287,8 @@ public final class DiffusionEngine {
         var selectedBreakStepInBatch: Int? = nil
         /// Session prefix-cache reuse actually applied this call (exp-5B echo).
         var sessionReusedTokens: Int = 0
+        /// Prefill capture forwards actually run (E-012 echo).
+        var prefillForwards: Int = 0
     }
 
     /// Signature of an injected forward: given the current window ids `[1, W]` and the count of

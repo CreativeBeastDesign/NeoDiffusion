@@ -181,9 +181,45 @@ extension DiffusionEngine {
         // Blocks [0, reusedTokens/B) are already committed from the session.
         let prefillStart = Date()
         let prefillBlocks = prompt.count / B
-        for b in (reusedTokens / B) ..< prefillBlocks {
-            let ids = MLXArray(prompt[b * B ..< (b + 1) * B].map { Int32($0) }).reshaped(1, B)
-            captureAndCommit(ids, startPos: b * B)
+        let chunkBlocks = max(1, params.batchedPrefillBlocks)
+        if chunkBlocks == 1 {
+            for b in (reusedTokens / B) ..< prefillBlocks {
+                let ids = MLXArray(prompt[b * B ..< (b + 1) * B].map { Int32($0) }).reshaped(1, B)
+                captureAndCommit(ids, startPos: b * B)
+                stats.prefillForwards += 1
+            }
+        } else {
+            // Batched prefill (E-012, default off): one forward per chunk of up to `chunkBlocks`
+            // prompt blocks under the block-causal active-window mask (committed columns all
+            // allowed; strict block-causal inside the chunk — the WP-1b MultiBD mask), then the
+            // chunk's pending K/V is committed one block at a time so quantized modes append
+            // exactly the per-block slabs the unbatched path appends. Logits are never evaluated.
+            var b = reusedTokens / B
+            while b < prefillBlocks {
+                let n = min(chunkBlocks, prefillBlocks - b)
+                let ids = MLXArray(prompt[b * B ..< (b + n) * B].map { Int32($0) }).reshaped(1, n * B)
+                let positionIds = MLXArray(Int32(b * B) ..< Int32((b + n) * B)).expandedDimensions(axis: 0)
+                let mask: MLXArray? = n > 1
+                    ? BlockDiffusionMask.activeWindowMask(
+                        prefixLen: cache.committedLength, activeLen: n * B, blockLength: B)
+                    : nil
+                _ = model(ids, positionIds: positionIds, caches: cache.layers, mask: mask)
+                let chunkKV = cache.layers.map { ($0.pendingKeys!, $0.pendingValues!) }
+                for j in 0 ..< n {
+                    for (layer, kv) in zip(cache.layers, chunkKV) {
+                        layer.pendingKeys = kv.0[0..., 0..., (j * B) ..< ((j + 1) * B), 0...]
+                        layer.pendingValues = kv.1[0..., 0..., (j * B) ..< ((j + 1) * B), 0...]
+                    }
+                    cache.commitBlock()
+                }
+                stats.extraForwards += 1
+                stats.prefillForwards += 1
+                if instrument {
+                    for layer in cache.layers { layer.evalStorage() }
+                }
+                updateCacheTelemetry()
+                b += n
+            }
         }
         stats.prefillSeconds = Date().timeIntervalSince(prefillStart)
         updateCacheTelemetry()

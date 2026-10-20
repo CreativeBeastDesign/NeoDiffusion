@@ -412,6 +412,9 @@ struct LLaDARunResult: Codable {
     var stepCapHits: Int = 0
     var effectiveMaxStepsPerBlock: Int = 0
     var sessionReusedTokens: Int = 0
+    /// E-012: effective prefill chunk size and prefill capture forwards run (engine echo).
+    var batchedPrefillBlocks: Int = 1
+    var prefillForwards: Int = 0
 }
 
 /// What produced this row. See `LLaDARunResult.toolchain`.
@@ -596,6 +599,8 @@ func runLLaDABench() async throws {
     // benchmark against τ_M2T=0.95-style decoding; the Q-mode default is 0.7).
     let thresholdMaskOverride = argValue("--threshold-mask").flatMap(Float.init)
     let thresholdEditOverride = argValue("--threshold-edit").flatMap(Float.init)
+    // E-012 batched prefill: prompt blocks per prefill forward (1 = off, the engine default).
+    let batchedPrefillBlocks = max(1, Int(argValue("--batched-prefill") ?? "1") ?? 1)
 
     // JOT token-level early stopping
     let jotEnabled = hasFlag("--jot")
@@ -1207,6 +1212,7 @@ func runLLaDABench() async throws {
         // Threshold overrides
         if let t = thresholdMaskOverride { p.threshold = t }
         if let t = thresholdEditOverride { p.editingThreshold = t }
+        p.batchedPrefillBlocks = batchedPrefillBlocks
         // Per-arm overrides last: an arm always wins over a process-global CLI flag. This is what
         // lets several arms be interleaved in ONE process (see LLaDAArm.overrides for why that
         // matters — cross-process drift is ±6–10%, within-process CV ~0.33%).
@@ -1516,6 +1522,8 @@ func runLLaDABench() async throws {
         result.stepCapHits = output.metrics.stepCapHits
         result.effectiveMaxStepsPerBlock = output.metrics.effectiveMaxStepsPerBlock
         result.sessionReusedTokens = output.metrics.sessionReusedTokens
+        result.batchedPrefillBlocks = output.metrics.effectiveBatchedPrefillBlocks
+        result.prefillForwards = output.metrics.prefillForwards
         result.schedule = currentSchedule
         result.scheduleIndex = scheduleCounter
         scheduleCounter += 1

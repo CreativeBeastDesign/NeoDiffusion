@@ -157,6 +157,17 @@ public struct GenerationParams: Sendable, Equatable {
     public var dualCachingEnabled: Bool
     /// KV Cache Quantization mode for Tier-1 Prefix storage (.none, .fp8, .k8v4, .fp4).
     public var kvQuantization: KVCacheQuantization
+    /// Batched prefill (E-012, 2026-10-20; default **1 = off**): prompt blocks are captured in
+    /// chunks of up to this many blocks per forward, under the block-causal
+    /// ``BlockDiffusionMask/activeWindowMask(prefixLen:activeLen:blockLength:dtype:)``, instead of
+    /// one 32-token capture forward per block. Each chunk's K/V is then committed block by block,
+    /// so every KV-quantization mode sees the same per-block appends as the unbatched path.
+    /// Mathematically identical to per-block prefill (each prompt block attends exactly the
+    /// committed prefix + itself + earlier chunk blocks); NOT bitwise identical (different matmul
+    /// tile shapes, ~1e-5-class), and threshold decoding is trajectory-sensitive to that class of
+    /// perturbation — so it changes outputs and needs its own quality gate before any default.
+    /// `[Sourced: CLAUDE.md "Load-bearing corrections" (3)]` for the sensitivity.
+    public var batchedPrefillBlocks: Int = 1
     /// Whether to use the pre-allocated memory pool for prefix KV.
     public var kvPoolEnabled: Bool
     /// Initial capacity for the KV pool in tokens.

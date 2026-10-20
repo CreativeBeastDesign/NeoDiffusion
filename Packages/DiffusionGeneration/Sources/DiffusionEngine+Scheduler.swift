@@ -431,7 +431,9 @@ extension DiffusionEngine {
                 sessionReusedTokens: stats?.sessionReusedTokens ?? 0,
                 stepCapHits: stepCapHits,
                 effectiveMaxStepsPerBlock: params.effectiveMaxStepsPerBlock,
-                effectiveSuppressMaskToken: params.suppressMaskToken),
+                effectiveSuppressMaskToken: params.suppressMaskToken,
+                effectiveBatchedPrefillBlocks: max(1, params.batchedPrefillBlocks),
+                prefillForwards: stats?.prefillForwards ?? 0),
             trajectorySequences: params.temporalVotingEnabled ? trajectorySequences : nil)
     }
 }
